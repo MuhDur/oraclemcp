@@ -3768,6 +3768,911 @@ pub type oraclemcp_guard::levels::SessionLevelState::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::levels::SessionLevelState where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::levels::SessionLevelState where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::levels::SessionLevelState::vzip(self) -> V
+pub mod oraclemcp_guard::mutation_closure
+pub enum oraclemcp_guard::mutation_closure::MutationCatalogSource
+pub oraclemcp_guard::mutation_closure::MutationCatalogSource::FgaPolicies
+pub oraclemcp_guard::mutation_closure::MutationCatalogSource::Identity
+pub oraclemcp_guard::mutation_closure::MutationCatalogSource::IncomingForeignKeys
+pub oraclemcp_guard::mutation_closure::MutationCatalogSource::IndexExpressions
+pub oraclemcp_guard::mutation_closure::MutationCatalogSource::Indexes
+pub oraclemcp_guard::mutation_closure::MutationCatalogSource::MaterializedViewLogs
+pub oraclemcp_guard::mutation_closure::MutationCatalogSource::SecurityPolicies
+pub oraclemcp_guard::mutation_closure::MutationCatalogSource::TriggerColumns
+pub oraclemcp_guard::mutation_closure::MutationCatalogSource::Triggers
+pub oraclemcp_guard::mutation_closure::MutationCatalogSource::VirtualColumns
+pub oraclemcp_guard::mutation_closure::MutationCatalogSource::VpdPolicies
+impl oraclemcp_guard::mutation_closure::MutationCatalogSource
+pub const oraclemcp_guard::mutation_closure::MutationCatalogSource::ALL: [Self; 11]
+impl core::clone::Clone for oraclemcp_guard::mutation_closure::MutationCatalogSource
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogSource::clone(&self) -> oraclemcp_guard::mutation_closure::MutationCatalogSource
+impl core::cmp::Eq for oraclemcp_guard::mutation_closure::MutationCatalogSource
+impl core::cmp::Ord for oraclemcp_guard::mutation_closure::MutationCatalogSource
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogSource::cmp(&self, &oraclemcp_guard::mutation_closure::MutationCatalogSource) -> core::cmp::Ordering
+impl core::cmp::PartialEq for oraclemcp_guard::mutation_closure::MutationCatalogSource
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogSource::eq(&self, &oraclemcp_guard::mutation_closure::MutationCatalogSource) -> bool
+impl core::cmp::PartialOrd for oraclemcp_guard::mutation_closure::MutationCatalogSource
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogSource::partial_cmp(&self, &oraclemcp_guard::mutation_closure::MutationCatalogSource) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for oraclemcp_guard::mutation_closure::MutationCatalogSource
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::mutation_closure::MutationCatalogSource
+impl core::marker::StructuralPartialEq for oraclemcp_guard::mutation_closure::MutationCatalogSource
+impl serde_core::ser::Serialize for oraclemcp_guard::mutation_closure::MutationCatalogSource
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogSource::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::mutation_closure::MutationCatalogSource
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogSource::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::mutation_closure::MutationCatalogSource
+impl core::marker::Send for oraclemcp_guard::mutation_closure::MutationCatalogSource
+impl core::marker::Sync for oraclemcp_guard::mutation_closure::MutationCatalogSource
+impl core::marker::Unpin for oraclemcp_guard::mutation_closure::MutationCatalogSource
+impl core::marker::UnsafeUnpin for oraclemcp_guard::mutation_closure::MutationCatalogSource
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::mutation_closure::MutationCatalogSource
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::mutation_closure::MutationCatalogSource
+impl<Q, K> equivalent::Comparable<K> for oraclemcp_guard::mutation_closure::MutationCatalogSource where Q: core::cmp::Ord + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogSource::compare(&self, &K) -> core::cmp::Ordering
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::mutation_closure::MutationCatalogSource where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogSource::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::mutation_closure::MutationCatalogSource where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::mutation_closure::MutationCatalogSource where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::mutation_closure::MutationCatalogSource where U: core::convert::From<T>
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogSource::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::mutation_closure::MutationCatalogSource where U: core::convert::Into<T>
+pub type oraclemcp_guard::mutation_closure::MutationCatalogSource::Error = core::convert::Infallible
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogSource::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::mutation_closure::MutationCatalogSource where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::mutation_closure::MutationCatalogSource::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogSource::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::mutation_closure::MutationCatalogSource where T: core::clone::Clone
+pub type oraclemcp_guard::mutation_closure::MutationCatalogSource::Owned = T
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogSource::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogSource::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::mutation_closure::MutationCatalogSource
+impl<T> core::any::Any for oraclemcp_guard::mutation_closure::MutationCatalogSource where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogSource::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::mutation_closure::MutationCatalogSource where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogSource::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::mutation_closure::MutationCatalogSource where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogSource::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::mutation_closure::MutationCatalogSource where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::mutation_closure::MutationCatalogSource::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::mutation_closure::MutationCatalogSource
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogSource::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::mutation_closure::MutationCatalogSource
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::mutation_closure::MutationCatalogSource where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::mutation_closure::MutationCatalogSource
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::mutation_closure::MutationCatalogSource
+impl<T> typenum::type_operators::Same for oraclemcp_guard::mutation_closure::MutationCatalogSource
+pub type oraclemcp_guard::mutation_closure::MutationCatalogSource::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::mutation_closure::MutationCatalogSource where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::mutation_closure::MutationCatalogSource where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogSource::vzip(self) -> V
+pub enum oraclemcp_guard::mutation_closure::MutationClosureRefusal
+pub oraclemcp_guard::mutation_closure::MutationClosureRefusal::Effect(oraclemcp_guard::purity::EffectRefusal)
+pub oraclemcp_guard::mutation_closure::MutationClosureRefusal::Incomplete
+impl core::clone::Clone for oraclemcp_guard::mutation_closure::MutationClosureRefusal
+pub fn oraclemcp_guard::mutation_closure::MutationClosureRefusal::clone(&self) -> oraclemcp_guard::mutation_closure::MutationClosureRefusal
+impl core::cmp::Eq for oraclemcp_guard::mutation_closure::MutationClosureRefusal
+impl core::cmp::PartialEq for oraclemcp_guard::mutation_closure::MutationClosureRefusal
+pub fn oraclemcp_guard::mutation_closure::MutationClosureRefusal::eq(&self, &oraclemcp_guard::mutation_closure::MutationClosureRefusal) -> bool
+impl core::fmt::Debug for oraclemcp_guard::mutation_closure::MutationClosureRefusal
+pub fn oraclemcp_guard::mutation_closure::MutationClosureRefusal::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::mutation_closure::MutationClosureRefusal
+impl core::marker::StructuralPartialEq for oraclemcp_guard::mutation_closure::MutationClosureRefusal
+impl core::marker::Freeze for oraclemcp_guard::mutation_closure::MutationClosureRefusal
+impl core::marker::Send for oraclemcp_guard::mutation_closure::MutationClosureRefusal
+impl core::marker::Sync for oraclemcp_guard::mutation_closure::MutationClosureRefusal
+impl core::marker::Unpin for oraclemcp_guard::mutation_closure::MutationClosureRefusal
+impl core::marker::UnsafeUnpin for oraclemcp_guard::mutation_closure::MutationClosureRefusal
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::mutation_closure::MutationClosureRefusal
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::mutation_closure::MutationClosureRefusal
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::mutation_closure::MutationClosureRefusal where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationClosureRefusal::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::mutation_closure::MutationClosureRefusal where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::mutation_closure::MutationClosureRefusal where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::mutation_closure::MutationClosureRefusal where U: core::convert::From<T>
+pub fn oraclemcp_guard::mutation_closure::MutationClosureRefusal::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::mutation_closure::MutationClosureRefusal where U: core::convert::Into<T>
+pub type oraclemcp_guard::mutation_closure::MutationClosureRefusal::Error = core::convert::Infallible
+pub fn oraclemcp_guard::mutation_closure::MutationClosureRefusal::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::mutation_closure::MutationClosureRefusal where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::mutation_closure::MutationClosureRefusal::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::mutation_closure::MutationClosureRefusal::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::mutation_closure::MutationClosureRefusal where T: core::clone::Clone
+pub type oraclemcp_guard::mutation_closure::MutationClosureRefusal::Owned = T
+pub fn oraclemcp_guard::mutation_closure::MutationClosureRefusal::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::mutation_closure::MutationClosureRefusal::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::mutation_closure::MutationClosureRefusal
+impl<T> core::any::Any for oraclemcp_guard::mutation_closure::MutationClosureRefusal where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationClosureRefusal::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::mutation_closure::MutationClosureRefusal where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationClosureRefusal::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::mutation_closure::MutationClosureRefusal where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationClosureRefusal::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::mutation_closure::MutationClosureRefusal where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::mutation_closure::MutationClosureRefusal::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::mutation_closure::MutationClosureRefusal
+pub fn oraclemcp_guard::mutation_closure::MutationClosureRefusal::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::mutation_closure::MutationClosureRefusal
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::mutation_closure::MutationClosureRefusal
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::mutation_closure::MutationClosureRefusal
+impl<T> typenum::type_operators::Same for oraclemcp_guard::mutation_closure::MutationClosureRefusal
+pub type oraclemcp_guard::mutation_closure::MutationClosureRefusal::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::mutation_closure::MutationClosureRefusal where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::mutation_closure::MutationClosureRefusal where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::mutation_closure::MutationClosureRefusal::vzip(self) -> V
+pub enum oraclemcp_guard::mutation_closure::MutationColumns
+pub oraclemcp_guard::mutation_closure::MutationColumns::All
+pub oraclemcp_guard::mutation_closure::MutationColumns::Named(alloc::collections::btree::set::BTreeSet<alloc::string::String>)
+impl core::clone::Clone for oraclemcp_guard::mutation_closure::MutationColumns
+pub fn oraclemcp_guard::mutation_closure::MutationColumns::clone(&self) -> oraclemcp_guard::mutation_closure::MutationColumns
+impl core::cmp::Eq for oraclemcp_guard::mutation_closure::MutationColumns
+impl core::cmp::PartialEq for oraclemcp_guard::mutation_closure::MutationColumns
+pub fn oraclemcp_guard::mutation_closure::MutationColumns::eq(&self, &oraclemcp_guard::mutation_closure::MutationColumns) -> bool
+impl core::fmt::Debug for oraclemcp_guard::mutation_closure::MutationColumns
+pub fn oraclemcp_guard::mutation_closure::MutationColumns::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::mutation_closure::MutationColumns
+impl serde_core::ser::Serialize for oraclemcp_guard::mutation_closure::MutationColumns
+pub fn oraclemcp_guard::mutation_closure::MutationColumns::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::mutation_closure::MutationColumns
+pub fn oraclemcp_guard::mutation_closure::MutationColumns::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::mutation_closure::MutationColumns
+impl core::marker::Send for oraclemcp_guard::mutation_closure::MutationColumns
+impl core::marker::Sync for oraclemcp_guard::mutation_closure::MutationColumns
+impl core::marker::Unpin for oraclemcp_guard::mutation_closure::MutationColumns
+impl core::marker::UnsafeUnpin for oraclemcp_guard::mutation_closure::MutationColumns
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::mutation_closure::MutationColumns
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::mutation_closure::MutationColumns
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::mutation_closure::MutationColumns where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationColumns::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::mutation_closure::MutationColumns where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::mutation_closure::MutationColumns where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::mutation_closure::MutationColumns where U: core::convert::From<T>
+pub fn oraclemcp_guard::mutation_closure::MutationColumns::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::mutation_closure::MutationColumns where U: core::convert::Into<T>
+pub type oraclemcp_guard::mutation_closure::MutationColumns::Error = core::convert::Infallible
+pub fn oraclemcp_guard::mutation_closure::MutationColumns::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::mutation_closure::MutationColumns where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::mutation_closure::MutationColumns::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::mutation_closure::MutationColumns::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::mutation_closure::MutationColumns where T: core::clone::Clone
+pub type oraclemcp_guard::mutation_closure::MutationColumns::Owned = T
+pub fn oraclemcp_guard::mutation_closure::MutationColumns::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::mutation_closure::MutationColumns::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::mutation_closure::MutationColumns
+impl<T> core::any::Any for oraclemcp_guard::mutation_closure::MutationColumns where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationColumns::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::mutation_closure::MutationColumns where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationColumns::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::mutation_closure::MutationColumns where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationColumns::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::mutation_closure::MutationColumns where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::mutation_closure::MutationColumns::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::mutation_closure::MutationColumns
+pub fn oraclemcp_guard::mutation_closure::MutationColumns::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::mutation_closure::MutationColumns
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::mutation_closure::MutationColumns where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::mutation_closure::MutationColumns
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::mutation_closure::MutationColumns
+impl<T> typenum::type_operators::Same for oraclemcp_guard::mutation_closure::MutationColumns
+pub type oraclemcp_guard::mutation_closure::MutationColumns::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::mutation_closure::MutationColumns where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::mutation_closure::MutationColumns where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::mutation_closure::MutationColumns::vzip(self) -> V
+pub enum oraclemcp_guard::mutation_closure::MutationComputation
+pub oraclemcp_guard::mutation_closure::MutationComputation::Computed
+pub oraclemcp_guard::mutation_closure::MutationComputation::Unavailable
+pub oraclemcp_guard::mutation_closure::MutationComputation::Unavailable::reason: oraclemcp_guard::mutation_closure::MutationUnavailableReason
+impl core::clone::Clone for oraclemcp_guard::mutation_closure::MutationComputation
+pub fn oraclemcp_guard::mutation_closure::MutationComputation::clone(&self) -> oraclemcp_guard::mutation_closure::MutationComputation
+impl core::cmp::Eq for oraclemcp_guard::mutation_closure::MutationComputation
+impl core::cmp::PartialEq for oraclemcp_guard::mutation_closure::MutationComputation
+pub fn oraclemcp_guard::mutation_closure::MutationComputation::eq(&self, &oraclemcp_guard::mutation_closure::MutationComputation) -> bool
+impl core::fmt::Debug for oraclemcp_guard::mutation_closure::MutationComputation
+pub fn oraclemcp_guard::mutation_closure::MutationComputation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::mutation_closure::MutationComputation
+impl serde_core::ser::Serialize for oraclemcp_guard::mutation_closure::MutationComputation
+pub fn oraclemcp_guard::mutation_closure::MutationComputation::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::mutation_closure::MutationComputation
+pub fn oraclemcp_guard::mutation_closure::MutationComputation::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::mutation_closure::MutationComputation
+impl core::marker::Send for oraclemcp_guard::mutation_closure::MutationComputation
+impl core::marker::Sync for oraclemcp_guard::mutation_closure::MutationComputation
+impl core::marker::Unpin for oraclemcp_guard::mutation_closure::MutationComputation
+impl core::marker::UnsafeUnpin for oraclemcp_guard::mutation_closure::MutationComputation
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::mutation_closure::MutationComputation
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::mutation_closure::MutationComputation
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::mutation_closure::MutationComputation where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationComputation::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::mutation_closure::MutationComputation where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::mutation_closure::MutationComputation where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::mutation_closure::MutationComputation where U: core::convert::From<T>
+pub fn oraclemcp_guard::mutation_closure::MutationComputation::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::mutation_closure::MutationComputation where U: core::convert::Into<T>
+pub type oraclemcp_guard::mutation_closure::MutationComputation::Error = core::convert::Infallible
+pub fn oraclemcp_guard::mutation_closure::MutationComputation::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::mutation_closure::MutationComputation where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::mutation_closure::MutationComputation::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::mutation_closure::MutationComputation::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::mutation_closure::MutationComputation where T: core::clone::Clone
+pub type oraclemcp_guard::mutation_closure::MutationComputation::Owned = T
+pub fn oraclemcp_guard::mutation_closure::MutationComputation::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::mutation_closure::MutationComputation::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::mutation_closure::MutationComputation
+impl<T> core::any::Any for oraclemcp_guard::mutation_closure::MutationComputation where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationComputation::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::mutation_closure::MutationComputation where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationComputation::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::mutation_closure::MutationComputation where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationComputation::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::mutation_closure::MutationComputation where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::mutation_closure::MutationComputation::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::mutation_closure::MutationComputation
+pub fn oraclemcp_guard::mutation_closure::MutationComputation::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::mutation_closure::MutationComputation
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::mutation_closure::MutationComputation where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::mutation_closure::MutationComputation
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::mutation_closure::MutationComputation
+impl<T> typenum::type_operators::Same for oraclemcp_guard::mutation_closure::MutationComputation
+pub type oraclemcp_guard::mutation_closure::MutationComputation::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::mutation_closure::MutationComputation where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::mutation_closure::MutationComputation where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::mutation_closure::MutationComputation::vzip(self) -> V
+pub enum oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+pub oraclemcp_guard::mutation_closure::MutationForeignKeyAction::Cascade
+pub oraclemcp_guard::mutation_closure::MutationForeignKeyAction::NoAction
+pub oraclemcp_guard::mutation_closure::MutationForeignKeyAction::SetNull
+impl core::clone::Clone for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+pub fn oraclemcp_guard::mutation_closure::MutationForeignKeyAction::clone(&self) -> oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+impl core::cmp::Eq for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+impl core::cmp::PartialEq for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+pub fn oraclemcp_guard::mutation_closure::MutationForeignKeyAction::eq(&self, &oraclemcp_guard::mutation_closure::MutationForeignKeyAction) -> bool
+impl core::fmt::Debug for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+pub fn oraclemcp_guard::mutation_closure::MutationForeignKeyAction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+impl core::marker::StructuralPartialEq for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+impl serde_core::ser::Serialize for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+pub fn oraclemcp_guard::mutation_closure::MutationForeignKeyAction::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+pub fn oraclemcp_guard::mutation_closure::MutationForeignKeyAction::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+impl core::marker::Send for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+impl core::marker::Sync for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+impl core::marker::Unpin for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+impl core::marker::UnsafeUnpin for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::mutation_closure::MutationForeignKeyAction where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationForeignKeyAction::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::mutation_closure::MutationForeignKeyAction where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::mutation_closure::MutationForeignKeyAction where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::mutation_closure::MutationForeignKeyAction where U: core::convert::From<T>
+pub fn oraclemcp_guard::mutation_closure::MutationForeignKeyAction::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::mutation_closure::MutationForeignKeyAction where U: core::convert::Into<T>
+pub type oraclemcp_guard::mutation_closure::MutationForeignKeyAction::Error = core::convert::Infallible
+pub fn oraclemcp_guard::mutation_closure::MutationForeignKeyAction::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::mutation_closure::MutationForeignKeyAction where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::mutation_closure::MutationForeignKeyAction::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::mutation_closure::MutationForeignKeyAction::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::mutation_closure::MutationForeignKeyAction where T: core::clone::Clone
+pub type oraclemcp_guard::mutation_closure::MutationForeignKeyAction::Owned = T
+pub fn oraclemcp_guard::mutation_closure::MutationForeignKeyAction::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::mutation_closure::MutationForeignKeyAction::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+impl<T> core::any::Any for oraclemcp_guard::mutation_closure::MutationForeignKeyAction where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationForeignKeyAction::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::mutation_closure::MutationForeignKeyAction where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationForeignKeyAction::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::mutation_closure::MutationForeignKeyAction where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationForeignKeyAction::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::mutation_closure::MutationForeignKeyAction where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::mutation_closure::MutationForeignKeyAction::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+pub fn oraclemcp_guard::mutation_closure::MutationForeignKeyAction::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::mutation_closure::MutationForeignKeyAction where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+impl<T> typenum::type_operators::Same for oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+pub type oraclemcp_guard::mutation_closure::MutationForeignKeyAction::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::mutation_closure::MutationForeignKeyAction where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::mutation_closure::MutationForeignKeyAction where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::mutation_closure::MutationForeignKeyAction::vzip(self) -> V
+pub enum oraclemcp_guard::mutation_closure::MutationMechanism
+pub oraclemcp_guard::mutation_closure::MutationMechanism::ColumnDefaultExpr
+pub oraclemcp_guard::mutation_closure::MutationMechanism::ColumnDefaultExpr::column: alloc::string::String
+pub oraclemcp_guard::mutation_closure::MutationMechanism::DmlTrigger
+pub oraclemcp_guard::mutation_closure::MutationMechanism::DmlTrigger::columns: alloc::collections::btree::set::BTreeSet<alloc::string::String>
+pub oraclemcp_guard::mutation_closure::MutationMechanism::DmlTrigger::compound: bool
+pub oraclemcp_guard::mutation_closure::MutationMechanism::DmlTrigger::level: alloc::string::String
+pub oraclemcp_guard::mutation_closure::MutationMechanism::DmlTrigger::timing: alloc::string::String
+pub oraclemcp_guard::mutation_closure::MutationMechanism::FgaHandler
+pub oraclemcp_guard::mutation_closure::MutationMechanism::ForeignKeyAction
+pub oraclemcp_guard::mutation_closure::MutationMechanism::ForeignKeyAction::child_columns: alloc::collections::btree::set::BTreeSet<alloc::string::String>
+pub oraclemcp_guard::mutation_closure::MutationMechanism::ForeignKeyAction::child_owner: alloc::string::String
+pub oraclemcp_guard::mutation_closure::MutationMechanism::ForeignKeyAction::child_table: alloc::string::String
+pub oraclemcp_guard::mutation_closure::MutationMechanism::ForeignKeyAction::on_delete: oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+pub oraclemcp_guard::mutation_closure::MutationMechanism::FunctionBasedIndex
+pub oraclemcp_guard::mutation_closure::MutationMechanism::FunctionBasedIndex::position: u32
+pub oraclemcp_guard::mutation_closure::MutationMechanism::IndexCallback
+pub oraclemcp_guard::mutation_closure::MutationMechanism::IndexCallback::domain: bool
+pub oraclemcp_guard::mutation_closure::MutationMechanism::MvLog
+pub oraclemcp_guard::mutation_closure::MutationMechanism::MvLog::log_table: alloc::string::String
+pub oraclemcp_guard::mutation_closure::MutationMechanism::OlsPolicy
+pub oraclemcp_guard::mutation_closure::MutationMechanism::RasRealm
+pub oraclemcp_guard::mutation_closure::MutationMechanism::RedactionPolicy
+pub oraclemcp_guard::mutation_closure::MutationMechanism::VirtualColumnExpr
+pub oraclemcp_guard::mutation_closure::MutationMechanism::VirtualColumnExpr::column: alloc::string::String
+pub oraclemcp_guard::mutation_closure::MutationMechanism::VpdPolicy
+pub oraclemcp_guard::mutation_closure::MutationMechanism::VpdPolicy::check_option: bool
+pub oraclemcp_guard::mutation_closure::MutationMechanism::VpdPolicy::statement_types: alloc::collections::btree::set::BTreeSet<oraclemcp_guard::mutation_closure::MutationStatementKind>
+impl core::clone::Clone for oraclemcp_guard::mutation_closure::MutationMechanism
+pub fn oraclemcp_guard::mutation_closure::MutationMechanism::clone(&self) -> oraclemcp_guard::mutation_closure::MutationMechanism
+impl core::cmp::Eq for oraclemcp_guard::mutation_closure::MutationMechanism
+impl core::cmp::PartialEq for oraclemcp_guard::mutation_closure::MutationMechanism
+pub fn oraclemcp_guard::mutation_closure::MutationMechanism::eq(&self, &oraclemcp_guard::mutation_closure::MutationMechanism) -> bool
+impl core::fmt::Debug for oraclemcp_guard::mutation_closure::MutationMechanism
+pub fn oraclemcp_guard::mutation_closure::MutationMechanism::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::mutation_closure::MutationMechanism
+impl serde_core::ser::Serialize for oraclemcp_guard::mutation_closure::MutationMechanism
+pub fn oraclemcp_guard::mutation_closure::MutationMechanism::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::mutation_closure::MutationMechanism
+pub fn oraclemcp_guard::mutation_closure::MutationMechanism::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::mutation_closure::MutationMechanism
+impl core::marker::Send for oraclemcp_guard::mutation_closure::MutationMechanism
+impl core::marker::Sync for oraclemcp_guard::mutation_closure::MutationMechanism
+impl core::marker::Unpin for oraclemcp_guard::mutation_closure::MutationMechanism
+impl core::marker::UnsafeUnpin for oraclemcp_guard::mutation_closure::MutationMechanism
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::mutation_closure::MutationMechanism
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::mutation_closure::MutationMechanism
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::mutation_closure::MutationMechanism where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationMechanism::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::mutation_closure::MutationMechanism where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::mutation_closure::MutationMechanism where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::mutation_closure::MutationMechanism where U: core::convert::From<T>
+pub fn oraclemcp_guard::mutation_closure::MutationMechanism::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::mutation_closure::MutationMechanism where U: core::convert::Into<T>
+pub type oraclemcp_guard::mutation_closure::MutationMechanism::Error = core::convert::Infallible
+pub fn oraclemcp_guard::mutation_closure::MutationMechanism::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::mutation_closure::MutationMechanism where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::mutation_closure::MutationMechanism::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::mutation_closure::MutationMechanism::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::mutation_closure::MutationMechanism where T: core::clone::Clone
+pub type oraclemcp_guard::mutation_closure::MutationMechanism::Owned = T
+pub fn oraclemcp_guard::mutation_closure::MutationMechanism::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::mutation_closure::MutationMechanism::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::mutation_closure::MutationMechanism
+impl<T> core::any::Any for oraclemcp_guard::mutation_closure::MutationMechanism where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationMechanism::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::mutation_closure::MutationMechanism where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationMechanism::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::mutation_closure::MutationMechanism where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationMechanism::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::mutation_closure::MutationMechanism where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::mutation_closure::MutationMechanism::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::mutation_closure::MutationMechanism
+pub fn oraclemcp_guard::mutation_closure::MutationMechanism::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::mutation_closure::MutationMechanism
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::mutation_closure::MutationMechanism where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::mutation_closure::MutationMechanism
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::mutation_closure::MutationMechanism
+impl<T> typenum::type_operators::Same for oraclemcp_guard::mutation_closure::MutationMechanism
+pub type oraclemcp_guard::mutation_closure::MutationMechanism::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::mutation_closure::MutationMechanism where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::mutation_closure::MutationMechanism where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::mutation_closure::MutationMechanism::vzip(self) -> V
+pub enum oraclemcp_guard::mutation_closure::MutationStatementKind
+pub oraclemcp_guard::mutation_closure::MutationStatementKind::Delete
+pub oraclemcp_guard::mutation_closure::MutationStatementKind::Insert
+pub oraclemcp_guard::mutation_closure::MutationStatementKind::Merge
+pub oraclemcp_guard::mutation_closure::MutationStatementKind::Update
+impl core::clone::Clone for oraclemcp_guard::mutation_closure::MutationStatementKind
+pub fn oraclemcp_guard::mutation_closure::MutationStatementKind::clone(&self) -> oraclemcp_guard::mutation_closure::MutationStatementKind
+impl core::cmp::Eq for oraclemcp_guard::mutation_closure::MutationStatementKind
+impl core::cmp::Ord for oraclemcp_guard::mutation_closure::MutationStatementKind
+pub fn oraclemcp_guard::mutation_closure::MutationStatementKind::cmp(&self, &oraclemcp_guard::mutation_closure::MutationStatementKind) -> core::cmp::Ordering
+impl core::cmp::PartialEq for oraclemcp_guard::mutation_closure::MutationStatementKind
+pub fn oraclemcp_guard::mutation_closure::MutationStatementKind::eq(&self, &oraclemcp_guard::mutation_closure::MutationStatementKind) -> bool
+impl core::cmp::PartialOrd for oraclemcp_guard::mutation_closure::MutationStatementKind
+pub fn oraclemcp_guard::mutation_closure::MutationStatementKind::partial_cmp(&self, &oraclemcp_guard::mutation_closure::MutationStatementKind) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for oraclemcp_guard::mutation_closure::MutationStatementKind
+pub fn oraclemcp_guard::mutation_closure::MutationStatementKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::mutation_closure::MutationStatementKind
+impl core::marker::StructuralPartialEq for oraclemcp_guard::mutation_closure::MutationStatementKind
+impl serde_core::ser::Serialize for oraclemcp_guard::mutation_closure::MutationStatementKind
+pub fn oraclemcp_guard::mutation_closure::MutationStatementKind::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::mutation_closure::MutationStatementKind
+pub fn oraclemcp_guard::mutation_closure::MutationStatementKind::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::mutation_closure::MutationStatementKind
+impl core::marker::Send for oraclemcp_guard::mutation_closure::MutationStatementKind
+impl core::marker::Sync for oraclemcp_guard::mutation_closure::MutationStatementKind
+impl core::marker::Unpin for oraclemcp_guard::mutation_closure::MutationStatementKind
+impl core::marker::UnsafeUnpin for oraclemcp_guard::mutation_closure::MutationStatementKind
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::mutation_closure::MutationStatementKind
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::mutation_closure::MutationStatementKind
+impl<Q, K> equivalent::Comparable<K> for oraclemcp_guard::mutation_closure::MutationStatementKind where Q: core::cmp::Ord + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationStatementKind::compare(&self, &K) -> core::cmp::Ordering
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::mutation_closure::MutationStatementKind where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationStatementKind::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::mutation_closure::MutationStatementKind where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::mutation_closure::MutationStatementKind where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::mutation_closure::MutationStatementKind where U: core::convert::From<T>
+pub fn oraclemcp_guard::mutation_closure::MutationStatementKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::mutation_closure::MutationStatementKind where U: core::convert::Into<T>
+pub type oraclemcp_guard::mutation_closure::MutationStatementKind::Error = core::convert::Infallible
+pub fn oraclemcp_guard::mutation_closure::MutationStatementKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::mutation_closure::MutationStatementKind where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::mutation_closure::MutationStatementKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::mutation_closure::MutationStatementKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::mutation_closure::MutationStatementKind where T: core::clone::Clone
+pub type oraclemcp_guard::mutation_closure::MutationStatementKind::Owned = T
+pub fn oraclemcp_guard::mutation_closure::MutationStatementKind::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::mutation_closure::MutationStatementKind::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::mutation_closure::MutationStatementKind
+impl<T> core::any::Any for oraclemcp_guard::mutation_closure::MutationStatementKind where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationStatementKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::mutation_closure::MutationStatementKind where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationStatementKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::mutation_closure::MutationStatementKind where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationStatementKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::mutation_closure::MutationStatementKind where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::mutation_closure::MutationStatementKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::mutation_closure::MutationStatementKind
+pub fn oraclemcp_guard::mutation_closure::MutationStatementKind::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::mutation_closure::MutationStatementKind
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::mutation_closure::MutationStatementKind where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::mutation_closure::MutationStatementKind
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::mutation_closure::MutationStatementKind
+impl<T> typenum::type_operators::Same for oraclemcp_guard::mutation_closure::MutationStatementKind
+pub type oraclemcp_guard::mutation_closure::MutationStatementKind::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::mutation_closure::MutationStatementKind where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::mutation_closure::MutationStatementKind where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::mutation_closure::MutationStatementKind::vzip(self) -> V
+pub enum oraclemcp_guard::mutation_closure::MutationUnavailableReason
+pub oraclemcp_guard::mutation_closure::MutationUnavailableReason::CatalogIncomplete
+pub oraclemcp_guard::mutation_closure::MutationUnavailableReason::CatalogUnreadable
+pub oraclemcp_guard::mutation_closure::MutationUnavailableReason::ClosureCapExhausted
+pub oraclemcp_guard::mutation_closure::MutationUnavailableReason::EffectProofUnavailable
+pub oraclemcp_guard::mutation_closure::MutationUnavailableReason::EffectSourceMismatch
+pub oraclemcp_guard::mutation_closure::MutationUnavailableReason::IdentityMismatch
+pub oraclemcp_guard::mutation_closure::MutationUnavailableReason::InvalidInput
+pub oraclemcp_guard::mutation_closure::MutationUnavailableReason::RowCapExhausted
+pub oraclemcp_guard::mutation_closure::MutationUnavailableReason::SourceUnavailable
+pub oraclemcp_guard::mutation_closure::MutationUnavailableReason::UnsupportedMechanism
+impl core::clone::Clone for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+pub fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::clone(&self) -> oraclemcp_guard::mutation_closure::MutationUnavailableReason
+impl core::cmp::Eq for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+impl core::cmp::Ord for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+pub fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::cmp(&self, &oraclemcp_guard::mutation_closure::MutationUnavailableReason) -> core::cmp::Ordering
+impl core::cmp::PartialEq for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+pub fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::eq(&self, &oraclemcp_guard::mutation_closure::MutationUnavailableReason) -> bool
+impl core::cmp::PartialOrd for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+pub fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::partial_cmp(&self, &oraclemcp_guard::mutation_closure::MutationUnavailableReason) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+pub fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+impl core::marker::StructuralPartialEq for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+impl serde_core::ser::Serialize for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+pub fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+pub fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+impl core::marker::Send for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+impl core::marker::Sync for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+impl core::marker::Unpin for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+impl core::marker::UnsafeUnpin for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+impl<Q, K> equivalent::Comparable<K> for oraclemcp_guard::mutation_closure::MutationUnavailableReason where Q: core::cmp::Ord + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::compare(&self, &K) -> core::cmp::Ordering
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::mutation_closure::MutationUnavailableReason where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::mutation_closure::MutationUnavailableReason where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::mutation_closure::MutationUnavailableReason where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::mutation_closure::MutationUnavailableReason where U: core::convert::From<T>
+pub fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::mutation_closure::MutationUnavailableReason where U: core::convert::Into<T>
+pub type oraclemcp_guard::mutation_closure::MutationUnavailableReason::Error = core::convert::Infallible
+pub fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::mutation_closure::MutationUnavailableReason where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::mutation_closure::MutationUnavailableReason::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::mutation_closure::MutationUnavailableReason where T: core::clone::Clone
+pub type oraclemcp_guard::mutation_closure::MutationUnavailableReason::Owned = T
+pub fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+impl<T> core::any::Any for oraclemcp_guard::mutation_closure::MutationUnavailableReason where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::mutation_closure::MutationUnavailableReason where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::mutation_closure::MutationUnavailableReason where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::mutation_closure::MutationUnavailableReason where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+pub fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::mutation_closure::MutationUnavailableReason where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+impl<T> typenum::type_operators::Same for oraclemcp_guard::mutation_closure::MutationUnavailableReason
+pub type oraclemcp_guard::mutation_closure::MutationUnavailableReason::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::mutation_closure::MutationUnavailableReason where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::mutation_closure::MutationUnavailableReason where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::mutation_closure::MutationUnavailableReason::vzip(self) -> V
+pub struct oraclemcp_guard::mutation_closure::MutationCatalogObservation
+pub oraclemcp_guard::mutation_closure::MutationCatalogObservation::computation: oraclemcp_guard::mutation_closure::MutationComputation
+pub oraclemcp_guard::mutation_closure::MutationCatalogObservation::row_count: u32
+pub oraclemcp_guard::mutation_closure::MutationCatalogObservation::scope: oraclemcp_guard::mutation_closure::MutationRelationScope
+pub oraclemcp_guard::mutation_closure::MutationCatalogObservation::source: oraclemcp_guard::mutation_closure::MutationCatalogSource
+pub oraclemcp_guard::mutation_closure::MutationCatalogObservation::source_sha256: core::option::Option<alloc::string::String>
+impl core::clone::Clone for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogObservation::clone(&self) -> oraclemcp_guard::mutation_closure::MutationCatalogObservation
+impl core::cmp::Eq for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+impl core::cmp::PartialEq for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogObservation::eq(&self, &oraclemcp_guard::mutation_closure::MutationCatalogObservation) -> bool
+impl core::fmt::Debug for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogObservation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+impl serde_core::ser::Serialize for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogObservation::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogObservation::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+impl core::marker::Send for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+impl core::marker::Sync for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+impl core::marker::Unpin for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+impl core::marker::UnsafeUnpin for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::mutation_closure::MutationCatalogObservation where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogObservation::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::mutation_closure::MutationCatalogObservation where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::mutation_closure::MutationCatalogObservation where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::mutation_closure::MutationCatalogObservation where U: core::convert::From<T>
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogObservation::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::mutation_closure::MutationCatalogObservation where U: core::convert::Into<T>
+pub type oraclemcp_guard::mutation_closure::MutationCatalogObservation::Error = core::convert::Infallible
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogObservation::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::mutation_closure::MutationCatalogObservation where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::mutation_closure::MutationCatalogObservation::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogObservation::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::mutation_closure::MutationCatalogObservation where T: core::clone::Clone
+pub type oraclemcp_guard::mutation_closure::MutationCatalogObservation::Owned = T
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogObservation::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogObservation::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+impl<T> core::any::Any for oraclemcp_guard::mutation_closure::MutationCatalogObservation where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogObservation::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::mutation_closure::MutationCatalogObservation where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogObservation::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::mutation_closure::MutationCatalogObservation where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogObservation::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::mutation_closure::MutationCatalogObservation where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::mutation_closure::MutationCatalogObservation::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogObservation::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::mutation_closure::MutationCatalogObservation where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+impl<T> typenum::type_operators::Same for oraclemcp_guard::mutation_closure::MutationCatalogObservation
+pub type oraclemcp_guard::mutation_closure::MutationCatalogObservation::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::mutation_closure::MutationCatalogObservation where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::mutation_closure::MutationCatalogObservation where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::mutation_closure::MutationCatalogObservation::vzip(self) -> V
+pub struct oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+pub oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::container: alloc::string::String
+pub oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::dbid: alloc::string::String
+pub oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::edition: alloc::string::String
+impl core::clone::Clone for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+pub fn oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::clone(&self) -> oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+impl core::cmp::Eq for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+impl core::cmp::PartialEq for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+pub fn oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::eq(&self, &oraclemcp_guard::mutation_closure::MutationDatabaseIdentity) -> bool
+impl core::fmt::Debug for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+pub fn oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+impl serde_core::ser::Serialize for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+pub fn oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+pub fn oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+impl core::marker::Send for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+impl core::marker::Sync for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+impl core::marker::Unpin for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+impl core::marker::UnsafeUnpin for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity where U: core::convert::From<T>
+pub fn oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity where U: core::convert::Into<T>
+pub type oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::Error = core::convert::Infallible
+pub fn oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity where T: core::clone::Clone
+pub type oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::Owned = T
+pub fn oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+impl<T> core::any::Any for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+pub fn oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+impl<T> typenum::type_operators::Same for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity
+pub type oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::mutation_closure::MutationDatabaseIdentity where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::mutation_closure::MutationDatabaseIdentity::vzip(self) -> V
+pub struct oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+pub oraclemcp_guard::mutation_closure::MutationEffectClosureV1::database: core::option::Option<oraclemcp_guard::mutation_closure::MutationDatabaseIdentity>
+pub oraclemcp_guard::mutation_closure::MutationEffectClosureV1::mechanisms: alloc::vec::Vec<oraclemcp_guard::mutation_closure::MutationMechanismFact>
+pub oraclemcp_guard::mutation_closure::MutationEffectClosureV1::observations: alloc::vec::Vec<oraclemcp_guard::mutation_closure::MutationCatalogObservation>
+pub oraclemcp_guard::mutation_closure::MutationEffectClosureV1::root: oraclemcp_guard::mutation_closure::MutationRelationScope
+pub oraclemcp_guard::mutation_closure::MutationEffectClosureV1::scopes: alloc::vec::Vec<oraclemcp_guard::mutation_closure::MutationRelationScope>
+pub oraclemcp_guard::mutation_closure::MutationEffectClosureV1::unavailable: alloc::collections::btree::set::BTreeSet<oraclemcp_guard::mutation_closure::MutationUnavailableReason>
+impl oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::admit(&self) -> core::result::Result<oraclemcp_guard::levels::OperatingLevel, oraclemcp_guard::mutation_closure::MutationClosureRefusal>
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::canonical_bytes(&self) -> alloc::vec::Vec<u8>
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::fingerprint(&self) -> alloc::string::String
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::is_complete(&self) -> bool
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::new(core::option::Option<oraclemcp_guard::mutation_closure::MutationDatabaseIdentity>, oraclemcp_guard::mutation_closure::MutationRelationScope) -> Self
+impl core::clone::Clone for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::clone(&self) -> oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+impl core::cmp::Eq for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+impl core::cmp::PartialEq for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::eq(&self, &oraclemcp_guard::mutation_closure::MutationEffectClosureV1) -> bool
+impl core::fmt::Debug for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+impl serde_core::ser::Serialize for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+impl core::marker::Send for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+impl core::marker::Sync for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+impl core::marker::Unpin for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+impl core::marker::UnsafeUnpin for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::mutation_closure::MutationEffectClosureV1 where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::mutation_closure::MutationEffectClosureV1 where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::mutation_closure::MutationEffectClosureV1 where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::mutation_closure::MutationEffectClosureV1 where U: core::convert::From<T>
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::mutation_closure::MutationEffectClosureV1 where U: core::convert::Into<T>
+pub type oraclemcp_guard::mutation_closure::MutationEffectClosureV1::Error = core::convert::Infallible
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::mutation_closure::MutationEffectClosureV1 where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::mutation_closure::MutationEffectClosureV1::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::mutation_closure::MutationEffectClosureV1 where T: core::clone::Clone
+pub type oraclemcp_guard::mutation_closure::MutationEffectClosureV1::Owned = T
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+impl<T> core::any::Any for oraclemcp_guard::mutation_closure::MutationEffectClosureV1 where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::mutation_closure::MutationEffectClosureV1 where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::mutation_closure::MutationEffectClosureV1 where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::mutation_closure::MutationEffectClosureV1 where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::mutation_closure::MutationEffectClosureV1 where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+impl<T> typenum::type_operators::Same for oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+pub type oraclemcp_guard::mutation_closure::MutationEffectClosureV1::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::mutation_closure::MutationEffectClosureV1 where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::mutation_closure::MutationEffectClosureV1 where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::mutation_closure::MutationEffectClosureV1::vzip(self) -> V
+pub struct oraclemcp_guard::mutation_closure::MutationMechanismFact
+pub oraclemcp_guard::mutation_closure::MutationMechanismFact::computation: oraclemcp_guard::mutation_closure::MutationComputation
+pub oraclemcp_guard::mutation_closure::MutationMechanismFact::effects: oraclemcp_guard::purity::RoutineEffectsV1
+pub oraclemcp_guard::mutation_closure::MutationMechanismFact::mechanism: oraclemcp_guard::mutation_closure::MutationMechanism
+pub oraclemcp_guard::mutation_closure::MutationMechanismFact::metadata_sha256: alloc::string::String
+pub oraclemcp_guard::mutation_closure::MutationMechanismFact::name: alloc::string::String
+pub oraclemcp_guard::mutation_closure::MutationMechanismFact::object_id: core::option::Option<u64>
+pub oraclemcp_guard::mutation_closure::MutationMechanismFact::owner: alloc::string::String
+pub oraclemcp_guard::mutation_closure::MutationMechanismFact::routine_closure_fingerprints: alloc::collections::btree::set::BTreeSet<alloc::string::String>
+pub oraclemcp_guard::mutation_closure::MutationMechanismFact::scope: oraclemcp_guard::mutation_closure::MutationRelationScope
+pub oraclemcp_guard::mutation_closure::MutationMechanismFact::source_sha256: core::option::Option<alloc::string::String>
+impl core::clone::Clone for oraclemcp_guard::mutation_closure::MutationMechanismFact
+pub fn oraclemcp_guard::mutation_closure::MutationMechanismFact::clone(&self) -> oraclemcp_guard::mutation_closure::MutationMechanismFact
+impl core::cmp::Eq for oraclemcp_guard::mutation_closure::MutationMechanismFact
+impl core::cmp::PartialEq for oraclemcp_guard::mutation_closure::MutationMechanismFact
+pub fn oraclemcp_guard::mutation_closure::MutationMechanismFact::eq(&self, &oraclemcp_guard::mutation_closure::MutationMechanismFact) -> bool
+impl core::fmt::Debug for oraclemcp_guard::mutation_closure::MutationMechanismFact
+pub fn oraclemcp_guard::mutation_closure::MutationMechanismFact::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::mutation_closure::MutationMechanismFact
+impl serde_core::ser::Serialize for oraclemcp_guard::mutation_closure::MutationMechanismFact
+pub fn oraclemcp_guard::mutation_closure::MutationMechanismFact::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::mutation_closure::MutationMechanismFact
+pub fn oraclemcp_guard::mutation_closure::MutationMechanismFact::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::mutation_closure::MutationMechanismFact
+impl core::marker::Send for oraclemcp_guard::mutation_closure::MutationMechanismFact
+impl core::marker::Sync for oraclemcp_guard::mutation_closure::MutationMechanismFact
+impl core::marker::Unpin for oraclemcp_guard::mutation_closure::MutationMechanismFact
+impl core::marker::UnsafeUnpin for oraclemcp_guard::mutation_closure::MutationMechanismFact
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::mutation_closure::MutationMechanismFact
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::mutation_closure::MutationMechanismFact
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::mutation_closure::MutationMechanismFact where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationMechanismFact::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::mutation_closure::MutationMechanismFact where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::mutation_closure::MutationMechanismFact where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::mutation_closure::MutationMechanismFact where U: core::convert::From<T>
+pub fn oraclemcp_guard::mutation_closure::MutationMechanismFact::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::mutation_closure::MutationMechanismFact where U: core::convert::Into<T>
+pub type oraclemcp_guard::mutation_closure::MutationMechanismFact::Error = core::convert::Infallible
+pub fn oraclemcp_guard::mutation_closure::MutationMechanismFact::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::mutation_closure::MutationMechanismFact where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::mutation_closure::MutationMechanismFact::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::mutation_closure::MutationMechanismFact::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::mutation_closure::MutationMechanismFact where T: core::clone::Clone
+pub type oraclemcp_guard::mutation_closure::MutationMechanismFact::Owned = T
+pub fn oraclemcp_guard::mutation_closure::MutationMechanismFact::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::mutation_closure::MutationMechanismFact::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::mutation_closure::MutationMechanismFact
+impl<T> core::any::Any for oraclemcp_guard::mutation_closure::MutationMechanismFact where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationMechanismFact::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::mutation_closure::MutationMechanismFact where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationMechanismFact::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::mutation_closure::MutationMechanismFact where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationMechanismFact::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::mutation_closure::MutationMechanismFact where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::mutation_closure::MutationMechanismFact::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::mutation_closure::MutationMechanismFact
+pub fn oraclemcp_guard::mutation_closure::MutationMechanismFact::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::mutation_closure::MutationMechanismFact
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::mutation_closure::MutationMechanismFact where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::mutation_closure::MutationMechanismFact
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::mutation_closure::MutationMechanismFact
+impl<T> typenum::type_operators::Same for oraclemcp_guard::mutation_closure::MutationMechanismFact
+pub type oraclemcp_guard::mutation_closure::MutationMechanismFact::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::mutation_closure::MutationMechanismFact where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::mutation_closure::MutationMechanismFact where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::mutation_closure::MutationMechanismFact::vzip(self) -> V
+pub struct oraclemcp_guard::mutation_closure::MutationRelationScope
+pub oraclemcp_guard::mutation_closure::MutationRelationScope::columns: oraclemcp_guard::mutation_closure::MutationColumns
+pub oraclemcp_guard::mutation_closure::MutationRelationScope::statement_kind: oraclemcp_guard::mutation_closure::MutationStatementKind
+pub oraclemcp_guard::mutation_closure::MutationRelationScope::target: oraclemcp_guard::mutation_closure::MutationTarget
+impl core::clone::Clone for oraclemcp_guard::mutation_closure::MutationRelationScope
+pub fn oraclemcp_guard::mutation_closure::MutationRelationScope::clone(&self) -> oraclemcp_guard::mutation_closure::MutationRelationScope
+impl core::cmp::Eq for oraclemcp_guard::mutation_closure::MutationRelationScope
+impl core::cmp::PartialEq for oraclemcp_guard::mutation_closure::MutationRelationScope
+pub fn oraclemcp_guard::mutation_closure::MutationRelationScope::eq(&self, &oraclemcp_guard::mutation_closure::MutationRelationScope) -> bool
+impl core::fmt::Debug for oraclemcp_guard::mutation_closure::MutationRelationScope
+pub fn oraclemcp_guard::mutation_closure::MutationRelationScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::mutation_closure::MutationRelationScope
+impl serde_core::ser::Serialize for oraclemcp_guard::mutation_closure::MutationRelationScope
+pub fn oraclemcp_guard::mutation_closure::MutationRelationScope::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::mutation_closure::MutationRelationScope
+pub fn oraclemcp_guard::mutation_closure::MutationRelationScope::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::mutation_closure::MutationRelationScope
+impl core::marker::Send for oraclemcp_guard::mutation_closure::MutationRelationScope
+impl core::marker::Sync for oraclemcp_guard::mutation_closure::MutationRelationScope
+impl core::marker::Unpin for oraclemcp_guard::mutation_closure::MutationRelationScope
+impl core::marker::UnsafeUnpin for oraclemcp_guard::mutation_closure::MutationRelationScope
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::mutation_closure::MutationRelationScope
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::mutation_closure::MutationRelationScope
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::mutation_closure::MutationRelationScope where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationRelationScope::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::mutation_closure::MutationRelationScope where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::mutation_closure::MutationRelationScope where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::mutation_closure::MutationRelationScope where U: core::convert::From<T>
+pub fn oraclemcp_guard::mutation_closure::MutationRelationScope::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::mutation_closure::MutationRelationScope where U: core::convert::Into<T>
+pub type oraclemcp_guard::mutation_closure::MutationRelationScope::Error = core::convert::Infallible
+pub fn oraclemcp_guard::mutation_closure::MutationRelationScope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::mutation_closure::MutationRelationScope where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::mutation_closure::MutationRelationScope::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::mutation_closure::MutationRelationScope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::mutation_closure::MutationRelationScope where T: core::clone::Clone
+pub type oraclemcp_guard::mutation_closure::MutationRelationScope::Owned = T
+pub fn oraclemcp_guard::mutation_closure::MutationRelationScope::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::mutation_closure::MutationRelationScope::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::mutation_closure::MutationRelationScope
+impl<T> core::any::Any for oraclemcp_guard::mutation_closure::MutationRelationScope where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationRelationScope::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::mutation_closure::MutationRelationScope where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationRelationScope::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::mutation_closure::MutationRelationScope where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationRelationScope::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::mutation_closure::MutationRelationScope where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::mutation_closure::MutationRelationScope::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::mutation_closure::MutationRelationScope
+pub fn oraclemcp_guard::mutation_closure::MutationRelationScope::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::mutation_closure::MutationRelationScope
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::mutation_closure::MutationRelationScope where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::mutation_closure::MutationRelationScope
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::mutation_closure::MutationRelationScope
+impl<T> typenum::type_operators::Same for oraclemcp_guard::mutation_closure::MutationRelationScope
+pub type oraclemcp_guard::mutation_closure::MutationRelationScope::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::mutation_closure::MutationRelationScope where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::mutation_closure::MutationRelationScope where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::mutation_closure::MutationRelationScope::vzip(self) -> V
+pub struct oraclemcp_guard::mutation_closure::MutationTarget
+pub oraclemcp_guard::mutation_closure::MutationTarget::last_ddl_time: alloc::string::String
+pub oraclemcp_guard::mutation_closure::MutationTarget::name: alloc::string::String
+pub oraclemcp_guard::mutation_closure::MutationTarget::object_edition: core::option::Option<alloc::string::String>
+pub oraclemcp_guard::mutation_closure::MutationTarget::object_id: u64
+pub oraclemcp_guard::mutation_closure::MutationTarget::owner: alloc::string::String
+impl core::clone::Clone for oraclemcp_guard::mutation_closure::MutationTarget
+pub fn oraclemcp_guard::mutation_closure::MutationTarget::clone(&self) -> oraclemcp_guard::mutation_closure::MutationTarget
+impl core::cmp::Eq for oraclemcp_guard::mutation_closure::MutationTarget
+impl core::cmp::PartialEq for oraclemcp_guard::mutation_closure::MutationTarget
+pub fn oraclemcp_guard::mutation_closure::MutationTarget::eq(&self, &oraclemcp_guard::mutation_closure::MutationTarget) -> bool
+impl core::fmt::Debug for oraclemcp_guard::mutation_closure::MutationTarget
+pub fn oraclemcp_guard::mutation_closure::MutationTarget::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::mutation_closure::MutationTarget
+impl serde_core::ser::Serialize for oraclemcp_guard::mutation_closure::MutationTarget
+pub fn oraclemcp_guard::mutation_closure::MutationTarget::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::mutation_closure::MutationTarget
+pub fn oraclemcp_guard::mutation_closure::MutationTarget::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::mutation_closure::MutationTarget
+impl core::marker::Send for oraclemcp_guard::mutation_closure::MutationTarget
+impl core::marker::Sync for oraclemcp_guard::mutation_closure::MutationTarget
+impl core::marker::Unpin for oraclemcp_guard::mutation_closure::MutationTarget
+impl core::marker::UnsafeUnpin for oraclemcp_guard::mutation_closure::MutationTarget
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::mutation_closure::MutationTarget
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::mutation_closure::MutationTarget
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::mutation_closure::MutationTarget where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationTarget::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::mutation_closure::MutationTarget where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::mutation_closure::MutationTarget where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::mutation_closure::MutationTarget where U: core::convert::From<T>
+pub fn oraclemcp_guard::mutation_closure::MutationTarget::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::mutation_closure::MutationTarget where U: core::convert::Into<T>
+pub type oraclemcp_guard::mutation_closure::MutationTarget::Error = core::convert::Infallible
+pub fn oraclemcp_guard::mutation_closure::MutationTarget::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::mutation_closure::MutationTarget where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::mutation_closure::MutationTarget::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::mutation_closure::MutationTarget::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::mutation_closure::MutationTarget where T: core::clone::Clone
+pub type oraclemcp_guard::mutation_closure::MutationTarget::Owned = T
+pub fn oraclemcp_guard::mutation_closure::MutationTarget::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::mutation_closure::MutationTarget::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::mutation_closure::MutationTarget
+impl<T> core::any::Any for oraclemcp_guard::mutation_closure::MutationTarget where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationTarget::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::mutation_closure::MutationTarget where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationTarget::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::mutation_closure::MutationTarget where T: ?core::marker::Sized
+pub fn oraclemcp_guard::mutation_closure::MutationTarget::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::mutation_closure::MutationTarget where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::mutation_closure::MutationTarget::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::mutation_closure::MutationTarget
+pub fn oraclemcp_guard::mutation_closure::MutationTarget::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::mutation_closure::MutationTarget
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::mutation_closure::MutationTarget where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::mutation_closure::MutationTarget
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::mutation_closure::MutationTarget
+impl<T> typenum::type_operators::Same for oraclemcp_guard::mutation_closure::MutationTarget
+pub type oraclemcp_guard::mutation_closure::MutationTarget::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::mutation_closure::MutationTarget where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::mutation_closure::MutationTarget where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::mutation_closure::MutationTarget::vzip(self) -> V
 pub mod oraclemcp_guard::policy
 pub enum oraclemcp_guard::policy::DefaultMode
 pub oraclemcp_guard::policy::DefaultMode::Guarded

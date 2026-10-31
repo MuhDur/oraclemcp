@@ -18,5 +18,7 @@ pub mod deferred_startup;
 pub mod dispatch;
 pub mod masking_salts;
 #[cfg(feature = "plsql-intelligence")]
+pub mod mutation_closure;
+#[cfg(feature = "plsql-intelligence")]
 pub mod plsql_tools;
 pub mod registry;

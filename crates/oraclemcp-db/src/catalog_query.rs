@@ -408,6 +408,32 @@ pub enum CatalogQueryId {
     ClosureTriggers,
     /// Bounded source lines for one exact closure object.
     ClosureSource,
+    /// Exact target identity for a mutation scope.
+    MutationTarget,
+    /// All enabled and disabled triggers on one mutation target.
+    MutationTriggers,
+    /// Complete UPDATE OF column lists for the target's triggers.
+    MutationTriggerColumns,
+    /// Incoming enabled foreign keys, including otherwise invisible child tables.
+    MutationForeignKeys,
+    /// Index maintenance and domain callback metadata.
+    MutationIndexes,
+    /// Full virtual/default expressions and column identities.
+    MutationColumns,
+    /// Full function-based index expressions.
+    MutationIndexExpressions,
+    /// All statement flags and check options for target VPD policies.
+    MutationVpdPolicies,
+    /// FGA handlers and audit predicates for one exact target.
+    MutationFgaPolicies,
+    /// Transactional materialized-view logging on one target.
+    MutationMvLogs,
+    /// Implementation type behind a domain indextype.
+    MutationIndexImplementation,
+    /// All enabled RAS policies, including write-only policies invisible to the read probe.
+    MutationRasPolicies,
+    /// Definer-rights identity of a domain-index implementation type.
+    MutationTypeAuthid,
     /// Gathered optimizer statistics for one table.
     TableStats,
     /// Staleness of gathered table statistics.
@@ -682,7 +708,7 @@ pub enum ReadQueryProvenance {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 182] = [
+    pub const ALL: [Self; 195] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::PolicyObservationSessionContext,
@@ -865,6 +891,19 @@ impl CatalogQueryId {
         Self::ClosureDependencies,
         Self::ClosureTriggers,
         Self::ClosureSource,
+        Self::MutationTarget,
+        Self::MutationTriggers,
+        Self::MutationTriggerColumns,
+        Self::MutationForeignKeys,
+        Self::MutationIndexes,
+        Self::MutationColumns,
+        Self::MutationIndexExpressions,
+        Self::MutationVpdPolicies,
+        Self::MutationFgaPolicies,
+        Self::MutationMvLogs,
+        Self::MutationIndexImplementation,
+        Self::MutationRasPolicies,
+        Self::MutationTypeAuthid,
     ];
 
     /// Return the immutable SQL, bind and handling contract for this ID.
@@ -2680,6 +2719,133 @@ order by owner, name, referenced_owner, referenced_name"#
                 "read bounded triggers for a closure DML target",
                 DictionaryMetadata,
                 Diagnostic,
+            ),
+            Self::MutationTarget => (
+                "SELECT owner, object_name, object_id, edition_name, status, \
+                   TO_CHAR(last_ddl_time, 'YYYY-MM-DD\"T\"HH24:MI:SS') AS last_ddl_time \
+                 FROM SYS.ALL_OBJECTS WHERE owner=:1 AND object_name=:2 \
+                   AND object_type='TABLE' AND subobject_name IS NULL AND ROWNUM <= :3",
+                TTI,
+                "bind exact mutation table identity",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::MutationTriggers => (
+                "SELECT owner, trigger_name, table_owner, table_name, base_object_type, \
+                   column_name, trigger_type, triggering_event, status, when_clause, action_type \
+                 FROM SYS.ALL_TRIGGERS WHERE table_owner=:1 AND table_name=:2 AND ROWNUM <= :3",
+                TTI,
+                "collect mutation trigger metadata",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::MutationTriggerColumns => (
+                "SELECT trigger_owner, trigger_name, table_owner, table_name, \
+                   column_name, column_list, column_usage FROM SYS.ALL_TRIGGER_COLS \
+                 WHERE table_owner=:1 AND table_name=:2 AND ROWNUM <= :3",
+                TTI,
+                "collect complete trigger column lists",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::MutationForeignKeys => (
+                "SELECT f.owner AS fk_owner, f.constraint_name, f.table_name AS child_table, \
+                   f.delete_rule, f.status, f.validated, f.deferrable, f.deferred, \
+                   p.owner AS parent_owner, p.table_name AS parent_table, \
+                   c.column_name AS child_column, c.position, pc.column_name AS parent_column \
+                 FROM SYS.DBA_CONSTRAINTS f \
+                 JOIN SYS.ALL_CONSTRAINTS p ON p.owner=f.r_owner AND p.constraint_name=f.r_constraint_name \
+                 JOIN SYS.DBA_CONS_COLUMNS c ON c.owner=f.owner AND c.constraint_name=f.constraint_name \
+                   AND c.table_name=f.table_name \
+                 JOIN SYS.ALL_CONS_COLUMNS pc ON pc.owner=p.owner AND pc.constraint_name=p.constraint_name \
+                   AND pc.table_name=p.table_name AND pc.position=c.position \
+                 WHERE p.owner=:1 AND p.table_name=:2 AND f.constraint_type='R' \
+                   AND ROWNUM <= :3",
+                TTI,
+                "collect incoming foreign keys with cross-schema visibility",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::MutationIndexes => (
+                "SELECT owner AS index_owner, index_name, table_owner, table_name, index_type, \
+                   status, ityp_owner, ityp_name, domidx_status, domidx_opstatus, funcidx_status, \
+                   partitioned, join_index FROM SYS.ALL_INDEXES \
+                 WHERE table_owner=:1 AND table_name=:2 AND ROWNUM <= :3",
+                TTI,
+                "collect index maintenance and callbacks",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::MutationColumns => (
+                "SELECT owner, table_name, column_name, data_type, data_type_owner, \
+                   virtual_column, hidden_column, user_generated, default_length, data_default \
+                 FROM SYS.ALL_TAB_COLS WHERE owner=:1 AND table_name=:2 AND ROWNUM <= :3",
+                TTI,
+                "collect full column expressions and defaults",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::MutationIndexExpressions => (
+                "SELECT index_owner, index_name, table_owner, table_name, column_position, column_expression \
+                 FROM SYS.ALL_IND_EXPRESSIONS WHERE table_owner=:1 AND table_name=:2 AND ROWNUM <= :3",
+                TTI,
+                "collect full function-based index expressions",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::MutationVpdPolicies => (
+                "SELECT object_owner, object_name, policy_group, policy_name, pf_owner, \
+                   package AS pf_package, function AS pf_function, sel, ins, upd, del, \
+                   idx, chk_option, enable, policy_type FROM SYS.ALL_POLICIES \
+                 WHERE object_owner=:1 AND object_name=:2 AND ROWNUM <= :3",
+                TTI,
+                "collect statement-specific mutation VPD policies",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::MutationFgaPolicies => (
+                "SELECT object_schema, object_name, policy_name, policy_text, pf_schema, \
+                   pf_package, pf_function, enabled, sel, ins, upd, del FROM SYS.ALL_AUDIT_POLICIES \
+                 WHERE object_schema=:1 AND object_name=:2 AND ROWNUM <= :3",
+                TTI,
+                "collect mutation FGA handlers and conditions",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::MutationMvLogs => (
+                "SELECT log_owner, master, log_table, log_trigger, rowids, primary_key, object_id, \
+                   sequence, include_new_values FROM SYS.ALL_MVIEW_LOGS \
+                 WHERE log_owner=:1 AND master=:2 AND ROWNUM <= :3",
+                TTI,
+                "collect transactional materialized-view log maintenance",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::MutationTypeAuthid => (
+                "SELECT owner, type_name, authid FROM SYS.ALL_TYPES \
+                 WHERE owner=:1 AND type_name=:2 AND ROWNUM <= :3",
+                TTI,
+                "bind implementation-type definer rights",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::MutationRasPolicies => (
+                "SELECT policy_owner, policy, sel, ins, upd, del, idx, row_acl, owner_bypass, status \
+                 FROM SYS.ALL_XS_APPLIED_POLICIES WHERE schema=:1 AND object=:2 \
+                   AND (status <> 'DISABLED' OR status IS NULL) AND ROWNUM <= :3",
+                TTI,
+                "collect all mutation RAS policy flags",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::MutationIndexImplementation => (
+                "SELECT owner, indextype_name, implementation_schema, implementation_name, \
+                   interface_version FROM SYS.ALL_INDEXTYPES \
+                 WHERE owner=:1 AND indextype_name=:2 AND ROWNUM <= :3",
+                TTI,
+                "bind domain indextype implementation",
+                InternalProof,
+                ReadPurity,
             ),
             Self::ClosureSource => (
                 "SELECT line, text FROM (SELECT line, text FROM SYS.all_source \

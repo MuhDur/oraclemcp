@@ -464,11 +464,9 @@ impl PlsqlSideEffectOracle {
             let Some(node) = self.resolve_candidates(std::slice::from_ref(member)) else {
                 return unknown_effects();
             };
-            if self
-                .outgoing_edges(node.id)
-                .iter()
-                .any(|edge| !is_high_confidence(edge))
-                || self.catalog_unit_invalid(member)
+            if self.outgoing_edges(node.id).iter().any(|edge| {
+                !is_high_confidence(edge) && !self.source_proves_autonomous_edge(member, edge)
+            }) || self.catalog_unit_invalid(member)
             {
                 return unknown_effects();
             }
@@ -532,6 +530,24 @@ impl PlsqlSideEffectOracle {
             }
         }
         effects
+    }
+
+    fn source_proves_autonomous_edge(&self, member: &str, edge: &Edge) -> bool {
+        // The engine emits primitive effect edges at Medium confidence. A
+        // redundant autonomous edge cannot erase an independently proven,
+        // always-refused effect from this exact unit's clean source. Every
+        // other graph uncertainty keeps the ordinary fail-closed rule.
+        edge.kind == EdgeKind::Autonomous
+            && edge.confidence.level == ConfidenceLevel::Medium
+            && self
+                .invocations
+                .local_effects(member)
+                .iter()
+                .any(|effect| *effect == plsql_engine::RoutineEffect::Autonomous)
+            && self.graph.nodes.get(&edge.to).is_some_and(|target| {
+                target.logical_id.as_str() == "EFFECT::Autonomous"
+                    && target.identity_kind == NodeIdentityKind::Unknown
+            })
     }
 
     fn read_relation_has_callbacks(&self, node_id: NodeId) -> bool {
@@ -3864,6 +3880,85 @@ mod tests {
     }
 
     #[test]
+    fn adapter_source_proven_autonomous_effect_survives_its_medium_effect_edge() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("trigger.sql"),
+            "CREATE OR REPLACE TRIGGER APP.TR_AUTO BEFORE UPDATE OF C2 ON APP.T FOR EACH ROW DECLARE PRAGMA AUTONOMOUS_TRANSACTION; BEGIN NULL; END;\n").unwrap();
+        let mut run = analyze_project(AnalysisRequest {
+            project_root: project.path().to_owned(),
+            cache: plsql_engine::CacheConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+        // Explicit unit catalog fixture; the native mutation fixture separately
+        // proves the same binding against fresh Oracle metadata and sources.
+        run.catalog = Some(empty_catalog());
+        let edge = run
+            .dep_graph
+            .edges
+            .iter()
+            .find(|edge| edge.kind == EdgeKind::Autonomous)
+            .unwrap();
+        assert_eq!(edge.confidence.level, ConfidenceLevel::Medium);
+        let target = edge.to;
+        let reference = adapter_reference("TR_AUTO");
+        let effects = PlsqlSideEffectOracle::from_analysis_run(&run).routine_effects(&reference);
+        assert_eq!(effects, RoutineEffectsV1::new([RoutineEffect::Autonomous]));
+        assert_eq!(
+            oraclemcp_guard::admit(
+                &effects,
+                oraclemcp_guard::AdmissionContext::DmlMutationClosure
+            ),
+            Err(oraclemcp_guard::EffectRefusal::AlwaysRefused(
+                RoutineEffect::Autonomous
+            ))
+        );
+
+        let mut edge_only = run.clone();
+        edge_only
+            .invocation_index
+            .units
+            .get_mut("APP.TR_AUTO")
+            .unwrap()
+            .statements
+            .clear();
+        assert_eq!(
+            PlsqlSideEffectOracle::from_analysis_run(&edge_only).routine_effects(&reference),
+            unknown_effects(),
+            "a Medium graph edge alone cannot supply source authority"
+        );
+
+        let mut wrong_target = run.clone();
+        wrong_target
+            .dep_graph
+            .nodes
+            .get_mut(&target)
+            .unwrap()
+            .logical_id = LogicalObjectId::new("EFFECT::OTHER");
+        assert_eq!(
+            PlsqlSideEffectOracle::from_analysis_run(&wrong_target).routine_effects(&reference),
+            unknown_effects()
+        );
+
+        let mut low_confidence = run;
+        low_confidence
+            .dep_graph
+            .edges
+            .iter_mut()
+            .find(|edge| edge.kind == EdgeKind::Autonomous)
+            .unwrap()
+            .confidence
+            .level = ConfidenceLevel::Low;
+        assert_eq!(
+            PlsqlSideEffectOracle::from_analysis_run(&low_confidence).routine_effects(&reference),
+            unknown_effects()
+        );
+    }
+
+    #[test]
     fn adapter_clean_read_effects_are_admitted_at_read_only() {
         let run = adapter_read_run();
         let oracle = PlsqlSideEffectOracle::from_analysis_run(&run);
@@ -4077,12 +4172,15 @@ mod tests {
             unknown_effects()
         );
         run.completeness.posture = CompletenessPosture::Clean;
-        run.dep_graph.edges[0].confidence.level = ConfidenceLevel::Low;
-        assert_eq!(
-            PlsqlSideEffectOracle::from_analysis_run(&run)
-                .routine_effects(&adapter_reference("LOOKUP")),
-            unknown_effects()
-        );
+        for confidence in [ConfidenceLevel::Low, ConfidenceLevel::Medium] {
+            run.dep_graph.edges[0].confidence.level = confidence;
+            assert_eq!(
+                PlsqlSideEffectOracle::from_analysis_run(&run)
+                    .routine_effects(&adapter_reference("LOOKUP")),
+                unknown_effects(),
+                "non-Autonomous {confidence:?} edges remain untrusted"
+            );
+        }
         run.dep_graph.edges[0].confidence.level = ConfidenceLevel::High;
         run.invocation_index
             .units

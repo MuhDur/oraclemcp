@@ -1411,7 +1411,7 @@ pub async fn observe_relation_security(
     conn: &dyn OracleConnection,
     relations: &[ResolvedObject],
 ) -> Result<Vec<RelationSecurityObservation>, RelationSecurityProofError> {
-    let observations = observe_relation_security_for_read(cx, conn, relations).await?;
+    let observations = observe_relation_security_inner(cx, conn, relations, true).await?;
     if let Some(observation) = observations.iter().find(|observation| {
         observation.ols == RelationSecurityState::Unavailable
             || observation.ras == RelationSecurityState::Unavailable
@@ -1439,6 +1439,15 @@ pub(crate) async fn observe_relation_security_for_read(
     cx: &Cx,
     conn: &dyn OracleConnection,
     relations: &[ResolvedObject],
+) -> Result<Vec<RelationSecurityObservation>, RelationSecurityProofError> {
+    observe_relation_security_inner(cx, conn, relations, false).await
+}
+
+async fn observe_relation_security_inner(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    relations: &[ResolvedObject],
+    mutation: bool,
 ) -> Result<Vec<RelationSecurityObservation>, RelationSecurityProofError> {
     if relations.is_empty() {
         return Ok(Vec::new());
@@ -1596,7 +1605,11 @@ pub(crate) async fn observe_relation_security_for_read(
         let ras_policies = run_catalog_query(
             cx,
             conn,
-            CatalogQueryId::ReadRasPolicies,
+            if mutation {
+                CatalogQueryId::MutationRasPolicies
+            } else {
+                CatalogQueryId::ReadRasPolicies
+            },
             &[
                 OracleBind::from(relation.owner.as_str()),
                 OracleBind::from(relation.name.as_str()),
@@ -4705,6 +4718,7 @@ mod tests {
         responses: Arc<Mutex<ScriptedResponses>>,
         queries: Arc<Mutex<RecordedQueries>>,
         acquisition_delay: Duration,
+        write_only_ras: bool,
     }
 
     impl ScriptedRows {
@@ -4717,6 +4731,7 @@ mod tests {
                 responses: Arc::new(Mutex::new(responses.into_iter().collect())),
                 queries: Arc::new(Mutex::new(Vec::new())),
                 acquisition_delay: Duration::ZERO,
+                write_only_ras: false,
             }
         }
     }
@@ -4759,6 +4774,25 @@ mod tests {
                 .lock()
                 .expect("queries lock")
                 .push((sql.to_owned(), binds.to_vec()));
+            if self.write_only_ras {
+                if sql == CatalogQueryId::ReadRasPolicies.spec().sql {
+                    return Ok(Vec::new());
+                }
+                if sql == CatalogQueryId::MutationRasPolicies.spec().sql {
+                    return Ok(vec![row(&[
+                        ("POLICY_OWNER", Some("APP")),
+                        ("POLICY", Some("WRITE_ONLY_RAS")),
+                        ("SEL", Some("NO")),
+                        ("INS", Some("YES")),
+                        ("UPD", Some("YES")),
+                        ("DEL", Some("YES")),
+                        ("IDX", Some("NO")),
+                        ("ROW_ACL", Some("NO")),
+                        ("OWNER_BYPASS", Some("NO")),
+                        ("STATUS", Some("ENABLED")),
+                    ])]);
+                }
+            }
             self.responses
                 .lock()
                 .expect("responses lock")
@@ -5359,6 +5393,32 @@ mod tests {
     }
 
     #[test]
+    fn mutation_security_observes_write_only_ras_while_read_probe_stays_statement_specific() {
+        run_with_cx(|cx| async move {
+            let connection = || {
+                let mut responses = relation_security_clear_prefix(false);
+                responses.push(vec![row(&[("DATA_REDACTION", Some("FALSE"))])]);
+                let mut conn = ScriptedRows::new(responses);
+                conn.write_only_ras = true;
+                conn
+            };
+            let conn = connection();
+            assert!(matches!(
+                observe_relation_security(&cx, &conn, &[table_object()]).await,
+                Err(RelationSecurityProofError::Protected {
+                    feature: RelationSecurityFeature::Ras,
+                    ..
+                })
+            ));
+            let conn = connection();
+            let evidence = observe_relation_security_for_read(&cx, &conn, &[table_object()])
+                .await
+                .unwrap();
+            assert_eq!(evidence[0].ras, RelationSecurityState::Absent);
+        });
+    }
+
+    #[test]
     fn ras_realm_on_relation_refused() {
         run_with_cx(|cx| async move {
             let mut responses = relation_security_clear_prefix(false);
@@ -5862,7 +5922,7 @@ mod tests {
     #[test]
     fn catalog_query_sql_is_const_for_every_variant() {
         let specs = CatalogQueryId::ALL.map(CatalogQueryId::spec);
-        assert_eq!(specs.len(), 182);
+        assert_eq!(specs.len(), 195);
         let mut cases = Vec::new();
         for (id, spec) in CatalogQueryId::ALL.into_iter().zip(specs) {
             let _: &'static str = spec.sql;

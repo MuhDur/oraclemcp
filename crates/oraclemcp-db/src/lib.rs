@@ -73,6 +73,7 @@ mod hard_parse_closure;
 mod health;
 mod intelligence;
 mod masking;
+pub mod mutation_closure;
 mod native_redaction;
 mod oci;
 #[cfg(feature = "oracledb")]

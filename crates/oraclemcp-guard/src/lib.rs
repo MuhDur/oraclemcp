@@ -25,6 +25,7 @@ pub mod exec_grant;
 pub mod impact_binding;
 pub mod incident;
 pub mod levels;
+pub mod mutation_closure;
 pub mod policy;
 pub mod policy_gate;
 pub mod purity;
