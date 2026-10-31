@@ -714,34 +714,42 @@ impl DbRequestQuota {
     /// Returns [`DbError::Cancelled`] before the protected operation when the
     /// shared poll or cost allowance is exhausted.
     pub fn consume_checkpoint(&self, phase: &'static str) -> Result<(), DbError> {
-        if self
-            .inner
-            .polls_remaining
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_err()
-        {
-            return Err(DbError::Cancelled(format!(
-                "{phase}: request poll quota exhausted"
-            )));
+        let mut remaining = self.inner.polls_remaining.load(Ordering::Acquire);
+        loop {
+            let Some(next) = remaining.checked_sub(1) else {
+                return Err(DbError::Cancelled(format!(
+                    "{phase}: request poll quota exhausted"
+                )));
+            };
+            match self.inner.polls_remaining.compare_exchange_weak(
+                remaining,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => remaining = current,
+            }
         }
 
-        if self
-            .inner
-            .cost_remaining
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
-                if remaining == u64::MAX {
-                    Some(u64::MAX)
-                } else {
-                    remaining.checked_sub(1)
-                }
-            })
-            .is_err()
-        {
-            return Err(DbError::Cancelled(format!(
-                "{phase}: request cost quota exhausted"
-            )));
+        let mut remaining = self.inner.cost_remaining.load(Ordering::Acquire);
+        loop {
+            let next = if remaining == u64::MAX {
+                u64::MAX
+            } else {
+                remaining.checked_sub(1).ok_or_else(|| {
+                    DbError::Cancelled(format!("{phase}: request cost quota exhausted"))
+                })?
+            };
+            match self.inner.cost_remaining.compare_exchange_weak(
+                remaining,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => remaining = current,
+            }
         }
         Ok(())
     }

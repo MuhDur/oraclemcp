@@ -1721,13 +1721,23 @@ fn subtract_pending_bytes(
     acknowledged_bytes: usize,
 ) -> Result<(), ShippingError> {
     let acknowledged_bytes = u64::try_from(acknowledged_bytes).map_err(transport)?;
-    shared
-        .pending_bytes
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pending_bytes| {
-            pending_bytes.checked_sub(acknowledged_bytes)
-        })
-        .map_err(|_| spool_integrity(None, "audit shipping pending-byte accounting underflowed"))?;
-    Ok(())
+    let mut pending_bytes = shared.pending_bytes.load(Ordering::Relaxed);
+    loop {
+        let next = pending_bytes
+            .checked_sub(acknowledged_bytes)
+            .ok_or_else(|| {
+                spool_integrity(None, "audit shipping pending-byte accounting underflowed")
+            })?;
+        match shared.pending_bytes.compare_exchange_weak(
+            pending_bytes,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return Ok(()),
+            Err(current) => pending_bytes = current,
+        }
+    }
 }
 
 fn overflow_message(state: &OverflowIndicator) -> String {
