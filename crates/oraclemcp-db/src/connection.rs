@@ -11443,7 +11443,7 @@ mod driver_seam {
         );
         assert_eq!(
             lock_package_versions(&lock, "oracledb"),
-            vec!["26.0.0-beta.3".to_owned()],
+            vec!["26.0.0-beta.5".to_owned()],
             "Cargo.lock must resolve exactly Oracle's official optional driver pin"
         );
         assert!(

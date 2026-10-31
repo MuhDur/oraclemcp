@@ -1508,6 +1508,232 @@ fn live_cross_backend_number_and_streaming_parity() {
 }
 
 #[test]
+fn live_cross_backend_tstz_instants_and_official_utc_representation() {
+    if !lab_ready(
+        "live_cross_backend_tstz_instants_and_official_utc_representation",
+        &[],
+    ) {
+        return;
+    }
+    run_with_cx(|cx| async move {
+        let options = local_lab_options();
+        let driver = RustOracleConnection::connect(&cx, options.clone())
+            .await
+            .expect("driver-cx connect");
+        let official = OfficialOracleConnection::connect(&cx, options)
+            .await
+            .expect("official connect");
+        for (wall, zone, expected_driver, expected_utc) in [
+            (
+                "2020-02-29 23:30:00",
+                "+05:45",
+                "2020-02-29T23:30:00+05:45",
+                "2020-02-29T17:45:00Z",
+            ),
+            (
+                "2020-02-29 22:45:00",
+                "-09:30",
+                "2020-02-29T22:45:00-09:30",
+                "2020-03-01T08:15:00Z",
+            ),
+            (
+                "2020-02-29 23:59:00",
+                "+00:00",
+                "2020-02-29T23:59:00+00:00",
+                "2020-02-29T23:59:00Z",
+            ),
+            (
+                "2020-03-01 07:00:00",
+                "+14:00",
+                "2020-03-01T07:00:00+14:00",
+                "2020-02-29T17:00:00Z",
+            ),
+            (
+                "2026-09-16 12:04:56.123456789",
+                "-00:30",
+                "2026-09-16T12:04:56.123456789-00:30",
+                "2026-09-16T12:34:56.123456789Z",
+            ),
+            (
+                "2026-09-16 13:04:56.123456789",
+                "+00:30",
+                "2026-09-16T13:04:56.123456789+00:30",
+                "2026-09-16T12:34:56.123456789Z",
+            ),
+            (
+                "2020-03-08 01:59:00",
+                "America/New_York",
+                "2020-03-08T01:59:00-05:00",
+                "2020-03-08T06:59:00Z",
+            ),
+            (
+                "2020-03-08 03:01:00",
+                "America/New_York",
+                "2020-03-08T03:01:00-04:00",
+                "2020-03-08T07:01:00Z",
+            ),
+            (
+                "2026-09-16 07:04:56.123456789",
+                "-05:30",
+                "2026-09-16T07:04:56.123456789-05:30",
+                "2026-09-16T12:34:56.123456789Z",
+            ),
+        ] {
+            let zone_format = if zone == "America/New_York" {
+                "TZR"
+            } else {
+                "TZH:TZM"
+            };
+            let fraction = if wall.contains('.') { ".FF9" } else { "" };
+            let expression = format!(
+                "TO_TIMESTAMP_TZ('{wall} {zone}', 'YYYY-MM-DD HH24:MI:SS{fraction} {zone_format}')"
+            );
+            let mut sql = format!("SELECT {expression} AS V FROM SYS.DUAL");
+            if zone == "America/New_York" {
+                // driver-cx deliberately refuses native region IDs. Pin that
+                // boundary; compare DST instants after an explicit Oracle
+                // projection to a supported numeric offset. The official
+                // backend must also decode the unprojected region as UTC.
+                // Classic framing may quarantine a session whose decoder
+                // refuses a region ID. Keep the negative probe's custody
+                // separate from the supported-value comparisons.
+                let region_probe = RustOracleConnection::connect(&cx, local_lab_options())
+                    .await
+                    .expect("named-region refusal probe");
+                let refusal = region_probe
+                    .query_rows(&cx, &sql, &[])
+                    .await
+                    .expect_err("native region remains unsupported by driver-cx");
+                assert!(
+                    matches!(refusal, DbError::Query(message) if message.contains("named TIMESTAMP WITH TIME ZONE region"))
+                );
+                drop(region_probe);
+                let direct = serialized_single_row(
+                    official
+                        .query_rows(&cx, &sql, &[])
+                        .await
+                        .expect("official named-region TSTZ"),
+                    "official named-region TSTZ",
+                );
+                assert_eq!(direct["V"], expected_utc);
+                let offset = if expected_driver.ends_with("-05:00") {
+                    "-05:00"
+                } else {
+                    "-04:00"
+                };
+                sql = format!("SELECT ({expression} AT TIME ZONE '{offset}') AS V FROM SYS.DUAL");
+            }
+            let driver_row = serialized_single_row(
+                driver
+                    .query_rows(&cx, &sql, &[])
+                    .await
+                    .expect("driver TSTZ"),
+                "driver TSTZ",
+            );
+            let official_row = serialized_single_row(
+                official
+                    .query_rows(&cx, &sql, &[])
+                    .await
+                    .expect("official TSTZ"),
+                "official TSTZ",
+            );
+            assert_tstz_representations(
+                &driver_row["V"],
+                &official_row["V"],
+                expected_driver,
+                expected_utc,
+            );
+        }
+        driver.close(&cx).await.expect("driver-cx close");
+        official.close(&cx).await.expect("official close");
+    });
+}
+
+fn assert_tstz_representations(
+    driver: &Value,
+    official: &Value,
+    expected_driver: &str,
+    expected_utc: &str,
+) {
+    assert_eq!(
+        driver, expected_driver,
+        "driver-cx retains its exact wall clock/offset"
+    );
+    assert_eq!(
+        official, expected_utc,
+        "official beta.5 exposes exact UTC components"
+    );
+    let driver =
+        chrono::DateTime::parse_from_rfc3339(driver.as_str().expect("driver timestamp")).unwrap();
+    let official =
+        chrono::DateTime::parse_from_rfc3339(official.as_str().expect("official timestamp"))
+            .unwrap();
+    assert_eq!(driver, official, "TSTZ instants and nanoseconds must match");
+}
+
+#[test]
+#[should_panic(expected = "official beta.5 exposes exact UTC components")]
+fn tstz_parity_rejects_a_shifted_utc_instant() {
+    assert_tstz_representations(
+        &json!("2026-09-16T07:04:56.123456789-05:30"),
+        &json!("2026-09-16T07:04:56.123456789Z"),
+        "2026-09-16T07:04:56.123456789-05:30",
+        "2026-09-16T12:34:56.123456789Z",
+    );
+}
+
+#[test]
+fn live_cross_backend_integer_number_bind_bytes_match_literals() {
+    if !lab_ready(
+        "live_cross_backend_integer_number_bind_bytes_match_literals",
+        &[],
+    ) {
+        return;
+    }
+    run_with_cx(|cx| async move {
+        let options = local_lab_options();
+        let driver = RustOracleConnection::connect(&cx, options.clone())
+            .await
+            .expect("driver-cx connect");
+        let official = OfficialOracleConnection::connect(&cx, options)
+            .await
+            .expect("official connect");
+        for value in [101, 100, 2500, -100, 10000, -2500] {
+            let sql = format!(
+                "SELECT DUMP(:1,16) AS BOUND_DUMP, DUMP({value},16) AS LITERAL_DUMP, \
+                CASE WHEN :2={value} THEN 'equal' ELSE 'different' END AS EQUALITY FROM SYS.DUAL"
+            );
+            for (name, connection) in [
+                ("driver-cx", &driver as &dyn OracleConnection),
+                ("official", &official as &dyn OracleConnection),
+            ] {
+                let row = serialized_single_row(
+                    connection
+                        .query_rows(&cx, &sql, &[OracleBind::I64(value), OracleBind::I64(value)])
+                        .await
+                        .expect("NUMBER bind query"),
+                    name,
+                );
+                assert_eq!(row["EQUALITY"], "equal", "{name} NUMBER {value}: {row}");
+                assert_eq!(
+                    row["BOUND_DUMP"], row["LITERAL_DUMP"],
+                    "{name} NUMBER {value}: noncanonical wire bytes"
+                );
+                assert!(
+                    row["BOUND_DUMP"]
+                        .as_str()
+                        .expect("DUMP text")
+                        .starts_with("Typ=2 "),
+                    "{name}: expected a NUMBER bind"
+                );
+            }
+        }
+        driver.close(&cx).await.expect("driver-cx close");
+        official.close(&cx).await.expect("official close");
+    });
+}
+
+#[test]
 fn live_cross_backend_parity_for_supported_basic_auth() {
     if !lab_ready("live_cross_backend_parity_for_supported_basic_auth", &[]) {
         return;
@@ -1554,7 +1780,16 @@ fn live_cross_backend_parity_for_supported_basic_auth() {
                 .expect("official NUMBER/TSTZ query"),
             "official NUMBER/TSTZ",
         );
-        assert_eq!(driver_scalar, official_scalar, "NUMBER/TSTZ serialization");
+        assert_eq!(
+            driver_scalar["NUMBER_38"], official_scalar["NUMBER_38"],
+            "NUMBER serialization"
+        );
+        assert_tstz_representations(
+            &driver_scalar["TSTZ"],
+            &official_scalar["TSTZ"],
+            "2026-09-16T12:34:56.123456789-05:30",
+            "2026-09-16T18:04:56.123456789Z",
+        );
         assert_eq!(
             official_scalar["NUMBER_38"], "12345678901234567890123456789012345678",
             "NUMBER must remain the exact decimal string"

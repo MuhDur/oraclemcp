@@ -12,13 +12,11 @@ use std::time::Duration;
 use asupersync::Cx;
 use asupersync::combinator::try_commit_section;
 use asupersync::types::Time;
-use chrono::{Datelike, Timelike};
 use serde_json::{Number, Value, json};
 
 use crate::connection::{
     DbRequestQuota, ExecuteOutcome, OracleConnection, OracleRoutineArg, QueryRowStream,
     QueryRowStreamStart, WalletFileChoice, db_checkpoint, project_tsltz_rows,
-    timestamp_tz_wall_clock,
 };
 use crate::error::QuarantineOutcome;
 use crate::oracledb_actor::{
@@ -548,8 +546,8 @@ enum OfficialOutKind {
 }
 
 impl OfficialOutKind {
-    const NUMBER: &'static oracledb::DbType = &oracledb::DB_TYPE_NUMBER;
-    const VARCHAR: &'static oracledb::DbType = &oracledb::DB_TYPE_VARCHAR;
+    const NUMBER: &'static oracledb::DbType = oracledb::DB_TYPE_NUMBER;
+    const VARCHAR: &'static oracledb::DbType = oracledb::DB_TYPE_VARCHAR;
 
     fn db_type(&self) -> &&'static oracledb::DbType {
         match self {
@@ -715,9 +713,11 @@ fn execute_actor_command(
                 .statement(&sql)
                 .map_err(|error| official_error(error, OfficialOperation::Query))?
                 .fetch_lobs()
+                .build()
+                .map_err(|error| official_error(error, OfficialOperation::Query))?
                 .query(&params)
                 .map_err(|error| official_error(error, OfficialOperation::Query))?;
-            let metadata = cursor.columns().clone();
+            let metadata = cursor.columns().to_vec();
             let mut rows = Vec::new();
             for next in &mut cursor {
                 let mut row =
@@ -754,9 +754,11 @@ fn execute_actor_command(
                 .statement(&sql)
                 .map_err(|error| official_error(error, OfficialOperation::Query))?
                 .fetch_lobs()
+                .build()
+                .map_err(|error| official_error(error, OfficialOperation::Query))?
                 .query(&params)
                 .map_err(|error| official_error(error, OfficialOperation::Query))?;
-            let metadata = cursor.columns().clone();
+            let metadata = cursor.columns().to_vec();
             let columns = metadata
                 .iter()
                 .map(|column| column.name().to_owned())
@@ -1269,10 +1271,9 @@ fn number_cell(value: Option<oracledb::OracleNumber>, oracle_type: &'static str)
 /// metadata rather than inferring a timezone from its zero-valued fields.
 ///
 /// `OracleTimestamp` represents DATE, plain TIMESTAMP, LTZ, and TSTZ with the
-/// same struct. The first two have no timezone, so their zero offset must not
-/// become a fabricated UTC `Z`. LTZ/TSTZ retain an explicit offset. We also
-/// render the latter ourselves because the beta driver's Display implementation
-/// formats a negative minute component as "-05:-30".
+/// same struct. DATE and plain TIMESTAMP have no timezone. LTZ is projected
+/// through the session timezone elsewhere. Since beta.5, TSTZ contains only
+/// UTC components: the original offset is unavailable and must not be invented.
 fn format_official_timestamp_for_type(
     value: &oracledb::OracleTimestamp,
     db_type: &str,
@@ -1283,49 +1284,29 @@ fn format_official_timestamp_for_type(
             Ok(format_official_timestamp_components(value))
         }
         "DB_TYPE_TIMESTAMP_TZ" => {
-            let offset_minutes =
-                i32::from(value.tz_hour_offset()) * 60 + i32::from(value.tz_minute_offset());
-            let wall = timestamp_tz_wall_clock(
-                i32::from(value.year()),
-                value.month(),
-                value.day(),
-                value.hour(),
-                value.minute(),
-                value.second(),
-                value.nanoseconds(),
-                offset_minutes,
-            )
-            .ok_or_else(|| DbError::Query("invalid TIMESTAMP WITH TIME ZONE value".to_owned()))?;
-            let timestamp = format_official_wall_clock_components(wall);
-            if offset_minutes == 0 {
-                return Ok(format!("{timestamp}Z"));
+            if !value.is_utc() {
+                return Err(DbError::Query(
+                    "official TIMESTAMP WITH TIME ZONE value is not UTC".to_owned(),
+                ));
             }
-            let sign = if offset_minutes < 0 { '-' } else { '+' };
-            let offset_abs = i64::from(offset_minutes).abs();
-            Ok(format!(
-                "{timestamp}{sign}{:02}:{:02}",
-                offset_abs / 60,
-                offset_abs % 60
-            ))
+            chrono::NaiveDate::from_ymd_opt(
+                i32::from(value.year()),
+                u32::from(value.month()),
+                u32::from(value.day()),
+            )
+            .and_then(|date| {
+                date.and_hms_nano_opt(
+                    u32::from(value.hour()),
+                    u32::from(value.minute()),
+                    u32::from(value.second()),
+                    value.nanoseconds(),
+                )
+            })
+            .ok_or_else(|| DbError::Query("invalid TIMESTAMP WITH TIME ZONE value".to_owned()))?;
+            Ok(format!("{}Z", format_official_timestamp_components(value)))
         }
         _ => unreachable!("only timestamp database types may use this formatter"),
     }
-}
-
-fn format_official_wall_clock_components(wall: chrono::NaiveDateTime) -> String {
-    let timestamp = format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-        wall.year(),
-        wall.month(),
-        wall.day(),
-        wall.hour(),
-        wall.minute(),
-        wall.second(),
-    );
-    if wall.nanosecond() == 0 {
-        return timestamp;
-    }
-    format!("{timestamp}.{:09}", wall.nanosecond())
 }
 
 fn format_official_date_components(value: &oracledb::OracleTimestamp) -> String {
@@ -1451,7 +1432,10 @@ enum OfficialOperation {
 }
 
 fn official_error(error: oracledb::Error, operation: OfficialOperation) -> DbError {
-    let error_code = oraclemcp_error::parse_ora_code(&error.to_string());
+    let error_code = match error.kind() {
+        oracledb::ErrorKind::DbError(error) => i32::try_from(error.code()).ok(),
+        _ => None,
+    };
     let detail = error_code.map_or_else(
         || "official Oracle driver operation failed".to_owned(),
         |code| format!("ORA-{code:05}: official Oracle driver operation failed"),
@@ -2914,88 +2898,52 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_tz_projection_converts_utc_fields_to_display_wall_clock() {
-        for (
-            label,
-            (year, month, day, hour, minute, second, nanos),
-            hour_offset,
-            minute_offset,
-            expected,
-        ) in [
+    fn timestamp_tz_projection_preserves_utc_components_without_inventing_offsets() {
+        for (label, (year, month, day, hour, minute, second, nanos), expected) in [
             (
                 "free23 +05:45",
                 (2020, 2, 29, 17, 45, 0, 0),
-                5,
-                45,
-                "2020-02-29T23:30:00+05:45",
+                "2020-02-29T17:45:00Z",
             ),
             (
                 "leap-day -09:30",
                 (2020, 3, 1, 8, 15, 0, 0),
-                -9,
-                -30,
-                "2020-02-29T22:45:00-09:30",
+                "2020-03-01T08:15:00Z",
             ),
-            (
-                "UTC",
-                (2020, 2, 29, 23, 59, 0, 0),
-                0,
-                0,
-                "2020-02-29T23:59:00Z",
-            ),
+            ("UTC", (2020, 2, 29, 23, 59, 0, 0), "2020-02-29T23:59:00Z"),
             (
                 "+14:00 next day",
                 (2020, 2, 29, 17, 0, 0, 0),
-                14,
-                0,
-                "2020-03-01T07:00:00+14:00",
+                "2020-02-29T17:00:00Z",
             ),
             (
                 "negative minute only",
                 (2026, 9, 16, 12, 34, 56, 123_456_789),
-                0,
-                -30,
-                "2026-09-16T12:04:56.123456789-00:30",
+                "2026-09-16T12:34:56.123456789Z",
             ),
             (
                 "positive minute only",
                 (2026, 9, 16, 12, 34, 56, 123_456_789),
-                0,
-                30,
-                "2026-09-16T13:04:56.123456789+00:30",
+                "2026-09-16T12:34:56.123456789Z",
             ),
             (
                 "America/New_York before DST",
                 (2020, 3, 8, 6, 59, 0, 0),
-                -5,
-                0,
-                "2020-03-08T01:59:00-05:00",
+                "2020-03-08T06:59:00Z",
             ),
             (
                 "America/New_York after DST",
                 (2020, 3, 8, 7, 1, 0, 0),
-                -4,
-                0,
-                "2020-03-08T03:01:00-04:00",
+                "2020-03-08T07:01:00Z",
             ),
             (
                 "negative fraction",
                 (2026, 9, 16, 12, 34, 56, 123_456_789),
-                -5,
-                -30,
-                "2026-09-16T07:04:56.123456789-05:30",
+                "2026-09-16T12:34:56.123456789Z",
             ),
         ] {
-            let timestamp = oracledb::OracleTimestamp::new_timestamp_tz(
-                year,
-                month,
-                day,
-                hour,
-                minute,
-                second,
-                nanos,
-                hour_offset,
-                minute_offset,
+            let timestamp = oracledb::OracleTimestamp::new_utc_timestamp(
+                year, month, day, hour, minute, second, nanos,
             );
             assert_eq!(
                 format_official_timestamp_for_type(&timestamp, "DB_TYPE_TIMESTAMP_TZ")
@@ -3003,6 +2951,21 @@ mod tests {
                 expected,
                 "{label}"
             );
+        }
+        let naive = oracledb::OracleTimestamp::new_timestamp(2026, 9, 16, 12, 34, 56, 0);
+        assert!(matches!(
+            format_official_timestamp_for_type(&naive, "DB_TYPE_TIMESTAMP_TZ"),
+            Err(DbError::Query(_))
+        ));
+        for invalid in [
+            oracledb::OracleTimestamp::new_utc_timestamp(2026, 13, 1, 12, 0, 0, 0),
+            oracledb::OracleTimestamp::new_utc_timestamp(2026, 2, 30, 12, 0, 0, 0),
+            oracledb::OracleTimestamp::new_utc_timestamp(2026, 9, 16, 24, 0, 0, 0),
+        ] {
+            assert!(matches!(
+                format_official_timestamp_for_type(&invalid, "DB_TYPE_TIMESTAMP_TZ"),
+                Err(DbError::Query(_))
+            ));
         }
     }
 
