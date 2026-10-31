@@ -1382,7 +1382,6 @@ impl OracleDispatcher {
         let FleetCatalogRequest {
             profile,
             owner,
-            object_type,
             object_types,
             name_like,
             max_rows,
@@ -1433,7 +1432,7 @@ impl OracleDispatcher {
                     cx,
                     &observed,
                     owner,
-                    object_type,
+                    None,
                     name_like,
                     SearchDetailLevel::Names,
                     max_rows,
@@ -15061,7 +15060,6 @@ impl OracleDispatcher {
                         invalid_args("detail_level must be one of: names, summary, standard, full")
                     })?;
                 let owner_arg = non_empty_arg(a.owner);
-                let object_type: Option<String> = None;
                 let object_types = a.object_types.map(|values| {
                     values
                         .into_iter()
@@ -15116,7 +15114,6 @@ impl OracleDispatcher {
                                 FleetCatalogRequest {
                                     profile: profile.name,
                                     owner: owner_filter.as_deref(),
-                                    object_type: object_type.as_deref(),
                                     object_types: object_types.as_deref(),
                                     name_like: name_like.as_deref(),
                                     max_rows: remaining,
@@ -15134,7 +15131,7 @@ impl OracleDispatcher {
                     return Ok(fleet_catalog_response(
                         lanes,
                         owner_filter.as_deref(),
-                        object_type.as_deref(),
+                        object_types.as_deref(),
                         name_like.as_deref(),
                         max_rows,
                     ));
@@ -15186,7 +15183,7 @@ impl OracleDispatcher {
                         cx,
                         &guarded_metadata_conn,
                         owner_filter.as_deref(),
-                        object_type.as_deref(),
+                        None,
                         name_like.as_deref(),
                         detail,
                         max_rows,
@@ -15197,7 +15194,6 @@ impl OracleDispatcher {
                 dispatch_checkpoint(&read_cx, "oraclemcp.dispatch.search_objects.after")?;
                 Ok(json!({
                     "owner": owner_filter.as_deref().unwrap_or("*"),
-                    "object_type": object_type,
                     "object_types": object_types,
                     "name_like": name_like,
                     "detail_level": detail.as_str(),

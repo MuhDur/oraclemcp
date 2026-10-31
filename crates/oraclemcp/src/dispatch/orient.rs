@@ -97,7 +97,6 @@ pub(super) struct FleetCatalogProfileResult {
 pub(super) struct FleetCatalogRequest<'a> {
     pub(super) profile: String,
     pub(super) owner: Option<&'a str>,
-    pub(super) object_type: Option<&'a str>,
     pub(super) object_types: Option<&'a [String]>,
     pub(super) name_like: Option<&'a str>,
     pub(super) max_rows: usize,
@@ -447,7 +446,7 @@ pub(super) fn fleet_catalog_result_row(
 pub(super) fn fleet_catalog_response(
     lanes: Vec<FleetCatalogProfileResult>,
     owner: Option<&str>,
-    object_type: Option<&str>,
+    object_types: Option<&[String]>,
     name_like: Option<&str>,
     max_rows: usize,
 ) -> Value {
@@ -470,7 +469,7 @@ pub(super) fn fleet_catalog_response(
     json!({
         "fleet": true,
         "owner": owner.unwrap_or("*"),
-        "object_type": object_type,
+        "object_types": object_types,
         "name_like": name_like,
         "detail_level": "names",
         "count": results.len(),

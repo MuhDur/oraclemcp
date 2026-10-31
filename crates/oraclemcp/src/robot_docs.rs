@@ -774,6 +774,7 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
         ],
         "agent_rules": [
             "Prefer oracle_query for SELECT/WITH statements.",
+            "oracle_search_objects echoes the canonical object_types filter in single-profile and fleet responses. The deprecated object_type input still works; the response has no top-level object_type echo. Per-object results retain object_type.",
             "Use oracle_preview_sql before oracle_execute or DDL helpers.",
             "Use oracle_patch_source for exact stored-source edits instead of hand-building full replacement DDL when possible.",
             "Use read_patch_preview only for in-process compatibility reads of the last source-patch preview.",
@@ -794,6 +795,7 @@ pub(crate) fn robot_docs_guide_text() -> String {
 
 Output contract
 - Use --robot-json or --json for compact machine-readable stdout.
+- oracle_search_objects echoes object_types for single-profile and fleet responses, including requests using the deprecated object_type input. There is no top-level object_type echo; per-object results retain object_type.
 - Diagnostics and serve startup status are written to stderr.
 - Read-only commands do not open a database unless their command explicitly says so.
 - MCP tool parameter schemas are top-level JSON objects and avoid top-level oneOf, anyOf, allOf, enum, and not for strict client adapters.
