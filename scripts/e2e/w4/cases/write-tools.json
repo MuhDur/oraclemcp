@@ -2257,6 +2257,11 @@
       }
     ],
     "audit_expect": [],
+    "cleanup": [
+      {
+        "sql": "DELETE FROM ${owner}.T_PARENT_${run_id} WHERE ID = 301"
+      }
+    ],
     "on_unsupported": {
       "error_class": "INVALID_ARGUMENTS"
     }
