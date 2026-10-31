@@ -840,7 +840,7 @@ fn exact_routine_id(routine: &RoutineRef) -> Option<String> {
     Some(names.join("."))
 }
 
-fn map_engine_effects(effects: &plsql_engine::RoutineEffectsV1) -> RoutineEffectsV1 {
+pub(crate) fn map_engine_effects(effects: &plsql_engine::RoutineEffectsV1) -> RoutineEffectsV1 {
     use plsql_engine::{OperatorStatementClass as EngineOperator, RoutineEffect as EngineEffect};
     RoutineEffectsV1::new(effects.iter().map(|effect| match effect {
         EngineEffect::ReadDb => RoutineEffect::ReadDb,
@@ -3141,16 +3141,23 @@ pub(crate) fn analyze_source_impact(source: &str) -> Result<SourceImpactAnalysis
     // Grammar-backed analysis recurses deeply. Previews reach this from
     // callers on default-sized stacks, so it gets the lane thread's stack
     // (oraclemcp-core lane.rs) regardless of where it is called from.
+    on_engine_stack(|| analyze_source_impact_on_stack(source))?
+}
+
+/// Share the existing parser stack boundary across source-proof consumers.
+pub(crate) fn on_engine_stack<T: Send>(
+    analyze: impl FnOnce() -> T + Send,
+) -> Result<T, ErrorEnvelope> {
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .name("omcp-source-impact".to_owned())
             .stack_size(8 * 1024 * 1024)
-            .spawn_scoped(scope, || analyze_source_impact_on_stack(source))
+            .spawn_scoped(scope, analyze)
             .map_err(|_| {
                 ErrorEnvelope::new(ErrorClass::Internal, "PL/SQL analysis thread unavailable")
             })?
             .join()
-            .map_err(|_| ErrorEnvelope::new(ErrorClass::Internal, "PL/SQL analysis panicked"))?
+            .map_err(|_| ErrorEnvelope::new(ErrorClass::Internal, "PL/SQL analysis panicked"))
     })
 }
 

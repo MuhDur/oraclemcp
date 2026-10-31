@@ -443,6 +443,7 @@ async fn stored_source(
 /// reloads stored source and every catalog/callback proof on the target lane.
 pub(crate) struct PreparedCompileParse {
     sql: String,
+    resolution_schema: Option<String>,
     require_security_feature_evidence: bool,
     target_commitments: Vec<[u8; 32]>,
     pub(crate) closures: Vec<CompileParseEffectClosureV1>,
@@ -465,10 +466,16 @@ impl PreparedCompileParse {
         cx: &Cx,
         conn: &dyn OracleConnection,
     ) -> Result<(), ErrorEnvelope> {
-        let fresh = prepare_compile(cx, conn, &self.sql, self.require_security_feature_evidence)
-            .await
-            .map_err(|_| stale())?
-            .ok_or_else(stale)?;
+        let fresh = prepare_compile_for_schema(
+            cx,
+            conn,
+            &self.sql,
+            self.resolution_schema.as_deref(),
+            self.require_security_feature_evidence,
+        )
+        .await
+        .map_err(|_| stale())?
+        .ok_or_else(stale)?;
         if fresh.digest() != self.digest() {
             return Err(stale());
         }
@@ -491,12 +498,27 @@ async fn prepare_compile(
     sql: &str,
     require_security_feature_evidence: bool,
 ) -> Result<Option<PreparedCompileParse>, ErrorEnvelope> {
+    prepare_compile_for_schema(cx, conn, sql, None, require_security_feature_evidence).await
+}
+
+/// A definer-rights routine resolves its literal DDL in its own schema. Keep
+/// that explicit identity in the same compile proof and its fresh recheck.
+pub(crate) async fn prepare_compile_for_schema(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    sql: &str,
+    resolution_schema: Option<&str>,
+    require_security_feature_evidence: bool,
+) -> Result<Option<PreparedCompileParse>, ErrorEnvelope> {
     let Some(header) = header(sql)? else {
         return Ok(None);
     };
     let owner = match header.owner {
         Some(owner) => owner,
-        None => current_schema(cx, conn).await?,
+        None => match resolution_schema {
+            Some(owner) => owner.to_owned(),
+            None => current_schema(cx, conn).await?,
+        },
     };
     let mut sources = Vec::new();
     let mut target_commitments = Vec::new();
@@ -620,6 +642,7 @@ async fn prepare_compile(
     }
     Ok(Some(PreparedCompileParse {
         sql: sql.to_owned(),
+        resolution_schema: resolution_schema.map(str::to_owned),
         require_security_feature_evidence,
         target_commitments,
         closures,

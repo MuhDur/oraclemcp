@@ -3899,16 +3899,13 @@ fn a2a_error_statuses_preserve_actionable_causes() {
 }
 
 fn custom_def(name: &str) -> CustomToolDef {
-    CustomToolDef {
-        name: name.to_owned(),
-        description: "Test custom tool".to_owned(),
-        sql: Some("SELECT 1 FROM dual".to_owned()),
-        call: None,
-        params: Vec::new(),
-        output_mode: oraclemcp_core::OutputMode::Rows,
-        declared_level: None,
-        signature: None,
-    }
+    let mut def = oraclemcp_core::parse_tools_file(
+        "[[tool]]\nname = \"test\"\ndescription = \"Test custom tool\"\nsql = \"SELECT 1 FROM dual\"",
+    )
+    .unwrap()
+    .remove(0);
+    def.name = name.to_owned();
+    def
 }
 
 #[test]
@@ -4066,125 +4063,6 @@ fn custom_tool_catalog_and_sign_cli_enforce_hmac_key_size() {
 }
 
 #[test]
-fn custom_tool_loader_uses_each_profiles_real_ceiling() {
-    let tools_dir = target_tmp_file("b12b-custom-tool-ceilings");
-    fs::create_dir_all(&tools_dir).expect("create tools dir");
-    let tool_path = tools_dir.join("guarded.toml");
-
-    // Static DML classifies as READ_WRITE. The unsigned/no-key path used to
-    // hard-code READ_ONLY, so every writable profile was incorrectly refused.
-    fs::write(
-        &tool_path,
-        r#"
-        [[tool]]
-        name = "app_bump"
-        description = "Update one status"
-        sql = "UPDATE accounts SET status = 'ACTIVE' WHERE id = 7"
-        output_mode = "rows"
-        "#,
-    )
-    .expect("write unsigned guarded tool");
-
-    let profile_ceiling = |max_level: &str| {
-        let config = OracleMcpConfig::from_toml_str(&format!(
-            r#"
-            [[profiles]]
-            name = "custom_tool_profile"
-            connect_string = "db:1521/service"
-            max_level = "{max_level}"
-            "#
-        ))
-        .expect("profile config parses");
-        let profile = config
-            .profile("custom_tool_profile")
-            .expect("profile exists");
-        oraclemcp_core::session_level_state(profile, false).max_level()
-    };
-
-    for (profile_max, should_load) in [
-        ("READ_ONLY", false),
-        ("READ_WRITE", true),
-        ("DDL", true),
-        ("ADMIN", true),
-    ] {
-        let result = load_custom_catalog_from_sources(
-            Some(&tools_dir),
-            None,
-            false,
-            profile_ceiling(profile_max),
-        );
-        if should_load {
-            assert_eq!(
-                result
-                    .expect("tool must load at the profile's real ceiling")
-                    .len(),
-                1,
-                "{profile_max} profile should load its READ_WRITE custom tool"
-            );
-        } else {
-            let error = result.expect_err("READ_ONLY profile must refuse a write tool");
-            assert!(
-                error.message.contains("profile ceiling is READ_ONLY"),
-                "unexpected error: {}",
-                error.message
-            );
-        }
-    }
-
-    // The signed path must report the selected profile's real ceiling too.
-    // A declaration can only raise a classifier-derived floor, so this remains
-    // a fail-closed test without requiring executable DDL in the fixture.
-    let secret = "0123456789abcdef0123456789abcdef";
-    let key = HmacSha256Key::new(secret.as_bytes().to_vec()).expect("valid signing key");
-    let mut signed = custom_def("app_schema_report");
-    signed.declared_level = Some("DDL".to_owned());
-    signed.signature = Some(sign(&signed, &key));
-    fs::write(
-        &tool_path,
-        format!(
-            r#"
-            [[tool]]
-            name = "{}"
-            description = "{}"
-            sql = "{}"
-            output_mode = "rows"
-            declared_level = "DDL"
-            signature = "{}"
-            "#,
-            signed.name,
-            signed.description,
-            signed.sql.as_deref().expect("inline SQL"),
-            signed.signature.as_deref().expect("signature"),
-        ),
-    )
-    .expect("write signed DDL-pinned tool");
-
-    let error = load_custom_catalog_from_sources(
-        Some(&tools_dir),
-        Some(secret),
-        true,
-        profile_ceiling("READ_WRITE"),
-    )
-    .expect_err("signed DDL-pinned tool must not load above the profile ceiling");
-    assert!(error.message.contains("requires DDL"), "{error:?}");
-    assert!(
-        error.message.contains("profile ceiling is READ_WRITE"),
-        "signed-tool refusal must name the real profile ceiling: {error:?}"
-    );
-    assert_eq!(
-        load_custom_catalog_from_sources(
-            Some(&tools_dir),
-            Some(secret),
-            true,
-            profile_ceiling("DDL")
-        )
-        .expect("signed DDL-pinned tool loads at DDL")
-        .len(),
-        1
-    );
-}
-
-#[test]
 fn custom_tool_loader_skips_malformed_files_but_strict_mode_refuses_startup() {
     let tools_dir = target_tmp_file("b12c-skip-malformed");
     fs::create_dir_all(&tools_dir).expect("create tools dir");
@@ -4237,7 +4115,7 @@ fn custom_tool_loader_never_skips_a_tampered_signature() {
         description = "Lookup one row"
         sql = "SELECT 1 FROM dual"
         output_mode = "rows"
-        signature = "oraclemcp-custom-tool:v2:hmac-sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        signature = "oraclemcp-custom-tool:v3:hmac-sha256:0000000000000000000000000000000000000000000000000000000000000000"
         "#,
     )
     .expect("write tampered signed tool");
@@ -4265,7 +4143,7 @@ fn tampered_custom_tool_signature_is_recorded_on_the_unsigned_b8c_trail() {
         description = "Lookup one row"
         sql = "SELECT 1 FROM dual"
         output_mode = "rows"
-        signature = "oraclemcp-custom-tool:v2:hmac-sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        signature = "oraclemcp-custom-tool:v3:hmac-sha256:0000000000000000000000000000000000000000000000000000000000000000"
         "#,
     )
     .expect("write tampered signed tool");
@@ -4687,3 +4565,6 @@ mod issue51;
 fn second_serve_instance_reports_audit_lock_issue_51() {
     issue51::second_serve_instance_reports_audit_lock();
 }
+
+#[path = "custom_tool_startup_tests.rs"]
+mod package_startup;

@@ -53,6 +53,9 @@ pub struct ToolDescriptor {
     /// Explicit MCP tool annotations. These are advisory hints for clients; the
     /// SQL classifier and operating-level gate remain the enforcement path.
     pub annotations: ToolAnnotations,
+    /// Effect-derived custom-tool floor, published only after live activation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_level: Option<oraclemcp_guard::OperatingLevel>,
 }
 
 /// Advisory MCP tool annotations, emitted with every advertised tool so
@@ -117,6 +120,7 @@ impl ToolDescriptor {
             output_schema: None,
             destructive: false,
             annotations: ToolAnnotations::read_only(),
+            required_level: None,
         }
     }
 
@@ -131,6 +135,20 @@ impl ToolDescriptor {
     #[must_use]
     pub fn with_output_schema(mut self, schema: serde_json::Value) -> Self {
         self.output_schema = Some(schema);
+        self
+    }
+
+    /// Attach the proven operating-level floor to an activated custom tool.
+    #[must_use]
+    pub fn with_required_level(mut self, level: oraclemcp_guard::OperatingLevel) -> Self {
+        self.required_level = Some(level);
+        if level > oraclemcp_guard::OperatingLevel::ReadOnly {
+            self.annotations.read_only_hint = false;
+            self.annotations.idempotent_hint = false;
+            if level >= oraclemcp_guard::OperatingLevel::Ddl {
+                self = self.destructive();
+            }
+        }
         self
     }
 

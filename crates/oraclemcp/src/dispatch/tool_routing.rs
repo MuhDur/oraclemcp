@@ -61,6 +61,21 @@ pub(super) fn response_reports_terminal_effect(name: &str, value: &Value) -> boo
                     || bool_field("non_transactional_effect")
                     || bool_field("held"))
         }
-        _ => false,
+        _ => {
+            bool_field("package_call")
+                && bool_field("executed")
+                && (bool_field("committed") || bool_field("non_transactional_effect"))
+        }
     }
+}
+
+pub(super) fn error_reports_terminal_effect(error: &oraclemcp_error::ErrorEnvelope) -> bool {
+    matches!(
+        error.statement_outcome,
+        Some(
+            oraclemcp_error::StatementOutcome::Committed
+                | oraclemcp_error::StatementOutcome::CommitUnknown
+                | oraclemcp_error::StatementOutcome::DdlOutcomeUnknown
+        )
+    )
 }

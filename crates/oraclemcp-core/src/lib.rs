@@ -128,9 +128,11 @@ pub use config_ops::{
 pub use connect::{SessionContext, build_session_context, profile_to_options, session_level_state};
 pub use custom_tools::{
     CustomToolCatalog, CustomToolDef, CustomToolExecutor, LoadError, LoadedTool, OutputMode,
-    ParamDef, ParamType, ToolBody, bind_params, classify_at_load, enforce_signature,
-    execute_custom_tool, load_tools, load_tools_for_profile, parse_tools_file,
-    register_custom_tools, sign, verify_signature,
+    PackageArgDef, PackageArgDirection, PackageCallWrapper, PackageOracleType, PackageRoutineDef,
+    ParamDef, ParamType, SignedPackageDefinition, ToolBody, bind_params, classify_at_load,
+    enforce_signature, execute_custom_tool, load_tools, load_tools_for_profile,
+    package_call_wrapper, parse_tools_file, prepare_package_definition, register_custom_tools,
+    sign, verify_signature,
 };
 pub use dashboard_auth::{
     DASHBOARD_ACTION_TICKET_HEADER, DASHBOARD_AUDIENCE_HEADER, DASHBOARD_CSRF_HEADER,

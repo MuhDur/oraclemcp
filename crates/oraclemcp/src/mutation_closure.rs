@@ -7,6 +7,7 @@ use asupersync::Cx;
 use oraclemcp_db::mutation_closure::{
     MAX_MUTATION_SCOPES, MAX_MUTATION_SOURCE_BYTES, MutationEffectOracle, MutationRequest,
     MutationRoutineProof, MutationRoutineSource, MutationRoutineUse, read_mutation_routine_source,
+    read_pinned_mutation_routine_source,
 };
 use oraclemcp_db::{
     CatalogQueryId, FgaClosure, FgaStatementKind, OracleConnection, OracleRow, fga_closure,
@@ -91,6 +92,18 @@ struct Sources {
     members: Vec<MutationRoutineSource>,
     dependencies: Vec<Dependency>,
     synthetic: bool,
+}
+
+struct SourceLiteral {
+    unit: usize,
+    offset: u32,
+    sql: String,
+}
+
+struct AnalyzedRoutine {
+    run: plsql_engine::AnalysisRun,
+    closure: plsql_engine::InvocationClosureV1,
+    literals: Vec<SourceLiteral>,
 }
 
 async fn dependencies(
@@ -197,13 +210,14 @@ async fn load_sources(
     let root = if synthetic {
         expression_source(input)?
     } else {
-        let mut fresh = read_mutation_routine_source(
+        let mut fresh = read_pinned_mutation_routine_source(
             cx,
             conn,
             &input.owner,
             &input.name,
             &input.object_type,
             input.member.as_deref(),
+            input.subprogram_id,
         )
         .await?;
         fresh.use_context = input.use_context;
@@ -241,6 +255,18 @@ async fn load_sources(
         }
         if visited.len() > MAX_MUTATION_SCOPES {
             return Err(Unknown::ClosureCapExhausted);
+        }
+        if kind == "PACKAGE BODY" && loaded.insert((owner.clone(), name.clone(), "PACKAGE".into()))
+        {
+            let specification =
+                read_mutation_routine_source(cx, conn, &owner, &name, "PACKAGE", None).await?;
+            bytes = bytes.saturating_add(specification.source.len());
+            rows = rows.saturating_add(specification.source_line_count);
+            if bytes > MAX_MUTATION_SOURCE_BYTES || rows > 16_384 {
+                return Err(Unknown::ClosureCapExhausted);
+            }
+            queue.push_back((owner.clone(), name.clone(), "PACKAGE".into()));
+            members.push(specification);
         }
         let current = dependencies(cx, conn, &owner, &name, &kind).await?;
         rows = rows.saturating_add(current.len());
@@ -315,11 +341,18 @@ async fn load_sources(
 }
 
 fn qualified_source(source: &MutationRoutineSource) -> Result<String, Unknown> {
+    qualified_source_with_literals(source, None).map(|(text, _)| text)
+}
+
+fn qualified_source_with_literals(
+    source: &MutationRoutineSource,
+    ordinal: Option<usize>,
+) -> Result<(String, Vec<SourceLiteral>), Unknown> {
     if !simple(&source.owner)
         || !simple(&source.name)
         || !matches!(
             source.object_type.as_str(),
-            "FUNCTION" | "PROCEDURE" | "TRIGGER" | "PACKAGE BODY"
+            "FUNCTION" | "PROCEDURE" | "TRIGGER" | "PACKAGE" | "PACKAGE BODY"
         )
     {
         return Err(Unknown::UnsupportedMechanism);
@@ -384,7 +417,7 @@ fn qualified_source(source: &MutationRoutineSource) -> Result<String, Unknown> {
         "FUNCTION" => matches!(declaration, plsql_ir::Declaration::Function(_)),
         "PROCEDURE" => matches!(declaration, plsql_ir::Declaration::Procedure(_)),
         "TRIGGER" => matches!(declaration, plsql_ir::Declaration::Trigger(_)),
-        "PACKAGE BODY" => matches!(declaration, plsql_ir::Declaration::Package(_)),
+        "PACKAGE" | "PACKAGE BODY" => matches!(declaration, plsql_ir::Declaration::Package(_)),
         _ => false,
     };
     if !correct_kind {
@@ -402,6 +435,10 @@ fn qualified_source(source: &MutationRoutineSource) -> Result<String, Unknown> {
     if text.get(start..end).is_none() {
         return Err(Unknown::SourceUnavailable);
     }
+    let literals = ordinal
+        .map(|ordinal| source_literals(&parsed, ordinal))
+        .transpose()?
+        .unwrap_or_default();
     let mut qualified = text;
     qualified.replace_range(
         start..end,
@@ -409,7 +446,7 @@ fn qualified_source(source: &MutationRoutineSource) -> Result<String, Unknown> {
     );
     crate::plsql_tools::validate_engine_source(&qualified)
         .map_err(|_| Unknown::SourceUnavailable)?;
-    Ok(qualified)
+    Ok((qualified, literals))
 }
 
 fn catalog(sources: &Sources) -> Result<plsql_catalog::CatalogSnapshot, Unknown> {
@@ -554,13 +591,30 @@ fn constant_policy_returns(
 fn analyze(
     sources: &Sources,
 ) -> Result<(plsql_engine::AnalysisRun, plsql_engine::InvocationClosureV1), Unknown> {
+    let analysis = analyze_for_call(sources, None)?;
+    Ok((analysis.run, analysis.closure))
+}
+
+fn analyze_for_call(
+    sources: &Sources,
+    arguments: Option<&[oraclemcp_core::PackageArgDef]>,
+) -> Result<AnalyzedRoutine, Unknown> {
+    crate::plsql_tools::on_engine_stack(|| analyze_for_call_on_stack(sources, arguments))
+        .map_err(|_| Unknown::EffectProofUnavailable)?
+}
+
+fn analyze_for_call_on_stack(
+    sources: &Sources,
+    arguments: Option<&[oraclemcp_core::PackageArgDef]>,
+) -> Result<AnalyzedRoutine, Unknown> {
     let project = tempfile::tempdir().map_err(|_| Unknown::EffectProofUnavailable)?;
+    let mut literals = Vec::new();
     for (index, source) in sources.members.iter().enumerate() {
-        std::fs::write(
-            project.path().join(format!("unit_{index}.sql")),
-            qualified_source(source)?,
-        )
-        .map_err(|_| Unknown::EffectProofUnavailable)?;
+        let (text, mut unit_literals) =
+            qualified_source_with_literals(source, arguments.map(|_| index))?;
+        literals.append(&mut unit_literals);
+        std::fs::write(project.path().join(format!("unit_{index}.sql")), text)
+            .map_err(|_| Unknown::EffectProofUnavailable)?;
     }
     let snapshot = project.path().join("catalog.json");
     plsql_catalog::export_snapshot_to_json(&catalog(sources)?, &snapshot)
@@ -579,9 +633,39 @@ fn analyze(
         || run.catalog.is_none()
         || !run.completeness.catalog_available
     {
+        tracing::debug!(posture = ?run.completeness.posture, catalog = run.completeness.catalog_available, "routine engine analysis is incomplete");
         return Err(Unknown::EffectProofUnavailable);
     }
     let id = qualified_id(&sources.root);
+    // InvocationIndex package units use PACKAGE.MEMBER, unlike standalone
+    // routines' schema-qualified ids. Bind that namespace only when the whole
+    // loaded code closure belongs to one exact dictionary owner. Cross-owner
+    // collisions cannot be disambiguated by this producer and remain Unknown.
+    let package_id = if arguments.is_some() {
+        if sources
+            .members
+            .iter()
+            .any(|member| member.owner != sources.root.owner)
+        {
+            return Err(Unknown::IdentityMismatch);
+        }
+        let member = sources
+            .root
+            .member
+            .as_deref()
+            .ok_or(Unknown::IdentityMismatch)?;
+        let package = run
+            .invocation_index
+            .packages
+            .get(&sources.root.name)
+            .ok_or(Unknown::EffectProofUnavailable)?;
+        if !package.has_spec || !package.has_body || !package.complete {
+            return Err(Unknown::EffectProofUnavailable);
+        }
+        Some(format!("{}.{member}", sources.root.name))
+    } else {
+        None
+    };
     let units: Vec<_> = run
         .invocation_index
         .units
@@ -590,10 +674,30 @@ fn analyze(
             unit.id
                 .split_once('#')
                 .map_or(unit.id.as_str(), |(base, _)| base)
-                == id
+                == package_id.as_deref().unwrap_or(&id)
         })
         .collect();
-    let [unit] = units.as_slice() else {
+    let selected: Vec<_> = units
+        .into_iter()
+        .filter(|unit| {
+            arguments.is_none_or(|args| {
+                let supplied: Vec<_> = args
+                    .iter()
+                    .filter(|arg| arg.direction != oraclemcp_core::PackageArgDirection::Return)
+                    .collect();
+                supplied.len() == unit.params.len()
+                    && supplied.iter().zip(&unit.params).all(|(arg, param)| {
+                        arg.oracle_name.as_deref() == Some(param.name.as_str())
+                            && package_parameter_type_matches(
+                                arg.oracle_type,
+                                param.type_text.as_deref(),
+                            )
+                    })
+            })
+        })
+        .collect();
+    let [unit] = selected.as_slice() else {
+        tracing::debug!(root = id, candidates = selected.len(), units = ?run.invocation_index.units.iter().map(|(id, unit)| (id, unit.params.iter().map(|param| (&param.name, &param.type_text)).collect::<Vec<_>>())).collect::<Vec<_>>(), "routine invocation signature is not unique");
         return Err(Unknown::EffectProofUnavailable);
     };
     let closure = run
@@ -603,12 +707,13 @@ fn analyze(
             named_arguments: unit
                 .params
                 .iter()
-                .filter(|param| !param.has_default)
+                .filter(|param| arguments.is_some() || !param.has_default)
                 .map(|param| param.name.clone())
                 .collect(),
             ..Default::default()
         });
     if !closure.clean || !closure.unknown_reasons.is_empty() || !closure.units.contains(&unit.id) {
+        tracing::debug!(clean = closure.clean, reasons = ?closure.unknown_reasons, "routine invocation closure is incomplete");
         return Err(Unknown::EffectProofUnavailable);
     }
     if sources.root.use_context == MutationRoutineUse::VpdPolicy
@@ -616,7 +721,267 @@ fn analyze(
     {
         return Err(Unknown::EffectProofUnavailable);
     }
-    Ok((run, closure))
+    Ok(AnalyzedRoutine {
+        run,
+        closure,
+        literals,
+    })
+}
+
+fn package_parameter_type_matches(
+    ty: oraclemcp_core::PackageOracleType,
+    source: Option<&str>,
+) -> bool {
+    use oraclemcp_core::PackageOracleType as T;
+    let Some(source) = source else {
+        return false;
+    };
+    let source = source.trim().to_ascii_uppercase();
+    match ty {
+        T::Number => matches!(
+            source.as_str(),
+            "NUMBER" | "NUMERIC" | "DECIMAL" | "INTEGER" | "INT" | "SMALLINT"
+        ),
+        T::Varchar2 => source == "VARCHAR2",
+        T::Nvarchar2 => source == "NVARCHAR2",
+        T::Boolean => source == "BOOLEAN",
+        T::BinaryFloat => source == "BINARY_FLOAT",
+        T::BinaryDouble => source == "BINARY_DOUBLE",
+        T::Date => source == "DATE",
+        T::Timestamp => source == "TIMESTAMP",
+        T::Raw => source == "RAW",
+        T::RefCursor => source == "SYS_REFCURSOR",
+    }
+}
+
+/// Complete source-backed proof for one catalog-pinned package member. This
+/// consumer reuses the mutation source collector and engine invocation closure.
+pub(crate) struct PackageCallEffects {
+    pub(crate) proof: MutationRoutineProof,
+    pub(crate) fact_key: oraclemcp_db::ClosureFactKey,
+    pub(crate) literal_sql: Vec<String>,
+}
+
+impl EngineMutationEffects {
+    pub(crate) async fn prove_package_call(
+        &self,
+        cx: &Cx,
+        conn: &dyn OracleConnection,
+        source: &MutationRoutineSource,
+        arguments: &[oraclemcp_core::PackageArgDef],
+    ) -> Result<PackageCallEffects, Unknown> {
+        let identity = read_closure_database_identity(cx, conn)
+            .await
+            .map_err(|_| Unknown::CatalogUnreadable)?;
+        let sources = load_sources(cx, conn, source).await?;
+        let AnalyzedRoutine {
+            run,
+            closure,
+            literals,
+        } = analyze_for_call(&sources, Some(arguments))?;
+        let effects = crate::plsql_tools::map_engine_effects(&closure.effects);
+        tracing::debug!(effects = ?effects, "package invocation effect proof");
+        package_effects_level(&effects)?;
+        let has = |wanted| effects.iter().any(|effect| effect == wanted);
+        if has(RoutineEffect::ReadDb) || has(RoutineEffect::Dml) {
+            prove_read_dependencies(cx, conn, &sources)
+                .await
+                .inspect_err(|reason| {
+                    tracing::debug!(?reason, "package dependency proof unavailable");
+                })?;
+        }
+        let mutations = mutations(&sources, &run, &closure)?;
+        if has(RoutineEffect::Dml) && mutations.is_empty() {
+            tracing::debug!(
+                units = closure.units.len(),
+                edges = run.dep_graph.edges.len(),
+                "package DML has no attested mutation target"
+            );
+            return Err(Unknown::EffectProofUnavailable);
+        }
+        let mut literal_sql = Vec::new();
+        for id in &closure.units {
+            let unit = run
+                .invocation_index
+                .units
+                .get(id)
+                .ok_or(Unknown::EffectProofUnavailable)?;
+            project_literal_sql(&unit.statements, &mut literal_sql)?;
+        }
+        let literal_sql = source_ordered_literal_sql(&literals, literal_sql)?;
+        if !has(RoutineEffect::Ddl)
+            && literal_sql
+                .iter()
+                .any(|sql| oraclemcp_guard::semantic_read_plan_checked(sql).is_err())
+        {
+            return Err(Unknown::UnsupportedMechanism);
+        }
+        if has(RoutineEffect::Ddl) && literal_sql.is_empty() {
+            return Err(Unknown::EffectProofUnavailable);
+        }
+        let current = load_sources(cx, conn, source).await?;
+        if encoded(&sources.members) != encoded(&current.members)
+            || sources.dependencies != current.dependencies
+            || read_closure_database_identity(cx, conn)
+                .await
+                .map_err(|_| Unknown::CatalogUnreadable)?
+                != identity
+        {
+            return Err(Unknown::EffectSourceMismatch);
+        }
+        let fingerprint = digest(&encoded(&(
+            "package-call-engine/v1",
+            &identity,
+            source,
+            &sources.members,
+            &sources.dependencies,
+            &effects,
+            &literal_sql,
+            oraclemcp_guard::SYS_EFFECTS_TOML,
+        )));
+        Ok(PackageCallEffects {
+            fact_key: oraclemcp_db::ClosureFactKey {
+                dbid: identity.dbid,
+                container: identity.container,
+                edition: identity.edition,
+                root: routine(source),
+                fingerprint: fingerprint.clone(),
+            },
+            proof: MutationRoutineProof {
+                use_context: source.use_context,
+                source_sha256: source.source_sha256.clone(),
+                closure_fingerprint: fingerprint,
+                effects,
+                mutations,
+            },
+            literal_sql,
+        })
+    }
+}
+
+fn package_effects_level(
+    effects: &oraclemcp_guard::RoutineEffectsV1,
+) -> Result<oraclemcp_guard::OperatingLevel, Unknown> {
+    let level = oraclemcp_guard::admit(effects, oraclemcp_guard::AdmissionContext::CustomToolCall)
+        .map_err(|_| Unknown::EffectProofUnavailable)?;
+    let has = |wanted| effects.iter().any(|effect| effect == wanted);
+    if has(RoutineEffect::Dml) && (has(RoutineEffect::Ddl) || has(RoutineEffect::Admin)) {
+        return Err(Unknown::EffectProofUnavailable);
+    }
+    // Administrative SQL has no exact object/event projection in this port.
+    // In particular, its implicit commit must never be treated as DML rollback.
+    if has(RoutineEffect::Admin) {
+        return Err(Unknown::UnsupportedMechanism);
+    }
+    Ok(level)
+}
+
+// Projection only: effect authority comes from the already-clean engine
+// invocation closure. Nested bodies use the engine's own IR lowering function.
+fn project_literal_sql(
+    statements: &[plsql_ir::Statement],
+    output: &mut Vec<String>,
+) -> Result<(), Unknown> {
+    use plsql_ir::{Expr, Statement, expr::lower_expression, stmt::lower_statement_body};
+    let mut pending = vec![(0_u8, statements.to_vec())];
+    let mut bytes = 0_usize;
+    while let Some((depth, statements)) = pending.pop() {
+        if depth > 32 {
+            return Err(Unknown::ClosureCapExhausted);
+        }
+        for statement in statements {
+            let mut bodies = Vec::new();
+            match statement {
+                Statement::ExecuteImmediate {
+                    sql_literal,
+                    has_bind_variables: false,
+                } => {
+                    let Expr::StringLit(sql) = lower_expression(&sql_literal) else {
+                        return Err(Unknown::EffectProofUnavailable);
+                    };
+                    bytes = bytes.saturating_add(sql.len());
+                    output.push(sql);
+                }
+                Statement::ExecuteImmediate { .. } | Statement::Unrecognized { .. } => {
+                    return Err(Unknown::EffectProofUnavailable);
+                }
+                Statement::If {
+                    arms,
+                    else_body_text,
+                } => {
+                    bodies.extend(arms.into_iter().map(|arm| arm.body_text));
+                    bodies.extend(else_body_text);
+                }
+                Statement::BareLoop { body_text }
+                | Statement::ForLoop { body_text, .. }
+                | Statement::WhileLoop { body_text, .. }
+                | Statement::NestedBlock { body_text } => bodies.push(body_text),
+                _ => {}
+            }
+            for body in bodies {
+                bytes = bytes.saturating_add(body.len());
+                pending.push((depth + 1, lower_statement_body(&body)));
+            }
+            if bytes > MAX_MUTATION_SOURCE_BYTES || output.len() > MAX_MUTATION_SCOPES {
+                return Err(Unknown::ClosureCapExhausted);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Order only the already-proven invocation's literal statements using the
+/// engine's lossless source positions. Equal SQL is retained once per source
+/// occurrence. An ambiguous/unmatched occurrence remains Unknown.
+fn source_literals(
+    parsed: &plsql_parser::ParseResult,
+    ordinal: usize,
+) -> Result<Vec<SourceLiteral>, Unknown> {
+    use plsql_ir::{Expr, expr::lower_expression};
+    let mut output = Vec::new();
+    for token in &parsed.cst.token_tape.tokens {
+        if token.kind != TokenKind::StringLiteral {
+            continue;
+        }
+        let Expr::StringLit(sql) = lower_expression(&token.text) else {
+            continue;
+        };
+        if output.len() >= 4096 {
+            return Err(Unknown::ClosureCapExhausted);
+        }
+        output.push(SourceLiteral {
+            unit: ordinal,
+            offset: token.span.start.offset,
+            sql,
+        });
+    }
+    Ok(output)
+}
+
+fn source_ordered_literal_sql(
+    literals: &[SourceLiteral],
+    expected: Vec<String>,
+) -> Result<Vec<String>, Unknown> {
+    if expected.is_empty() {
+        return Ok(expected);
+    }
+    let mut required = BTreeMap::new();
+    for sql in &expected {
+        *required.entry(sql.clone()).or_insert(0_usize) += 1;
+    }
+    let mut observed = BTreeMap::new();
+    let mut ordered = Vec::new();
+    for literal in literals {
+        if required.contains_key(&literal.sql) {
+            *observed.entry(literal.sql.clone()).or_insert(0_usize) += 1;
+            ordered.push((literal.unit, literal.offset, literal.sql.clone()));
+        }
+    }
+    if observed != required || ordered.len() > MAX_MUTATION_SCOPES {
+        return Err(Unknown::EffectProofUnavailable);
+    }
+    ordered.sort_by_key(|(file, offset, _)| (*file, *offset));
+    Ok(ordered.into_iter().map(|(_, _, sql)| sql).collect())
 }
 
 fn relation(dependency: &Dependency) -> Result<ResolvedObject, Unknown> {
@@ -822,58 +1187,4 @@ impl MutationEffectOracle for EngineMutationEffects {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn statements(source: &str) -> Vec<plsql_ir::Statement> {
-        let project = tempfile::tempdir().unwrap();
-        std::fs::write(project.path().join("policy.sql"), source).unwrap();
-        let run = plsql_engine::analyze_project(plsql_engine::AnalysisRequest {
-            project_root: project.path().to_owned(),
-            cache: plsql_engine::CacheConfig {
-                enabled: false,
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .unwrap();
-        run.invocation_index
-            .units
-            .get("APP.PF")
-            .unwrap()
-            .statements
-            .clone()
-    }
-
-    #[test]
-    fn policy_predicate_returns_require_complete_top_level_coverage() {
-        for body in [
-            "BEGIN RETURN NULL; END;",
-            "BEGIN RETURN '1=1'; END;",
-            "BEGIN RETURN '1 = 1'; END;",
-        ] {
-            let source = format!(
-                "CREATE OR REPLACE FUNCTION APP.PF(S VARCHAR2, O VARCHAR2) RETURN VARCHAR2 IS {body}"
-            );
-            let statements = statements(&source);
-            assert_eq!(constant_policy_returns(&source, &statements), Ok(1));
-        }
-        for body in [
-            "BEGIN RETURN 'APP.LOG_HIT() = 1'; END;",
-            "BEGIN IF S = 'X' THEN RETURN NULL; END IF; RETURN '1=1'; END;",
-            "BEGIN IF S = 'X' THEN RETURN 'APP.LOG_HIT() = 1'; END IF; RETURN NULL; END;",
-            "BEGIN RETURN NULL; EXCEPTION WHEN OTHERS THEN RETURN 'APP.LOG_HIT() = 1'; END;",
-            "BEGIN RETURN ''; END;",
-        ] {
-            let source = format!(
-                "CREATE OR REPLACE FUNCTION APP.PF(S VARCHAR2, O VARCHAR2) RETURN VARCHAR2 IS {body}"
-            );
-            let statements = statements(&source);
-            assert_eq!(
-                constant_policy_returns(&source, &statements),
-                Err(Unknown::EffectProofUnavailable),
-                "{body}"
-            );
-        }
-    }
-}
+mod tests;

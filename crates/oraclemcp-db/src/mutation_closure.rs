@@ -44,6 +44,8 @@ pub struct MutationRequest {
 /// Callback semantics that the effect binding must preserve.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum MutationRoutineUse {
+    /// A signed, structured package call, including package initialization.
+    CustomToolCall,
     /// All declarations, timing sections and handlers of a DML trigger.
     DmlTrigger,
     /// All declarations and handlers of a schema/database DDL trigger.
@@ -1155,9 +1157,23 @@ pub async fn read_mutation_routine_source(
     object_type: &str,
     member: Option<&str>,
 ) -> Result<MutationRoutineSource, MutationUnavailableReason> {
+    read_pinned_mutation_routine_source(cx, conn, owner, name, object_type, member, None).await
+}
+
+/// Read the same complete source projection while selecting one catalog
+/// subprogram explicitly. Unpinned consumers still require a unique member.
+pub async fn read_pinned_mutation_routine_source(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: &str,
+    name: &str,
+    object_type: &str,
+    member: Option<&str>,
+    subprogram_id: Option<u32>,
+) -> Result<MutationRoutineSource, MutationUnavailableReason> {
     if !matches!(
         object_type,
-        "TRIGGER" | "FUNCTION" | "PROCEDURE" | "PACKAGE BODY" | "TYPE BODY"
+        "TRIGGER" | "FUNCTION" | "PROCEDURE" | "PACKAGE" | "PACKAGE BODY" | "TYPE BODY"
     ) || (member.is_some() && object_type != "PACKAGE BODY")
     {
         return Err(MutationUnavailableReason::UnsupportedMechanism);
@@ -1197,7 +1213,16 @@ pub async fn read_mutation_routine_source(
         )
         .await
         .map_err(|_| MutationUnavailableReason::SourceUnavailable)?;
-        let [routine] = rows.as_slice() else {
+        if rows.len() >= 33 {
+            return Err(MutationUnavailableReason::ClosureCapExhausted);
+        }
+        let candidates: Vec<_> = rows
+            .iter()
+            .filter(|row| {
+                subprogram_id.is_none_or(|id| row.parse_i64("SUBPROGRAM_ID") == Some(i64::from(id)))
+            })
+            .collect();
+        let [routine] = candidates.as_slice() else {
             return Err(MutationUnavailableReason::EffectProofUnavailable);
         };
         if required(routine, "AUTHID")? != "DEFINER" {

@@ -1127,7 +1127,21 @@ fn load_custom_catalog_from_sources_with_policy(
     }
 
     let mut loaded = Vec::with_capacity(definitions.defs.len());
+    let mut pending = Vec::new();
     for def in definitions.defs {
+        if def.routine.is_some() {
+            let key = key.as_ref().ok_or_else(|| {
+                custom_tool_error(format!(
+                    "{CUSTOM_TOOLS_HMAC_KEY_ENV} is required for signed package-call definitions"
+                ))
+            })?;
+            let signed = oraclemcp_core::custom_tools::prepare_package_definition(&def, key)
+                .map_err(|error| {
+                    custom_tool_error(format!("failed to load custom tools: {error}"))
+                })?;
+            pending.push(signed);
+            continue;
+        }
         let classified = if require_signed_tools {
             let key = key.as_ref().ok_or_else(|| {
                 custom_tool_error(format!(
@@ -1143,7 +1157,15 @@ fn load_custom_catalog_from_sources_with_policy(
             classify_at_load(&def, &classifier, max_level)
         };
         match classified {
-            Ok(tool) => loaded.push(tool),
+            Ok(tool) => {
+                if tool.required_level > OperatingLevel::ReadOnly {
+                    let key = key.as_ref().ok_or_else(|| custom_tool_error(format!("{CUSTOM_TOOLS_HMAC_KEY_ENV} is required for write custom-tool definitions")))?;
+                    enforce_signature(&tool.def, key, true).map_err(|error| {
+                        custom_tool_error(format!("failed to load custom tools: {error}"))
+                    })?;
+                }
+                loaded.push(tool);
+            }
             Err(error) if custom_tool_load_error_is_security_invariant(&error) => {
                 return Err(custom_tool_error(format!(
                     "failed to load custom tools: {error}"
@@ -1161,7 +1183,7 @@ fn load_custom_catalog_from_sources_with_policy(
     }
 
     Ok(CustomToolCatalogLoad {
-        catalog: CustomToolCatalog::new(loaded),
+        catalog: CustomToolCatalog::with_pending(loaded, pending),
         skipped: definitions.skipped,
     })
 }
@@ -1198,10 +1220,7 @@ fn custom_tool_load_error_is_security_invariant(error: &oraclemcp_core::LoadErro
 fn custom_tool_signature_failure(
     error: &ErrorEnvelope,
 ) -> Option<(String, CustomToolSignatureFailure)> {
-    let reason = if error
-        .message
-        .contains("is unsigned; protected profiles require an HMAC signature")
-    {
+    let reason = if error.message.contains("is unsigned;") {
         CustomToolSignatureFailure::Required
     } else if error.message.contains("has an invalid HMAC signature") {
         CustomToolSignatureFailure::Invalid

@@ -3181,6 +3181,9 @@ fn tools_json_for_descriptors(descriptors: &[ToolDescriptor]) -> Vec<Value> {
         {
             tool.insert("outputSchema".to_owned(), Value::Object(output_schema));
         }
+        if let Some(level) = d.required_level {
+            tool["required_level"] = json!(level.as_str());
+        }
         tools.push(tool);
     }
     tools

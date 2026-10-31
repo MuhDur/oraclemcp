@@ -649,6 +649,102 @@ fn run<F: std::future::Future<Output = ()>>(body: F) {
         .block_on(body);
 }
 
+#[test]
+fn pinned_source_selects_one_definer_overload_without_relaxing_unpinned_reads() {
+    run(async {
+        let cx = Cx::for_testing();
+        let mut catalog = Catalog::default();
+        catalog.rows(
+            CatalogQueryId::ClosureRoutineAuthid,
+            "PKG",
+            vec![
+                row(&[
+                    ("AUTHID", Some("CURRENT_USER")),
+                    ("SUBPROGRAM_ID", Some("1")),
+                    ("OVERLOAD", Some("1")),
+                ]),
+                row(&[
+                    ("AUTHID", Some("DEFINER")),
+                    ("SUBPROGRAM_ID", Some("2")),
+                    ("OVERLOAD", Some("2")),
+                ]),
+            ],
+        );
+        let selected = read_pinned_mutation_routine_source(
+            &cx,
+            &catalog,
+            "APP",
+            "PKG",
+            "PACKAGE BODY",
+            Some("F"),
+            Some(2),
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected.subprogram_id, Some(2));
+        assert!(
+            read_pinned_mutation_routine_source(
+                &cx,
+                &catalog,
+                "APP",
+                "PKG",
+                "PACKAGE BODY",
+                Some("F"),
+                Some(1)
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            read_pinned_mutation_routine_source(
+                &cx,
+                &catalog,
+                "APP",
+                "PKG",
+                "PACKAGE BODY",
+                Some("F"),
+                Some(3)
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            read_mutation_routine_source(&cx, &catalog, "APP", "PKG", "PACKAGE BODY", Some("F"))
+                .await
+                .is_err()
+        );
+    });
+}
+
+#[test]
+fn pinned_source_refuses_duplicate_identity_and_truncated_projection() {
+    run(async {
+        let cx = Cx::for_testing();
+        let identity = row(&[
+            ("AUTHID", Some("DEFINER")),
+            ("SUBPROGRAM_ID", Some("2")),
+            ("OVERLOAD", Some("1")),
+        ]);
+        for rows in [vec![identity.clone(); 2], vec![identity; 33]] {
+            let mut catalog = Catalog::default();
+            catalog.rows(CatalogQueryId::ClosureRoutineAuthid, "PKG", rows);
+            assert!(
+                read_pinned_mutation_routine_source(
+                    &cx,
+                    &catalog,
+                    "APP",
+                    "PKG",
+                    "PACKAGE BODY",
+                    Some("F"),
+                    Some(2)
+                )
+                .await
+                .is_err()
+            );
+        }
+    });
+}
+
 fn trigger(name: &str, kind: &str, table: &str) -> OracleRow {
     row(&[
         ("OWNER", Some("APP")),

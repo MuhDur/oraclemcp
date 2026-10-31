@@ -841,6 +841,7 @@ pub mod oraclemcp_db::mutation_closure
 pub enum oraclemcp_db::mutation_closure::MutationRoutineUse
 pub oraclemcp_db::mutation_closure::MutationRoutineUse::ColumnDefault
 pub oraclemcp_db::mutation_closure::MutationRoutineUse::ColumnExpression
+pub oraclemcp_db::mutation_closure::MutationRoutineUse::CustomToolCall
 pub oraclemcp_db::mutation_closure::MutationRoutineUse::DdlTrigger
 pub oraclemcp_db::mutation_closure::MutationRoutineUse::DmlTrigger
 pub oraclemcp_db::mutation_closure::MutationRoutineUse::DomainIndex
@@ -1131,6 +1132,7 @@ pub fn oraclemcp_db::mutation_closure::UnknownMutationEffects::prove_source<'lif
 pub async fn oraclemcp_db::mutation_closure::collect_mutation_effect_closure(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, oraclemcp_db::mutation_closure::MutationRequest, &dyn oraclemcp_db::mutation_closure::MutationEffectOracle) -> oraclemcp_guard::mutation_closure::MutationEffectClosureV1
 pub async fn oraclemcp_db::mutation_closure::read_grant_target_facts(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<oraclemcp_guard::scoped_grant::admission::GrantTargetFacts, oraclemcp_guard::mutation_closure::MutationUnavailableReason>
 pub async fn oraclemcp_db::mutation_closure::read_mutation_routine_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, &str, core::option::Option<&str>) -> core::result::Result<oraclemcp_db::mutation_closure::MutationRoutineSource, oraclemcp_guard::mutation_closure::MutationUnavailableReason>
+pub async fn oraclemcp_db::mutation_closure::read_pinned_mutation_routine_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, &str, core::option::Option<&str>, core::option::Option<u32>) -> core::result::Result<oraclemcp_db::mutation_closure::MutationRoutineSource, oraclemcp_guard::mutation_closure::MutationUnavailableReason>
 pub enum oraclemcp_db::AsOf
 pub oraclemcp_db::AsOf::Scn(u64)
 pub oraclemcp_db::AsOf::Timestamp(alloc::string::String)

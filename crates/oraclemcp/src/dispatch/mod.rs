@@ -454,6 +454,8 @@ struct ActiveCustomCatalog {
     generation: u64,
     catalog: Arc<CustomToolCatalog>,
     descriptors: Arc<[oraclemcp_core::ToolDescriptor]>,
+    package_plans: HashMap<String, Result<PackageCallPlan, ErrorEnvelope>>,
+    activation_complete: bool,
 }
 
 impl ActiveCustomCatalog {
@@ -462,8 +464,10 @@ impl ActiveCustomCatalog {
         catalog.register_first_class(&mut registry);
         Self {
             generation,
+            activation_complete: catalog.pending().is_empty(),
             catalog: Arc::new(catalog),
             descriptors: registry.tools.into(),
+            package_plans: HashMap::new(),
         }
     }
 
@@ -5158,7 +5162,9 @@ mod metadata_cache_key;
 use metadata_cache_key::metadata_cache_key_json;
 
 pub(crate) mod tool_routing;
-use tool_routing::{canonical_tool_name, response_reports_terminal_effect};
+use tool_routing::{
+    canonical_tool_name, error_reports_terminal_effect, response_reports_terminal_effect,
+};
 
 /// Map a JSON value to an [`OracleBind`]. Agent argument values are always
 /// bound, never interpolated. Unsupported JSON (arrays/objects) is an
@@ -12997,7 +13003,10 @@ impl ToolDispatch for OracleDispatcher {
             }
             let terminal_result = match &result {
                 Ok(value) => response_reports_terminal_effect(name, value),
-                Err(_) => self.connection_quarantine().ok().flatten().is_some(),
+                Err(error) => {
+                    error_reports_terminal_effect(error)
+                        || self.connection_quarantine().ok().flatten().is_some()
+                }
             };
             if cx.is_cancel_requested() && !terminal_result {
                 Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(CancelReason::timeout))
@@ -13041,7 +13050,10 @@ impl ToolDispatch for OracleDispatcher {
             }
             let terminal_result = match &result {
                 Ok(value) => response_reports_terminal_effect(name, value),
-                Err(_) => self.connection_quarantine().ok().flatten().is_some(),
+                Err(error) => {
+                    error_reports_terminal_effect(error)
+                        || self.connection_quarantine().ok().flatten().is_some()
+                }
             };
             if cx.is_cancel_requested() && !terminal_result {
                 Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(CancelReason::timeout))
@@ -13370,9 +13382,11 @@ impl OracleDispatcher {
         context: DispatchContext<'_>,
         detail: McpSurfaceDetail,
     ) -> Result<McpSurfaceState, ErrorEnvelope> {
-        let state = self.state.lock(cx).await.map_err(|_| {
+        let mut state = self.state.lock(cx).await.map_err(|_| {
             ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
         })?;
+        let budget = RequestBudget::from_call_timeout(cx.now(), self.request_timeout()?);
+        Box::pin(self.activate_package_catalog(cx, &mut state, &budget)).await?;
         let scoped_level = scoped_session_level(&state.level, context);
         let active_profile = state.active_profile.clone();
         let mut connection = ConnectionStatus {
@@ -13474,9 +13488,14 @@ impl OracleDispatcher {
             None
         };
         let retry_args = args.clone();
-        let mut response = match self
-            .dispatch_with_cx_inner_core(cx, context, name, args, refusal_recorded)
-            .await
+        let mut response = match Box::pin(self.dispatch_with_cx_inner_core(
+            cx,
+            context,
+            name,
+            args,
+            refusal_recorded,
+        ))
+        .await
         {
             Ok(response) => response,
             Err(error) => {
@@ -13490,15 +13509,14 @@ impl OracleDispatcher {
                     // wire. The next core dispatch re-leases once before it
                     // reaches Oracle; writes and unproven reads never enter
                     // this branch.
-                    match self
-                        .dispatch_with_cx_inner_core(
-                            cx,
-                            context,
-                            name,
-                            retry_args,
-                            refusal_recorded,
-                        )
-                        .await
+                    match Box::pin(self.dispatch_with_cx_inner_core(
+                        cx,
+                        context,
+                        name,
+                        retry_args,
+                        refusal_recorded,
+                    ))
+                    .await
                     {
                         Ok(response) => response,
                         // A standalone dispatcher has no connector with which
@@ -14061,6 +14079,18 @@ impl OracleDispatcher {
         }
         request_budget.enforce(cx).map_err(DbError::into_envelope)?;
         let request_subject = audit_subject(context, &self.default_audit_subject);
+        if state
+            .custom_catalog
+            .catalog
+            .pending()
+            .iter()
+            .any(|signed| signed.definition().name == tool)
+        {
+            Box::pin(self.activate_package_catalog(cx, &mut state, &request_budget)).await?;
+        }
+        if let Some(Err(error)) = state.custom_catalog.package_plans.get(tool) {
+            return Err(error.clone());
+        }
         let scoped_level = scoped_session_level(&state.level, context);
         let _metadata_scope =
             GuardedReadExecutor::new(self).metadata_scope(cx, &state, &scoped_level)?;
@@ -14585,6 +14615,26 @@ impl OracleDispatcher {
                 )
                 .await;
         }
+        if state.custom_catalog.package_plans.get(tool).is_some_and(
+            |plan| matches!(plan, Ok(plan) if plan.required_level == OperatingLevel::ReadOnly),
+        ) {
+            let DispatcherState {
+                conn,
+                read_only_backstop,
+                checkpoints,
+                ..
+            } = &mut *state;
+            ensure_read_only_backstop_bounded(
+                cx,
+                conn.as_ref(),
+                read_only_backstop,
+                checkpoints,
+                &scoped_level,
+                &request_budget,
+                &self.quarantine,
+            )
+            .await?;
+        }
         let generated_read = generated_read_tool(tool);
         if generated_read
             && (generated_read_uses_primary_session(tool) || state.stateless_conn.is_none())
@@ -14680,7 +14730,10 @@ impl OracleDispatcher {
 
         let mut patch_preview_to_remember = None;
         let mut alter_session_attempted = false;
-        let result: Result<Value, ErrorEnvelope> = async {
+        // The tool family future contains native connection setup as well as
+        // execution. Keep it separate from the outer dispatch state so their
+        // debug-build poll frames do not exhaust a default thread stack.
+        let result: Result<Value, ErrorEnvelope> = Box::pin(async {
             if let Some(error) = generated_read_evidence_error {
                 return Err(error);
             }
@@ -16494,7 +16547,7 @@ impl OracleDispatcher {
             }
             other => {
                 if let Some(loaded) = state.custom_catalog.catalog.get(other) {
-                    if loaded.required_level <= OperatingLevel::ReadOnly {
+                    if loaded.required_level <= OperatingLevel::ReadOnly && loaded.def.routine.is_none() {
                         Err(ErrorEnvelope::new(
                             ErrorClass::Internal,
                             "custom read bypassed the guarded read dispatch entry",
@@ -16528,8 +16581,15 @@ impl OracleDispatcher {
                             quarantine: &self.quarantine,
                             edition_creation_reservations: &self.edition_creation_reservations,
                         };
-                        let execute_args = custom_tool_execute_args(other, loaded, &args)?;
-                        execute_sql(tool_ctx, other, execute_args).await
+                        if loaded.def.routine.is_some() {
+                            let plan = state.custom_catalog.package_plans.get(other)
+                                .ok_or_else(|| package_unavailable("package tool has no live activation"))?
+                                .as_ref().map_err(Clone::clone)?;
+                            Box::pin(self.execute_package_call(tool_ctx, plan, &args, state.profile_generation.as_ref())).await
+                        } else {
+                            let execute_args = custom_tool_execute_args(other, loaded, &args)?;
+                            execute_sql(tool_ctx, other, execute_args).await
+                        }
                     }
                 } else {
                     Err(invalid_args(format!(
@@ -16538,7 +16598,7 @@ impl OracleDispatcher {
                 }
             }
             }
-        }
+        })
         .await;
 
         let budget_after = final_budget.enforce(cx).map_err(DbError::into_envelope);
