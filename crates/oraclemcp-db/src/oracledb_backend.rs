@@ -47,8 +47,10 @@ const OFFICIAL_SESSION_CONTEXT_SQL: &str = concat!(
     "SYS_CONTEXT('USERENV','OS_USER') AS os_user, ",
     "SYS_CONTEXT('USERENV','HOST') AS host, ",
     "SYS_CONTEXT('USERENV','TERMINAL') AS terminal ",
-    "FROM dual",
+    "FROM SYS.DUAL",
 );
+
+const OFFICIAL_SESSION_TIMEZONE_SQL: &str = "SELECT SESSIONTIMEZONE FROM SYS.DUAL";
 
 /// An [`OracleConnection`] backed by Oracle's official synchronous driver.
 ///
@@ -669,7 +671,7 @@ fn execute_actor_command(
             }) {
                 drop(cursor);
                 let zone = connection
-                    .query_row("SELECT SESSIONTIMEZONE FROM dual", &[])
+                    .query_row(OFFICIAL_SESSION_TIMEZONE_SQL, &[])
                     .map_err(|error| official_error(error, OfficialOperation::Query))?
                     .get::<String>(0)
                     .map_err(|error| official_error(error, OfficialOperation::Query))?;
@@ -1682,6 +1684,130 @@ mod tests {
             .build()
             .expect("current-thread runtime must build for official backend test");
         runtime.block_on(future)
+    }
+
+    #[test]
+    #[ignore = "requires a local Oracle lab admin; creates and drops an isolated DUAL callback schema"]
+    fn official_evidence_queries_ignore_local_dual_callbacks() {
+        let dsn = std::env::var("ORACLEMCP_TEST_DSN").expect("local Oracle lab DSN");
+        assert!(dsn.starts_with("localhost:") || dsn.starts_with("127.0.0.1:"));
+        let options = OracleConnectOptions {
+            connect_string: dsn,
+            username: Some(std::env::var("ORACLEMCP_TEST_USER").expect("lab admin")),
+            password: Some(std::env::var("ORACLEMCP_TEST_PASSWORD").expect("lab password")),
+            ..Default::default()
+        };
+        block_on_backend(async move {
+            let cx = Cx::current().expect("native runtime Cx");
+            let admin = crate::connect_oracle(&cx, options.clone()).await.unwrap();
+            let mut random = [0u8; 10];
+            getrandom::getrandom(&mut random).unwrap();
+            let suffix: String = random.iter().map(|byte| format!("{byte:02X}")).collect();
+            let owner = format!("OMCP_P2G_D_{suffix}");
+            let password = format!("P2g{suffix}!");
+            let mut created = false;
+            let mut setup = None;
+            let mut official = None;
+            let result: Result<(), String> = async {
+                admin.execute(&cx, &format!("CREATE USER {owner} IDENTIFIED BY \"{password}\""), &[])
+                    .await.map_err(|error| error.to_string())?;
+                created = true;
+                admin.execute(&cx, &format!("GRANT CREATE SESSION, CREATE TABLE, CREATE VIEW, CREATE PROCEDURE, UNLIMITED TABLESPACE TO {owner}"), &[])
+                    .await.map_err(|error| error.to_string())?;
+                let app_options = OracleConnectOptions {
+                    username: Some(owner.clone()), password: Some(password), ..options
+                };
+                setup = Some(crate::connect_oracle(&cx, app_options.clone()).await.map_err(|error| error.to_string())?);
+                let app = setup.as_ref().unwrap();
+                for sql in [
+                    "CREATE TABLE CALLBACK_CANARY(n NUMBER)",
+                    "CREATE FUNCTION CALLBACK_FX RETURN NUMBER AUTHID DEFINER IS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO CALLBACK_CANARY VALUES (1); COMMIT; RETURN 1; END;",
+                    "CREATE VIEW DUAL AS SELECT dummy FROM SYS.DUAL WHERE CALLBACK_FX() = 1",
+                    "CREATE TABLE TZ_SAMPLE(ts_value TIMESTAMP WITH LOCAL TIME ZONE)",
+                    "INSERT INTO TZ_SAMPLE VALUES (TIMESTAMP '2026-01-01 00:00:00')",
+                ] {
+                    app.execute(&cx, sql, &[]).await.map_err(|error| error.to_string())?;
+                }
+                app.commit(&cx).await.map_err(|error| error.to_string())?;
+                official = Some(OfficialOracleConnection::connect(&cx, app_options).await.map_err(|error| error.to_string())?);
+                let conn = official.as_ref().unwrap();
+                // Measure evidence reads separately from connection setup.
+                admin.execute(&cx, &format!("DELETE FROM {owner}.CALLBACK_CANARY"), &[])
+                    .await.map_err(|error| error.to_string())?;
+                admin.commit(&cx).await.map_err(|error| error.to_string())?;
+                let info = conn.describe(&cx).await.map_err(|error| format!("official describe: {error}"))?;
+                if info.backend != Some(OracleBackend::OfficialOracle)
+                    || info.current_schema.as_deref() != Some(owner.as_str())
+                    || info.session_user.as_deref() != Some(owner.as_str())
+                {
+                    return Err("actual official actor did not return its session context".into());
+                }
+                let count_sql = format!("SELECT COUNT(*) AS n FROM {owner}.CALLBACK_CANARY");
+                let count = admin.query_rows(&cx, &count_sql, &[]).await.map_err(|error| error.to_string())?;
+                if count.first().and_then(|row| row.parse_i64("N")) != Some(0) {
+                    return Err("official describe committed a local DUAL callback".into());
+                }
+                conn.rollback(&cx).await.map_err(|error| error.to_string())?;
+                conn.execute(&cx, "SET TRANSACTION READ ONLY", &[]).await.map_err(|error| error.to_string())?;
+                let read_only_info = conn.describe(&cx).await.map_err(|error| format!("official read-only describe: {error}"))?;
+                if read_only_info.current_schema != info.current_schema
+                    || read_only_info.session_user != info.session_user
+                {
+                    return Err("official read-only describe changed session identity".into());
+                }
+                let count = admin.query_rows(&cx, &count_sql, &[]).await.map_err(|error| error.to_string())?;
+                if count.first().and_then(|row| row.parse_i64("N")) != Some(0) {
+                    return Err("official read-only describe committed a local DUAL callback".into());
+                }
+                // The describe assertion above runs inside READ ONLY. Measure
+                // the independent timezone projection in a fresh transaction;
+                // the newly created TSLTZ fixture is not a historical-SCN test.
+                conn.rollback(&cx).await.map_err(|error| error.to_string())?;
+                let rows = conn.query_rows(&cx, "SELECT ts_value FROM TZ_SAMPLE", &[]).await.map_err(|error| format!("official TSLTZ read: {error}"))?;
+                if rows.len() != 1 || !rows[0].columns.iter().any(|(_, cell)| {
+                    cell.oracle_type == "TIMESTAMP WITH LOCAL TIME ZONE" && cell.value.is_some()
+                }) {
+                    return Err("official query did not exercise the TSLTZ timezone projection".into());
+                }
+                let count = admin.query_rows(&cx, &count_sql, &[]).await.map_err(|error| error.to_string())?;
+                if count.first().and_then(|row| row.parse_i64("N")) != Some(0) {
+                    return Err("official timezone projection committed a local DUAL callback".into());
+                }
+                let rows = conn.query_rows(&cx, "SELECT dummy FROM DUAL", &[]).await.map_err(|error| format!("official unqualified control: {error}"))?;
+                let count = admin.query_rows(&cx, &count_sql, &[]).await.map_err(|error| error.to_string())?;
+                if rows.len() != 1 || !count.first().and_then(|row| row.parse_i64("N")).is_some_and(|n| n > 0) {
+                    return Err("negative control did not commit through the actual local DUAL view".into());
+                }
+                Ok(())
+            }.await;
+            let official_close = if let Some(conn) = official {
+                conn.close(&cx).await
+            } else {
+                Ok(())
+            };
+            let setup_close = if let Some(conn) = setup {
+                conn.close(&cx).await
+            } else {
+                Ok(())
+            };
+            let cleanup = if created {
+                admin
+                    .execute(&cx, &format!("DROP USER {owner} CASCADE"), &[])
+                    .await
+                    .map(|_| ())
+            } else {
+                Ok(())
+            };
+            let admin_close = admin.close(&cx).await;
+            assert!(official_close.is_ok(), "official actor cleanup failed");
+            assert!(setup_close.is_ok(), "setup connection cleanup failed");
+            assert!(
+                cleanup.is_ok(),
+                "owned callback schema cleanup failed: {cleanup:?}"
+            );
+            assert!(admin_close.is_ok(), "admin cleanup failed");
+            result.expect("actual official actor DUAL callback contract");
+        });
     }
 
     static BLACKHOLE_TEST_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();

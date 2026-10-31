@@ -381,7 +381,7 @@ impl AsOf {
     fn enable_call(&self) -> (&'static str, OracleBind) {
         match self {
             AsOf::Scn(scn) => (
-                "BEGIN DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;",
+                "BEGIN SYS.DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;",
                 // SCNs are ~48-bit, comfortably inside i64. A hypothetical
                 // overflow saturates to i64::MAX, which Oracle rejects as a
                 // future SCN (fail-closed) — it never silently reads a wrong
@@ -389,7 +389,7 @@ impl AsOf {
                 OracleBind::I64(i64::try_from(*scn).unwrap_or(i64::MAX)),
             ),
             AsOf::Timestamp(ts) => (
-                "BEGIN DBMS_FLASHBACK.ENABLE_AT_TIME(TO_TIMESTAMP(:1, 'YYYY-MM-DD HH24:MI:SS')); END;",
+                "BEGIN SYS.DBMS_FLASHBACK.ENABLE_AT_TIME(TO_TIMESTAMP(:1, 'YYYY-MM-DD HH24:MI:SS')); END;",
                 OracleBind::String(ts.trim().replacen('T', " ", 1)),
             ),
         }
@@ -1496,7 +1496,7 @@ mod tests {
                 .lock()
                 .expect("events")
                 .push(format!("exec[{}]:{sql}", binds.len()));
-            if sql.starts_with("BEGIN DBMS_FLASHBACK.ENABLE_")
+            if sql.starts_with("BEGIN SYS.DBMS_FLASHBACK.ENABLE_")
                 && let Some(message) = &self.fail_enable_message
             {
                 return Err(DbError::Execute(message.clone()));
@@ -1544,7 +1544,7 @@ mod tests {
         let (sql, bind) = AsOf::Scn(9_031_816).enable_call();
         assert_eq!(
             sql,
-            "BEGIN DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;"
+            "BEGIN SYS.DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;"
         );
         assert!(sql.contains(":1"), "the scn is a positional bind");
         assert!(
@@ -1559,7 +1559,7 @@ mod tests {
         let (sql, bind) = AsOf::Timestamp("2026-07-08T10:11:12".to_owned()).enable_call();
         assert_eq!(
             sql,
-            "BEGIN DBMS_FLASHBACK.ENABLE_AT_TIME(TO_TIMESTAMP(:1, 'YYYY-MM-DD HH24:MI:SS')); END;"
+            "BEGIN SYS.DBMS_FLASHBACK.ENABLE_AT_TIME(TO_TIMESTAMP(:1, 'YYYY-MM-DD HH24:MI:SS')); END;"
         );
         assert!(
             !sql.contains("2026"),
@@ -1700,10 +1700,11 @@ mod tests {
             vec![
                 format!("query[0]:{CURRENT_SCN_SQL}"),
                 "rollback".to_owned(),
-                "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
-                "exec[1]:BEGIN DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;".to_owned(),
+                "exec[0]:BEGIN SYS.DBMS_FLASHBACK.DISABLE; END;".to_owned(),
+                "exec[1]:BEGIN SYS.DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;"
+                    .to_owned(),
                 "query".to_owned(),
-                "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
+                "exec[0]:BEGIN SYS.DBMS_FLASHBACK.DISABLE; END;".to_owned(),
                 "rollback".to_owned(),
             ]
         );
@@ -1735,10 +1736,11 @@ mod tests {
                 format!("query[0]:{CURRENT_SCN_SQL}"),
                 format!("query[1]:{TIMESTAMP_TO_SCN_SQL}"),
                 "rollback".to_owned(),
-                "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
-                "exec[1]:BEGIN DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;".to_owned(),
+                "exec[0]:BEGIN SYS.DBMS_FLASHBACK.DISABLE; END;".to_owned(),
+                "exec[1]:BEGIN SYS.DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;"
+                    .to_owned(),
                 "query".to_owned(),
-                "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
+                "exec[0]:BEGIN SYS.DBMS_FLASHBACK.DISABLE; END;".to_owned(),
                 "rollback".to_owned(),
             ],
             "timestamp conversion is fixed and bound, then the resolved SCN drives flashback"
@@ -1786,8 +1788,9 @@ mod tests {
             vec![
                 format!("query[0]:{CURRENT_SCN_SQL}"),
                 "rollback".to_owned(),
-                "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
-                "exec[1]:BEGIN DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;".to_owned(),
+                "exec[0]:BEGIN SYS.DBMS_FLASHBACK.DISABLE; END;".to_owned(),
+                "exec[1]:BEGIN SYS.DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;"
+                    .to_owned(),
             ],
             "ENABLE failure happens before a flashback window is active"
         );
@@ -2254,7 +2257,7 @@ mod tests {
             after_query,
             vec![
                 "query".to_owned(),
-                "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
+                "exec[0]:BEGIN SYS.DBMS_FLASHBACK.DISABLE; END;".to_owned(),
                 "rollback".to_owned(),
             ],
             "flashback is disabled and the read transaction ended even when the read errors"

@@ -6745,7 +6745,7 @@ fn set_session_level(
                 {
                     "intent": "run_reads_only",
                     "tool": "oracle_query",
-                    "args": { "sql": "SELECT 1 FROM dual" }
+                    "args": { "sql": "SELECT 1 FROM SYS.DUAL" }
                 }
             ],
         }));

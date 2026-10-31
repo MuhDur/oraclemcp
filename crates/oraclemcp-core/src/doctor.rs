@@ -1385,9 +1385,9 @@ const ADVERSARIAL_CORPUS: &[&str] = &[
     "DROP TABLE customers",
     "UPDATE accounts SET balance = 0",
     "DELETE FROM orders",
-    "BEGIN DBMS_RANDOM.SEED(1); END;",
+    "BEGIN SYS.DBMS_RANDOM.SEED(1); END;",
     "INSERT INTO t VALUES (1)",
-    "SELECT 1 FROM dual; DROP TABLE t",
+    "SELECT 1 FROM SYS.DUAL; DROP TABLE t",
     "TRUNCATE TABLE audit_log",
 ];
 
@@ -3106,7 +3106,7 @@ fn check_classifier_selftest() -> CheckResult {
         }
     }
     // A known-safe read must classify as READ_ONLY (no false positives).
-    let safe = classifier.classify("SELECT 1 FROM dual");
+    let safe = classifier.classify("SELECT 1 FROM SYS.DUAL");
     let safe_ok = safe.required_level == Some(OperatingLevel::ReadOnly);
 
     if leaked.is_empty() && safe_ok {

@@ -1429,13 +1429,13 @@ pub trait OracleConnection: Send + Sync {
             Some(bytes) => self
                 .execute(
                     cx,
-                    "BEGIN DBMS_OUTPUT.ENABLE(:1); END;",
+                    "BEGIN SYS.DBMS_OUTPUT.ENABLE(:1); END;",
                     &[OracleBind::I64(i64::from(bytes))],
                 )
                 .await
                 .map(|_| ()),
             None => self
-                .execute(cx, "BEGIN DBMS_OUTPUT.ENABLE(NULL); END;", &[])
+                .execute(cx, "BEGIN SYS.DBMS_OUTPUT.ENABLE(NULL); END;", &[])
                 .await
                 .map(|_| ()),
         }
@@ -2021,7 +2021,7 @@ pub(crate) async fn run_connection_release_statements(
 /// The idempotent teardown for a `DBMS_FLASHBACK` session read-snapshot window
 /// (K9). A no-op when flashback is not enabled, so it is safe to call
 /// unconditionally as cleanup.
-pub(crate) const DBMS_FLASHBACK_DISABLE: &str = "BEGIN DBMS_FLASHBACK.DISABLE; END;";
+pub(crate) const DBMS_FLASHBACK_DISABLE: &str = "BEGIN SYS.DBMS_FLASHBACK.DISABLE; END;";
 
 /// Thin pure-Rust Oracle connection wrapper over the native-async
 /// [`oraclemcp_driver_cx::Connection`] (B1).
@@ -3101,7 +3101,7 @@ mod driver {
         execute_raw(
             cx,
             inner,
-            "BEGIN DBMS_APPLICATION_INFO.SET_MODULE(NULL, NULL); DBMS_APPLICATION_INFO.SET_CLIENT_INFO(NULL); DBMS_SESSION.CLEAR_IDENTIFIER; END;",
+            "BEGIN SYS.DBMS_APPLICATION_INFO.SET_MODULE(NULL, NULL); SYS.DBMS_APPLICATION_INFO.SET_CLIENT_INFO(NULL); SYS.DBMS_SESSION.CLEAR_IDENTIFIER; END;",
             &[],
             opts,
             "session identity clear",
@@ -3115,7 +3115,7 @@ mod driver {
             execute_raw(
                 cx,
                 inner,
-                "BEGIN DBMS_APPLICATION_INFO.SET_MODULE(:1, :2); END;",
+                "BEGIN SYS.DBMS_APPLICATION_INFO.SET_MODULE(:1, :2); END;",
                 &[
                     BindValue::Text(module.to_owned()),
                     BindValue::Text(action.to_owned()),
@@ -3128,7 +3128,7 @@ mod driver {
             execute_raw(
                 cx,
                 inner,
-                "BEGIN DBMS_APPLICATION_INFO.SET_ACTION(:1); END;",
+                "BEGIN SYS.DBMS_APPLICATION_INFO.SET_ACTION(:1); END;",
                 &[BindValue::Text(action.to_owned())],
                 opts,
                 "session identity",
@@ -3139,7 +3139,7 @@ mod driver {
             execute_raw(
                 cx,
                 inner,
-                "BEGIN DBMS_SESSION.SET_IDENTIFIER(:1); END;",
+                "BEGIN SYS.DBMS_SESSION.SET_IDENTIFIER(:1); END;",
                 &[BindValue::Text(client_identifier.to_owned())],
                 opts,
                 "session identity",
@@ -3150,7 +3150,7 @@ mod driver {
             execute_raw(
                 cx,
                 inner,
-                "BEGIN DBMS_APPLICATION_INFO.SET_CLIENT_INFO(:1); END;",
+                "BEGIN SYS.DBMS_APPLICATION_INFO.SET_CLIENT_INFO(:1); END;",
                 &[BindValue::Text(client_info.to_owned())],
                 opts,
                 "session identity",
@@ -8295,7 +8295,7 @@ mod driver {
                 let result = inner
                     .execute_raw(
                         cx,
-                        "BEGIN DBMS_OUTPUT.GET_LINE(:1, :2); END;",
+                        "BEGIN SYS.DBMS_OUTPUT.GET_LINE(:1, :2); END;",
                         0,
                         &[vec![
                             BindValue::Output {
@@ -8455,6 +8455,88 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    #[ignore = "requires a local Oracle lab admin; creates and drops an isolated package shadow schema"]
+    fn session_identity_ignores_local_application_info_package() {
+        let dsn = std::env::var("ORACLEMCP_TEST_DSN").expect("local lab DSN");
+        assert!(dsn.starts_with("localhost:") || dsn.starts_with("127.0.0.1:"));
+        let options = OracleConnectOptions {
+            connect_string: dsn,
+            username: Some(std::env::var("ORACLEMCP_TEST_USER").expect("lab admin")),
+            password: Some(std::env::var("ORACLEMCP_TEST_PASSWORD").expect("lab password")),
+            ..Default::default()
+        };
+        let reactor = asupersync::runtime::reactor::create_reactor().unwrap();
+        RuntimeBuilder::current_thread().with_reactor(reactor).build().unwrap().block_on(async move {
+            let cx = Cx::current().expect("native Cx");
+            let admin = connect_oracle(&cx, options.clone()).await.unwrap();
+            let mut random = [0u8; 10];
+            getrandom::getrandom(&mut random).unwrap();
+            let suffix: String = random.iter().map(|byte| format!("{byte:02X}")).collect();
+            let owner = format!("OMCP_P2G_P_{suffix}");
+            let password = format!("P2g{suffix}!");
+            let mut created = false;
+            let mut setup = None;
+            let mut tagged = None;
+            let result: Result<(), String> = async {
+                admin.execute(&cx, &format!("CREATE USER {owner} IDENTIFIED BY \"{password}\""), &[])
+                    .await.map_err(|error| error.to_string())?;
+                created = true;
+                admin.execute(&cx, &format!("GRANT CREATE SESSION, CREATE TABLE, CREATE PROCEDURE, UNLIMITED TABLESPACE TO {owner}"), &[])
+                    .await.map_err(|error| error.to_string())?;
+                let app_options = OracleConnectOptions { username: Some(owner.clone()), password: Some(password), ..options };
+                setup = Some(connect_oracle(&cx, app_options.clone()).await.map_err(|error| error.to_string())?);
+                let app = setup.as_ref().unwrap();
+                for sql in [
+                    "CREATE TABLE PACKAGE_CANARY(n NUMBER)",
+                    "CREATE PACKAGE DBMS_APPLICATION_INFO AS PROCEDURE SET_MODULE(module_name IN VARCHAR2, action_name IN VARCHAR2); PROCEDURE SET_CLIENT_INFO(client_info IN VARCHAR2); PROCEDURE SET_ACTION(action_name IN VARCHAR2); END;",
+                    "CREATE PACKAGE BODY DBMS_APPLICATION_INFO AS PROCEDURE SET_MODULE(module_name IN VARCHAR2, action_name IN VARCHAR2) IS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO PACKAGE_CANARY VALUES(1); COMMIT; END; PROCEDURE SET_CLIENT_INFO(client_info IN VARCHAR2) IS BEGIN NULL; END; PROCEDURE SET_ACTION(action_name IN VARCHAR2) IS BEGIN NULL; END; END;",
+                ] {
+                    app.execute(&cx, sql, &[]).await.map_err(|error| error.to_string())?;
+                }
+                tagged = Some(RustOracleConnection::connect(&cx, OracleConnectOptions {
+                    session_identity: Some(OracleSessionIdentity {
+                        module: Some("OMCP_P2G_MODULE".into()), action: Some("shadow_probe".into()),
+                        ..Default::default()
+                    }), ..app_options
+                }).await.map_err(|error| error.to_string())?);
+                let conn = tagged.as_ref().unwrap();
+                let count_sql = format!("SELECT COUNT(*) AS n FROM {owner}.PACKAGE_CANARY");
+                let count = admin.query_rows(&cx, &count_sql, &[]).await.map_err(|error| error.to_string())?;
+                if count.first().and_then(|row| row.parse_i64("N")) != Some(0) {
+                    return Err("session identity committed a shadow DBMS_APPLICATION_INFO callback".into());
+                }
+                let info = conn.describe(&cx).await.map_err(|error| error.to_string())?;
+                if info.backend != Some(OracleBackend::RustOracle)
+                    || info.module.as_deref() != Some("OMCP_P2G_MODULE")
+                    || info.action.as_deref() != Some("shadow_probe")
+                {
+                    return Err("actual session module/action were not applied".into());
+                }
+                conn.rollback(&cx).await.map_err(|error| error.to_string())?;
+                conn.execute(&cx, "SET TRANSACTION READ ONLY", &[]).await.map_err(|error| error.to_string())?;
+                conn.execute(&cx, "BEGIN DBMS_APPLICATION_INFO.SET_MODULE(:1,:2); END;", &[OracleBind::String("shadow".into()),OracleBind::String("control".into())])
+                    .await.map_err(|error| error.to_string())?;
+                let count = admin.query_rows(&cx, &count_sql, &[]).await.map_err(|error| error.to_string())?;
+                if !count.first().and_then(|row| row.parse_i64("N")).is_some_and(|n| n > 0) {
+                    return Err("local shadow package did not commit its negative control inside READ ONLY".into());
+                }
+                Ok(())
+            }.await;
+            let tagged_close = if let Some(conn) = tagged { conn.close(&cx).await } else { Ok(()) };
+            let setup_close = if let Some(conn) = setup { conn.close(&cx).await } else { Ok(()) };
+            let cleanup = if created {
+                admin.execute(&cx, &format!("DROP USER {owner} CASCADE"), &[]).await.map(|_| ())
+            } else { Ok(()) };
+            let admin_close = admin.close(&cx).await;
+            assert!(tagged_close.is_ok(), "tagged connection cleanup failed");
+            assert!(setup_close.is_ok(), "setup connection cleanup failed");
+            assert!(cleanup.is_ok(), "owned package schema cleanup failed: {cleanup:?}");
+            assert!(admin_close.is_ok(), "admin cleanup failed");
+            result.expect("native session identity package-shadow contract");
+        });
+    }
 
     #[test]
     fn timestamp_tz_binds_convert_wall_clock_to_utc_fields() {

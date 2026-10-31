@@ -36,12 +36,12 @@ pub const NATIVE_REDACTION_OPTION_SQL: &str =
 /// fixed to `1=1`: the server does not accept a caller-provided expression that
 /// could turn a requested protection into a conditional bypass.
 pub const NATIVE_REDACTION_ADD_POLICY_SQL: &str = "BEGIN \
-    DBMS_REDACT.ADD_POLICY( \
+    SYS.DBMS_REDACT.ADD_POLICY( \
         object_schema => :1, \
         object_name => :2, \
         policy_name => :3, \
         column_name => :4, \
-        function_type => DBMS_REDACT.FULL, \
+        function_type => SYS.DBMS_REDACT.FULL, \
         expression => '1=1', \
         enable => TRUE); \
 END;";

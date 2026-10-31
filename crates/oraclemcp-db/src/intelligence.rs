@@ -2635,7 +2635,7 @@ pub async fn explain_plan(
     if read_only_standby {
         return Err(DbError::InvalidArgument(
             "EXPLAIN PLAN writes PLAN_TABLE and is disabled on a read-only standby; \
-             use DBMS_XPLAN.DISPLAY_CURSOR against an existing cursor"
+             use SYS.DBMS_XPLAN.DISPLAY_CURSOR against an existing cursor"
                 .to_owned(),
         ));
     }

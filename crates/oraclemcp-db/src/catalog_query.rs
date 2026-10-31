@@ -2940,6 +2940,16 @@ mod impact_lock_query_tests {
 mod catalog_sql_lexical_tests {
     use super::CatalogQueryId;
 
+    fn oracle_identifier(token: &str) -> String {
+        match token
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+        {
+            Some(value) => value.replace("\"\"", "\""),
+            None => token.to_owned(),
+        }
+    }
+
     // Inspect the actual expanded closed SQL, including macro-generated reads.
     // Skip literal contents/comments, and track FROM lists across subqueries so
     // a comma join cannot hide an application-shadowable dictionary reference.
@@ -2956,11 +2966,28 @@ mod catalog_sql_lexical_tests {
             .filter(|token| {
                 !token.starts_with('\'') && !token.starts_with("--") && !token.starts_with("/*")
             })
-            .map(str::to_ascii_uppercase)
+            .map(|token| {
+                if token.starts_with('"') {
+                    token.to_owned()
+                } else {
+                    token.to_ascii_uppercase()
+                }
+            })
             .collect();
         let mut from_lists = vec![false];
         let mut relation = false;
         let mut invalid = Vec::new();
+        for (index, token) in tokens.iter().enumerate() {
+            let name = oracle_identifier(token).to_ascii_uppercase();
+            if (name.starts_with("DBMS_") || name.starts_with("UTL_"))
+                && tokens.get(index + 1).map(String::as_str) == Some(".")
+                && (index < 2
+                    || tokens[index - 1] != "."
+                    || oracle_identifier(&tokens[index - 2]) != "SYS")
+            {
+                invalid.push(name);
+            }
+        }
         let mut index = 0;
         while index < tokens.len() {
             let token = tokens[index].as_str();
@@ -2980,42 +3007,45 @@ mod catalog_sql_lexical_tests {
                     relation = false;
                 }
                 "," => relation = *from_lists.last().unwrap(),
-                "WHERE" | "ON" | "GROUP" | "ORDER" | "HAVING" | "CONNECT" | "START" | "UNION"
+                "WHERE" | "GROUP" | "ORDER" | "HAVING" | "CONNECT" | "START" | "UNION"
                 | "INTERSECT" | "MINUS" | "FETCH" => {
                     *from_lists.last_mut().unwrap() = false;
                     relation = false;
                 }
                 _ if relation => {
-                    let mut parts = vec![token.trim_matches('"')];
+                    let mut parts = vec![oracle_identifier(token)];
                     while index + 2 < tokens.len()
                         && tokens.get(index + 1).map(String::as_str) == Some(".")
                     {
                         index += 2;
-                        parts.push(tokens[index].trim_matches('"'));
+                        parts.push(oracle_identifier(&tokens[index]));
                     }
-                    let name = *parts.last().unwrap();
+                    let name = parts.last().unwrap();
+                    let key = name.to_ascii_uppercase();
                     let dictionary = ["ALL_", "DBA_", "USER_", "V$", "GV$", "V_$", "GV_$"]
                         .iter()
-                        .any(|prefix| name.starts_with(prefix))
+                        .any(|prefix| key.starts_with(prefix))
                         || matches!(
-                            name,
+                            key.as_str(),
                             "DUAL"
                                 | "SESSION_ROLES"
                                 | "SESSION_PRIVS"
                                 | "REDACTION_POLICIES"
                                 | "PRODUCT_COMPONENT_VERSION"
                         );
-                    let owner =
-                        if matches!(name, "ALL_SA_TABLE_POLICIES" | "ALL_SA_SCHEMA_POLICIES") {
-                            "LBACSYS"
-                        } else {
-                            "SYS"
-                        };
+                    let owner = if matches!(
+                        key.as_str(),
+                        "ALL_SA_TABLE_POLICIES" | "ALL_SA_SCHEMA_POLICIES"
+                    ) {
+                        "LBACSYS"
+                    } else {
+                        "SYS"
+                    };
                     if dictionary
                         && (parts.len() != 2
                             || parts[0] != owner
-                            || name.starts_with("V$")
-                            || name.starts_with("GV$"))
+                            || key.starts_with("V$")
+                            || key.starts_with("GV$"))
                     {
                         invalid.push(parts.join("."));
                     }
@@ -3026,6 +3056,342 @@ mod catalog_sql_lexical_tests {
             index += 1;
         }
         invalid
+    }
+
+    fn production_cfg(meta: &syn::Meta) -> Option<bool> {
+        use syn::parse::Parser;
+        match meta {
+            syn::Meta::Path(path) => path.is_ident("test").then_some(false),
+            syn::Meta::List(list) => {
+                let children =
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+                        .parse2(list.tokens.clone())
+                        .expect("valid Rust cfg");
+                let values: Vec<_> = children.iter().map(production_cfg).collect();
+                if list.path.is_ident("all") {
+                    if values.contains(&Some(false)) {
+                        Some(false)
+                    } else if values.iter().all(|value| *value == Some(true)) {
+                        Some(true)
+                    } else {
+                        None
+                    }
+                } else if list.path.is_ident("any") {
+                    if values.contains(&Some(true)) {
+                        Some(true)
+                    } else if values.iter().all(|value| *value == Some(false)) {
+                        Some(false)
+                    } else {
+                        None
+                    }
+                } else if list.path.is_ident("not") && values.len() == 1 {
+                    values[0].map(|value| !value)
+                } else {
+                    None
+                }
+            }
+            syn::Meta::NameValue(_) => None,
+        }
+    }
+
+    fn production_attributes(attributes: &[syn::Attribute]) -> bool {
+        attributes.iter().all(|attribute| {
+            if attribute.path().is_ident("test") {
+                return false;
+            }
+            !attribute.path().is_ident("cfg")
+                || production_cfg(
+                    &attribute
+                        .parse_args::<syn::Meta>()
+                        .expect("valid cfg attribute"),
+                ) != Some(false)
+        })
+    }
+
+    #[derive(Default)]
+    struct ProductionSql {
+        file: std::path::PathBuf,
+        module_dir: std::path::PathBuf,
+        files: std::collections::BTreeSet<std::path::PathBuf>,
+        literals: Vec<(std::path::PathBuf, String)>,
+    }
+
+    impl ProductionSql {
+        fn file(&mut self, file: std::path::PathBuf) {
+            use syn::visit::Visit;
+            if !self.files.insert(file.clone()) {
+                return;
+            }
+            let previous_file = std::mem::replace(&mut self.file, file.clone());
+            let stem = file.file_stem().unwrap().to_str().unwrap();
+            let mut directory = file.parent().unwrap().to_path_buf();
+            if !matches!(stem, "lib" | "main" | "mod") {
+                directory.push(stem);
+            }
+            let previous_directory = std::mem::replace(&mut self.module_dir, directory);
+            let source = std::fs::read_to_string(&file)
+                .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
+            let syntax = syn::parse_file(&source)
+                .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
+            if production_attributes(&syntax.attrs) {
+                self.visit_file(&syntax);
+            }
+            self.file = previous_file;
+            self.module_dir = previous_directory;
+        }
+
+        fn tokens(&mut self, tokens: proc_macro2::TokenStream) {
+            for token in tokens {
+                match token {
+                    proc_macro2::TokenTree::Group(group) => self.tokens(group.stream()),
+                    proc_macro2::TokenTree::Literal(literal) => {
+                        if let Ok(value) = syn::parse_str::<syn::LitStr>(&literal.to_string()) {
+                            self.literals.push((self.file.clone(), value.value()));
+                        } else if let Ok(value) =
+                            syn::parse_str::<syn::LitByteStr>(&literal.to_string())
+                            && let Ok(text) = String::from_utf8(value.value())
+                        {
+                            self.literals.push((self.file.clone(), text));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for ProductionSql {
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            if !production_attributes(&item.attrs) {
+                return;
+            }
+            if let Some((_, items)) = &item.content {
+                let previous = self.module_dir.clone();
+                self.module_dir.push(item.ident.to_string());
+                for item in items {
+                    self.visit_item(item);
+                }
+                self.module_dir = previous;
+            } else {
+                let explicit = item.attrs.iter().find_map(|attribute| {
+                    if !attribute.path().is_ident("path") {
+                        return None;
+                    }
+                    let syn::Meta::NameValue(value) = &attribute.meta else {
+                        return None;
+                    };
+                    let syn::Expr::Lit(value) = &value.value else {
+                        return None;
+                    };
+                    let syn::Lit::Str(value) = &value.lit else {
+                        return None;
+                    };
+                    Some(self.file.parent().unwrap().join(value.value()))
+                });
+                let path = explicit.unwrap_or_else(|| {
+                    let name = item.ident.to_string();
+                    let flat = self.module_dir.join(format!("{name}.rs"));
+                    if flat.is_file() {
+                        flat
+                    } else {
+                        self.module_dir.join(name).join("mod.rs")
+                    }
+                });
+                self.file(path);
+            }
+        }
+
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            if production_attributes(&item.attrs) {
+                syn::visit::visit_item_fn(self, item);
+            }
+        }
+        fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+            if production_attributes(&item.attrs) {
+                syn::visit::visit_item_impl(self, item);
+            }
+        }
+        fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
+            if production_attributes(&item.attrs) {
+                syn::visit::visit_item_const(self, item);
+            }
+        }
+        fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
+            if production_attributes(&item.attrs) {
+                syn::visit::visit_item_static(self, item);
+            }
+        }
+        fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
+            if production_attributes(&item.attrs) {
+                syn::visit::visit_item_macro(self, item);
+            }
+        }
+        fn visit_lit_str(&mut self, literal: &'ast syn::LitStr) {
+            self.literals.push((self.file.clone(), literal.value()));
+        }
+        fn visit_lit_byte_str(&mut self, literal: &'ast syn::LitByteStr) {
+            if let Ok(text) = String::from_utf8(literal.value()) {
+                self.literals.push((self.file.clone(), text));
+            }
+        }
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            if mac.path.is_ident("include") {
+                let path = syn::parse2::<syn::LitStr>(mac.tokens.clone())
+                    .expect("production Rust include path must be inspectable");
+                self.file(self.file.parent().unwrap().join(path.value()));
+                return;
+            }
+            if mac.path.is_ident("include_str")
+                && let Ok(path) = syn::parse2::<syn::LitStr>(mac.tokens.clone())
+                && path.value().ends_with(".sql")
+            {
+                let path = self.file.parent().unwrap().join(path.value());
+                let sql = std::fs::read_to_string(&path)
+                    .expect("production included SQL must be readable");
+                self.literals.push((path, sql));
+                return;
+            }
+            if mac.path.is_ident("concat") {
+                let before = self.literals.len();
+                self.tokens(mac.tokens.clone());
+                let combined = self.literals[before..]
+                    .iter()
+                    .map(|(_, text)| text.as_str())
+                    .collect::<String>();
+                self.literals.push((self.file.clone(), combined));
+            } else {
+                self.tokens(mac.tokens.clone());
+            }
+        }
+    }
+
+    fn sql_literal(text: &str) -> bool {
+        let mut text = text.trim_start();
+        loop {
+            if let Some(comment) = text.strip_prefix("--") {
+                let Some(end) = comment.find('\n') else {
+                    return false;
+                };
+                text = comment[end..].trim_start();
+            } else if let Some(comment) = text.strip_prefix("/*") {
+                let Some(end) = comment.find("*/") else {
+                    return false;
+                };
+                text = comment[end + 2..].trim_start();
+            } else {
+                break;
+            }
+        }
+        let first = text
+            .split(|ch: char| !ch.is_alphanumeric() && !matches!(ch, '_' | '$' | '#'))
+            .next()
+            .unwrap_or("");
+        matches!(
+            first.to_ascii_uppercase().as_str(),
+            "SELECT"
+                | "WITH"
+                | "FROM"
+                | "JOIN"
+                | "LEFT"
+                | "RIGHT"
+                | "INNER"
+                | "CROSS"
+                | "INSERT"
+                | "UPDATE"
+                | "DELETE"
+                | "MERGE"
+                | "CREATE"
+                | "ALTER"
+                | "DROP"
+                | "TRUNCATE"
+                | "BEGIN"
+                | "DECLARE"
+                | "UNION"
+                | "CALL"
+                | "EXECUTE"
+                | "EXPLAIN"
+                | "GRANT"
+        )
+    }
+
+    #[test]
+    fn every_production_sql_literal_uses_authoritative_dictionary_names() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let mut scan = ProductionSql::default();
+        for entry in [
+            "oraclemcp-db/src/lib.rs",
+            "oraclemcp-core/src/lib.rs",
+            "oraclemcp/src/lib.rs",
+            "oraclemcp/src/main.rs",
+        ] {
+            scan.file(root.join("crates").join(entry));
+        }
+        assert!(
+            scan.files
+                .iter()
+                .any(|path| path.ends_with("oracledb_backend.rs")),
+            "feature-gated official production code must be scanned"
+        );
+        let failures: std::collections::BTreeSet<_> = scan
+            .literals
+            .iter()
+            .filter(|(_, text)| sql_literal(text))
+            .flat_map(|(path, text)| {
+                shadowable_dictionary_references(text)
+                    .into_iter()
+                    .map(move |name| format!("{}: {name}", path.display()))
+            })
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "production SQL can read shadow objects:\n{}",
+            failures.into_iter().collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    #[test]
+    fn production_sql_scan_keeps_feature_code_concat_and_excludes_only_test_code() {
+        use syn::visit::Visit;
+        assert!(!sql_literal(
+            "execute_approved: read dbms_output.lines from the tool result"
+        ));
+        assert!(sql_literal(
+            "/* evidence */ -- context\nBEGIN DBMS_SESSION.CLEAR_IDENTIFIER; END;"
+        ));
+        let syntax = syn::parse_file(r#"
+            #[cfg(test)] mod tests { const SQL: &str = "SELECT TEST_ONLY FROM DUAL"; }
+            #[cfg(not(not(test)))] fn also_test_only() { let sql = "SELECT TEST_ONLY FROM ALL_SOURCE"; }
+            #[cfg(feature="oracledb")] mod official {
+                const SQL: &str = "SELECT REAL_FEATURE FROM DUAL";
+            }
+            #[cfg(any(test,feature="alternate"))] fn alternate() {
+                let sql = concat!("SELECT 1 FROM ", "ALL_SOURCE");
+            }
+            const BYTE_SQL: &[u8] = b"SELECT 1 FROM ALL_POLICIES";
+            const PACKAGE_SQL: &str = "BEGIN DBMS_SESSION.CLEAR_IDENTIFIER; END;";
+        "#).unwrap();
+        let mut scan = ProductionSql::default();
+        scan.visit_file(&syntax);
+        assert!(
+            !scan
+                .literals
+                .iter()
+                .any(|(_, value)| value.contains("TEST_ONLY"))
+        );
+        let invalid: Vec<_> = scan
+            .literals
+            .iter()
+            .filter(|(_, text)| sql_literal(text))
+            .flat_map(|(_, text)| shadowable_dictionary_references(text))
+            .collect();
+        assert_eq!(
+            invalid,
+            ["DUAL", "ALL_SOURCE", "ALL_POLICIES", "DBMS_SESSION"]
+        );
     }
 
     #[test]
@@ -3044,12 +3410,20 @@ mod catalog_sql_lexical_tests {
         for sql in [
             "SELECT text FROM all_source",
             "SELECT 1 FROM SYS.DUAL, ALL_POLICIES p",
+            "SELECT s.line FROM SYS.ALL_SOURCE s JOIN SYS.DUAL d ON 1=1, ALL_OBJECTS shadow WHERE s.owner=:1",
             "SELECT 1 FROM (SELECT * FROM ALL_OBJECTS) q",
             "SELECT 1 FROM SYS.DUAL JOIN \"ALL_SOURCE\" s ON 1=1",
             "SELECT 1 FROM APP.ALL_POLICIES",
             "SELECT 1 FROM SYS.ALL_SA_TABLE_POLICIES",
             "SELECT 1 FROM V$OPTION",
             "SELECT 1 FROM SYS.V$OPTION",
+            "BEGIN DBMS_APPLICATION_INFO.SET_MODULE(:1,:2); END;",
+            "SELECT UTL_HTTP.REQUEST(:1) FROM SYS.DUAL",
+            "BEGIN \"DBMS_APPLICATION_INFO\".SET_MODULE(:1,:2); END;",
+            "BEGIN \"sys\".DBMS_APPLICATION_INFO.SET_MODULE(:1,:2); END;",
+            "SELECT 1 FROM \"sys\".ALL_SOURCE",
+            "SELECT 1 FROM \"SYS\"\"\".ALL_SOURCE",
+            "BEGIN \"SYS\"\"\".DBMS_APPLICATION_INFO.SET_MODULE(:1,:2); END;",
         ] {
             assert!(!shadowable_dictionary_references(sql).is_empty(), "{sql}");
         }
@@ -3059,6 +3433,8 @@ mod catalog_sql_lexical_tests {
             "SELECT 1 FROM SYS.DUAL /* JOIN ALL_SOURCE */ JOIN SYS.ALL_POLICIES p ON 1=1",
             "SELECT 1 FROM LBACSYS.ALL_SA_TABLE_POLICIES",
             "SELECT 1 FROM SYS.V_$OPTION",
+            "BEGIN SYS.DBMS_APPLICATION_INFO.SET_MODULE(:1,:2); END;",
+            "BEGIN \"SYS\".\"DBMS_APPLICATION_INFO\".SET_MODULE(:1,:2); END;",
         ] {
             assert!(shadowable_dictionary_references(sql).is_empty(), "{sql}");
         }
