@@ -4666,6 +4666,30 @@ mod tests {
     }
 
     #[test]
+    fn pending_byte_underflow_refuses_without_mutating_accounting() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let delivery = DurableShippingForwarder::open(
+            config(directory.path(), "pending-underflow"),
+            Box::new(Capture::default()),
+        )
+        .expect("open spool");
+        // Isolate the accounting primitive from the delivery worker.
+        assert_eq!(delivery.shutdown(), DurableShippingShutdownOutcome::Stopped);
+        delivery.shared.pending_bytes.store(7, Ordering::Relaxed);
+
+        let error = subtract_pending_bytes(&delivery.shared, 8)
+            .expect_err("acknowledging more bytes than pending must refuse");
+        assert!(
+            matches!(error, ShippingError::SpoolIntegrity { seq: None, reason }
+            if reason == "audit shipping pending-byte accounting underflowed")
+        );
+        assert_eq!(delivery.shared.pending_bytes.load(Ordering::Relaxed), 7);
+
+        subtract_pending_bytes(&delivery.shared, 7).expect("exact pending-byte acknowledgement");
+        assert_eq!(delivery.shared.pending_bytes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn blocked_destination_cannot_exceed_shutdown_budget_and_record_stays_durable() {
         let directory = tempfile::tempdir().expect("tempdir");
         let state = Arc::new((
