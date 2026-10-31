@@ -9,10 +9,12 @@ struct FactConnection {
     source_epoch: AtomicUsize,
     scn: AtomicUsize,
     trigger_count: AtomicUsize,
+    trigger_enabled: AtomicBool,
     source_unreadable: AtomicBool,
     object_absent: AtomicBool,
     forbid_code_catalog: AtomicBool,
     no_triggers: AtomicBool,
+    dependent_rows: SyncMutex<Vec<OracleRow>>,
     dependency_owner: SyncMutex<Option<String>>,
 }
 
@@ -77,6 +79,15 @@ impl OracleConnection for FactConnection {
                     row(&[
                         ("OWNER", "APP".into()),
                         ("TRIGGER_NAME", format!("TRG{index}")),
+                        (
+                            "STATUS",
+                            if self.trigger_enabled.load(Ordering::Relaxed) {
+                                "ENABLED"
+                            } else {
+                                "DISABLED"
+                            }
+                            .into(),
+                        ),
                     ])
                 })
                 .collect());
@@ -122,6 +133,7 @@ impl OracleConnection for FactConnection {
                 let roots: Value = serde_json::from_str(json).unwrap();
                 *self.dependency_owner.lock().unwrap() =
                     roots[0]["owner"].as_str().map(str::to_owned);
+                return Ok(self.dependent_rows.lock().unwrap().clone());
             }
             return Ok(Vec::new());
         }
@@ -318,6 +330,167 @@ fn plain_table_fact_snapshots_use_four_reads_and_skip_stored_code() {
             captured.revalidate(context).await.unwrap();
             assert_eq!(conn.queries.load(Ordering::Relaxed) - before, 4);
         }
+    });
+}
+
+#[test]
+fn table_ddl_captures_dependent_facts_and_refuses_drift_without_consuming_grant() {
+    run_with_cx(|cx| async move {
+        let conn = FactConnection::default();
+        conn.no_triggers.store(true, Ordering::Relaxed);
+        let object_row = |name: &str, kind: &str, id: u64, status: &str| {
+            row(&[
+                ("ROW_KIND", "object".into()),
+                ("OWNER", "APP0".into()),
+                ("NAME", name.into()),
+                ("TYPE", kind.into()),
+                ("OBJECT_ID", id.to_string()),
+                ("STATUS", status.into()),
+                ("LAST_DDL_TIME", "2026-10-31T00:00:00".into()),
+            ])
+        };
+        let mut edge = row(&[
+            ("ROW_KIND", "dependency".into()),
+            ("OWNER", "APP0".into()),
+            ("NAME", "T_VIEW".into()),
+            ("TYPE", "VIEW".into()),
+            ("REFERENCED_OWNER", "APP0".into()),
+            ("REFERENCED_NAME", "T".into()),
+            ("REFERENCED_TYPE", "TABLE".into()),
+            ("REFERENCED_OBJECT_ID", "1".into()),
+            ("DEPENDENCY_TYPE", "HARD".into()),
+        ]);
+        edge.columns.push((
+            "REFERENCED_LINK_NAME".into(),
+            OracleCell::new("VARCHAR2", None),
+        ));
+        let source = "SELECT X FROM APP0.T";
+        *conn.dependent_rows.lock().unwrap() = vec![
+            object_row("T", "TABLE", 1, "VALID"),
+            object_row("T_VIEW", "VIEW", 2, "VALID"),
+            edge,
+            row(&[
+                ("ROW_KIND", "source".into()),
+                ("OWNER", "APP0".into()),
+                ("NAME", "T_VIEW".into()),
+                ("TYPE", "VIEW".into()),
+                ("OBJECT_ID", "2".into()),
+                ("LINE", "1".into()),
+                ("TEXT", source.into()),
+                ("SOURCE_LINES", "1".into()),
+                ("SOURCE_LENGTH", source.len().to_string()),
+            ]),
+        ];
+        let binding = ExecGrantBinding::new("s", "l", "p", 1);
+        let scoped = ScopedGrantStore::new();
+        let quarantine = SyncMutex::new(None);
+        let context = context(&cx, &conn, &binding, &scoped, &quarantine);
+        let sql = "ALTER TABLE APP0.T ADD Y NUMBER";
+        let preview = BoundImpact::capture(context, sql, "envelope", &[], None, None, None)
+            .await
+            .unwrap();
+        let FieldStatus::Computed { value: objects } = &preview.binding.decisive.objects else {
+            panic!("existing table DDL must capture its dependent objects");
+        };
+        let dependent = objects
+            .iter()
+            .find(|object| {
+                object.identity
+                    == computed(serde_json::to_string(&("APP0", "T_VIEW", "VIEW", 2u64)).unwrap())
+            })
+            .expect("ALTER TABLE must bind its dependent view");
+        assert_eq!(dependent.status, computed("VALID".to_owned()));
+        assert!(matches!(
+            dependent.source_hash,
+            FieldStatus::Computed { .. }
+        ));
+        assert!(matches!(
+            dependent.dependency_hash,
+            FieldStatus::Computed { .. }
+        ));
+        preview.revalidate(context).await.unwrap();
+        let grants = ExecGrantStore::new();
+        let token = issue_confirmation_grant(
+            &grants,
+            &binding,
+            Some("test"),
+            &preview.material,
+            OperatingLevel::Ddl,
+        );
+
+        // Root identity/status/DDL time, source and edges stay unchanged.
+        conn.dependent_rows.lock().unwrap()[1] = object_row("T_VIEW", "VIEW", 2, "INVALID");
+        assert_eq!(
+            preview.revalidate(context).await.unwrap_err().error_class,
+            ErrorClass::RepreviewRequired
+        );
+        let current = BoundImpact::capture(context, sql, "envelope", &[], None, None, None)
+            .await
+            .unwrap();
+        let consume = |material| {
+            consume_confirmation_grant(ConfirmationGrantRequest {
+                material,
+                required_level: OperatingLevel::Ddl,
+                active_profile: Some("test"),
+                grants: &grants,
+                binding: &binding,
+                confirm: Some(&token),
+                challenge_message: "preview first",
+                suggested_tool: "oracle_preview_sql",
+                next_step: "preview again",
+            })
+        };
+        assert_eq!(
+            consume(&current.material).unwrap_err().error_class,
+            ErrorClass::RepreviewRequired
+        );
+        conn.dependent_rows.lock().unwrap()[1] = object_row("T_VIEW", "VIEW", 2, "VALID");
+        preview.revalidate(context).await.unwrap();
+        consume(&preview.material).expect("stale fact rejection must leave the grant unconsumed");
+    });
+}
+
+#[test]
+fn trigger_status_drift_changes_decisive_digest_with_unchanged_source() {
+    run_with_cx(|cx| async move {
+        let conn = FactConnection::default();
+        let binding = ExecGrantBinding::new("s", "l", "p", 1);
+        let scoped = ScopedGrantStore::new();
+        let quarantine = SyncMutex::new(None);
+        let context = context(&cx, &conn, &binding, &scoped, &quarantine);
+        let sql = "UPDATE APP0.T SET X=1 WHERE ID=2";
+        let source_binds = [
+            OracleBind::String("APP".into()),
+            OracleBind::String("TRG0".into()),
+            OracleBind::String("TRIGGER".into()),
+            OracleBind::I64(4097),
+        ];
+        let source_before =
+            run_catalog_query(&cx, &conn, CatalogQueryId::ClosureSource, &source_binds)
+                .await
+                .unwrap();
+        let preview = BoundImpact::capture(context, sql, "envelope", &[], None, None, None)
+            .await
+            .unwrap();
+        preview.revalidate(context).await.unwrap();
+
+        conn.trigger_enabled.store(true, Ordering::Relaxed);
+        let source_after =
+            run_catalog_query(&cx, &conn, CatalogQueryId::ClosureSource, &source_binds)
+                .await
+                .unwrap();
+        assert_eq!(source_before, source_after);
+        let current = BoundImpact::capture(context, sql, "envelope", &[], None, None, None)
+            .await
+            .unwrap();
+        assert_ne!(
+            preview.material.decisive_digest,
+            current.material.decisive_digest
+        );
+        assert_eq!(
+            preview.revalidate(context).await.unwrap_err().error_class,
+            ErrorClass::RepreviewRequired
+        );
     });
 }
 
