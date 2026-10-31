@@ -211,6 +211,8 @@ pub(crate) const VPD_RLS_POLICY_BY_OBJECT_SQL: &str = "SELECT object_owner, obje
 // Both visibility modes share the bounded frontier and source projection.
 macro_rules! dependents_frontier_sql {
     ($visibility:literal) => {
+        // Keep ID and name lookup branches disjoint. Explicit null guards let
+        // Oracle prune the unused dictionary scan for each requested object.
         concat!(
             r#"SELECT * FROM (WITH requested AS (
   SELECT j.object_id, j.owner, j.name, j.object_type
@@ -219,12 +221,14 @@ macro_rules! dependents_frontier_sql {
     name VARCHAR2(128) PATH '$.name', object_type VARCHAR2(30) PATH '$.type'
   )) j
 ), frontier AS (
-  SELECT DISTINCT o.owner, o.object_name, o.object_type, o.object_id,
-         o.status, o.last_ddl_time
-  FROM SYS.all_objects o JOIN requested r
-    ON (r.object_id = o.object_id OR (r.object_id IS NULL
-      AND r.owner = o.owner AND r.name = o.object_name AND r.object_type = o.object_type))
-  WHERE o.subobject_name IS NULL
+  SELECT o.owner, o.object_name, o.object_type, o.object_id, o.status, o.last_ddl_time
+  FROM requested r JOIN SYS.all_objects o ON r.object_id = o.object_id
+  WHERE r.object_id IS NOT NULL AND o.subobject_name IS NULL
+  UNION
+  SELECT o.owner, o.object_name, o.object_type, o.object_id, o.status, o.last_ddl_time
+  FROM requested r JOIN SYS.all_objects o
+    ON r.owner = o.owner AND r.name = o.object_name AND r.object_type = o.object_type
+  WHERE r.object_id IS NULL AND o.subobject_name IS NULL
 ), dependencies AS (
   SELECT DISTINCT d.owner, d.name, d.type, d.referenced_owner, d.referenced_name,
          d.referenced_type, d.referenced_link_name, d.dependency_type,

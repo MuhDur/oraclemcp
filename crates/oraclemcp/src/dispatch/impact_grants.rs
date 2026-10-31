@@ -230,9 +230,9 @@ use oraclemcp_db::{
 use oraclemcp_guard::{DbIdentity, DecisiveFacts, FieldStatus, ObjectFact, UnavailableReason};
 
 /// Fact reads only: no optimizer, effect analysis, SAST or candidate execution.
-/// Two context reads, at most twelve dependency frontiers, one compiler read,
+/// Two context reads, one exact identity read, at most twelve dependency frontiers, one compiler read,
 /// one trigger list and at most 64 trigger-source reads.
-const MAX_REVALIDATION_QUERIES: usize = 80;
+const MAX_REVALIDATION_QUERIES: usize = 81;
 const MAX_TRIGGER_FACTS: usize = 64;
 
 #[derive(Clone, Copy)]
@@ -323,10 +323,10 @@ pub(super) fn local_impact(envelope: &str, generations: ImpactGenerations) -> Im
 
 impl DecisiveFactProbe {
     fn query_bound(&self) -> usize {
-        if self.root.is_some() {
-            MAX_REVALIDATION_QUERIES
-        } else {
-            2
+        match self.root.as_ref() {
+            None => 2,
+            Some(root) if !self.ddl && root.object_type == "TABLE" => 4 + MAX_TRIGGER_FACTS,
+            Some(_) => MAX_REVALIDATION_QUERIES,
         }
     }
 
@@ -350,6 +350,42 @@ impl DecisiveFactProbe {
                         oraclemcp_guard::QuoteSemantics::Unquoted => part.text.to_ascii_uppercase(),
                     })
                     .collect::<Vec<_>>();
+                let (owner, name) = match names.as_slice() {
+                    [name] => (String::new(), name.clone()),
+                    [owner, name] => (owner.clone(), name.clone()),
+                    _ => return None,
+                };
+                Some(DependentObject {
+                    owner,
+                    name,
+                    object_type: "TABLE".into(),
+                })
+            })
+            .or_else(|| {
+                use sqlparser::ast::{Statement, TableObject};
+                let statements = sqlparser::parser::Parser::parse_sql(
+                    &sqlparser::dialect::OracleDialect {},
+                    sql,
+                )
+                .ok()?;
+                let [Statement::Insert(insert)] = statements.as_slice() else {
+                    return None;
+                };
+                let TableObject::TableName(table) = &insert.table else {
+                    return None;
+                };
+                let names = table
+                    .0
+                    .iter()
+                    .map(|part| {
+                        let name = part.as_ident()?;
+                        Some(if name.quote_style.is_some() {
+                            name.value.clone()
+                        } else {
+                            name.value.to_ascii_uppercase()
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?;
                 let (owner, name) = match names.as_slice() {
                     [name] => (String::new(), name.clone()),
                     [owner, name] => (owner.clone(), name.clone()),
@@ -428,46 +464,113 @@ impl DecisiveFactProbe {
             };
             root.owner.clone_from(schema);
         }
-        let closure = probe_dependents_transitive(
-            context.cx,
-            context.conn,
-            std::slice::from_ref(&root),
-            DepCaps::default(),
-        )
-        .await;
-        let mut objects = Vec::new();
-        match closure {
-            Ok(closure) => {
-                queries += closure.query_count();
-                objects = dependency_object_facts(&closure);
-            }
-            Err(oraclemcp_db::DependentsError::Database(error))
-                if error.is_uncertain_session_state() =>
-            {
-                impact::quarantine_dependency_observation(context.quarantine, &error);
-                return Err(error.into_envelope());
-            }
-            Err(_) => {
-                // The collector owns a hard max_depth + 2 bound even on an error.
-                queries += 12;
-                exact_count = false;
-            }
-        }
         let object_binds = [
             OracleBind::String(root.owner.clone()),
             OracleBind::String(root.name.clone()),
             OracleBind::String(root.object_type.clone()),
             OracleBind::I64(2),
         ];
-        decisive.compiler_facts = self
+        let metadata = self
             .read(
+                context,
+                CatalogQueryId::ClosureMemberObject,
+                &object_binds,
+                &mut queries,
+            )
+            .await?;
+        // Row changes cannot invalidate stored dependent code. Bind the exact
+        // target metadata (including LAST_DDL_TIME), and still re-read all row
+        // trigger facts below. A missing target also has no visible source to
+        // traverse: its absence/unknown identity remains in the fingerprint.
+        let needs_dependencies = (self.ddl || root.object_type != "TABLE")
+            && metadata.as_ref().is_none_or(|rows| !rows.is_empty());
+        let mut objects = Vec::new();
+        if needs_dependencies {
+            let closure = probe_dependents_transitive(
+                context.cx,
+                context.conn,
+                std::slice::from_ref(&root),
+                DepCaps::default(),
+            )
+            .await;
+            match closure {
+                Ok(closure) => {
+                    queries += closure.query_count();
+                    objects = dependency_object_facts(&closure);
+                }
+                Err(oraclemcp_db::DependentsError::Database(error))
+                    if error.is_uncertain_session_state() =>
+                {
+                    impact::quarantine_dependency_observation(context.quarantine, &error);
+                    return Err(error.into_envelope());
+                }
+                Err(_) => {
+                    // The collector owns a hard max_depth + 2 bound even on an error.
+                    queries += 12;
+                    exact_count = false;
+                }
+            }
+        } else {
+            let row = metadata.as_ref().and_then(|rows| match rows.as_slice() {
+                [row] => Some(row),
+                _ => None,
+            });
+            objects.push(ObjectFact {
+                identity: row
+                    .and_then(|row| row.text("object_id"))
+                    .and_then(|id| id.parse::<u64>().ok())
+                    .filter(|id| *id > 0)
+                    .map_or_else(unknown, |id| {
+                        computed(
+                            serde_json::to_string(&(
+                                &root.owner,
+                                &root.name,
+                                &root.object_type,
+                                id,
+                            ))
+                            .expect("object identity serialization"),
+                        )
+                    }),
+                status: row
+                    .and_then(|row| row.text("status"))
+                    .map_or_else(unknown, |status| computed(status.to_owned())),
+                source_hash: if root.object_type == "TABLE" && row.is_some() {
+                    FieldStatus::NotApplicable {
+                        reason: oraclemcp_guard::NotApplicableReason::NoSource,
+                    }
+                } else {
+                    unknown()
+                },
+                dependency_hash: metadata
+                    .as_ref()
+                    .map_or_else(unknown, |rows| computed(digest_json(&(&root, rows)))),
+                trigger_hash: unknown(),
+            });
+        }
+        let has_compiler_settings = matches!(
+            root.object_type.as_str(),
+            "PROCEDURE"
+                | "FUNCTION"
+                | "PACKAGE"
+                | "PACKAGE BODY"
+                | "TRIGGER"
+                | "TYPE"
+                | "TYPE BODY"
+        );
+        decisive.compiler_facts = if needs_dependencies && has_compiler_settings {
+            self.read(
                 context,
                 CatalogQueryId::ClosureCompilerSettings,
                 &object_binds,
                 &mut queries,
             )
             .await?
-            .map_or_else(unknown, |rows| computed(hex_digest(&digest_json(&rows))));
+            .map_or_else(unknown, |rows| computed(hex_digest(&digest_json(&rows))))
+        } else {
+            FieldStatus::NotApplicable {
+                reason: oraclemcp_guard::NotApplicableReason::NoSource,
+            }
+        };
         let (trigger_query, trigger_binds) = if self.ddl {
             (
                 CatalogQueryId::DdlTriggers,

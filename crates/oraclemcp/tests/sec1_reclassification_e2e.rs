@@ -64,6 +64,8 @@ fn sample_rows_catalog(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>
         ])]);
     }
     if [
+        oraclemcp_db::CatalogQueryId::ClosureMemberObject,
+        oraclemcp_db::CatalogQueryId::ClosureTriggers,
         oraclemcp_db::CatalogQueryId::DependentsTransitive,
         oraclemcp_db::CatalogQueryId::DependentsTransitiveVisible,
         oraclemcp_db::CatalogQueryId::ClosureCompilerSettings,

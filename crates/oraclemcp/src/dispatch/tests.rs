@@ -7632,8 +7632,7 @@ fn custom_tool_write_runs_with_confirmation_on_writable_profile() {
     let expected_fact_reads = [
         CatalogQueryId::SessionContext.spec().sql,
         CatalogQueryId::PdbIdentity.spec().sql,
-        CatalogQueryId::DependentsTransitive.spec().sql,
-        CatalogQueryId::ClosureCompilerSettings.spec().sql,
+        CatalogQueryId::ClosureMemberObject.spec().sql,
         CatalogQueryId::ClosureTriggers.spec().sql,
     ]
     .repeat(4)
@@ -10279,6 +10278,13 @@ fn create_or_replace_package_spec_apply_uses_preview_grant_once() {
     let confirm = preview["confirmation"]["confirm"]
         .as_str()
         .expect("package preview confirmation");
+    let fact_snapshots_before = state
+        .queried
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|sql| sql.as_str() == CatalogQueryId::PdbIdentity.spec().sql)
+        .count();
 
     let applied = dispatcher
         .dispatch(
@@ -10290,6 +10296,18 @@ fn create_or_replace_package_spec_apply_uses_preview_grant_once() {
     assert_eq!(applied["applied"], json!(true));
     assert_eq!(applied["committed"], json!(true));
     assert_eq!(applied["detected_object"]["object_type"], json!("PACKAGE"));
+    let fact_snapshots_after = state
+        .queried
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|sql| sql.as_str() == CatalogQueryId::PdbIdentity.spec().sql)
+        .count();
+    assert_eq!(
+        fact_snapshots_after - fact_snapshots_before,
+        2,
+        "apply observes fresh facts before consume and execute, without a redundant wrapper snapshot"
+    );
     let executed = state.executed.lock().expect("exec mutex");
     assert_eq!(executed.len(), 1);
     assert!(executed[0].0.ends_with(source));
@@ -10860,6 +10878,46 @@ fn set_session_level_previews_before_elevating() {
         )
         .expect("preview write after level preview only");
     assert_eq!(write["gate_decision"], json!("require_step_up"));
+}
+
+#[test]
+fn preview_elevate_then_confirmed_ddl_uses_the_same_live_dispatcher() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(state.clone())),
+        Some("ddl-ladder-regression".into()),
+        SessionLevelState::new(OperatingLevel::Admin, false),
+    );
+    let sql = "CREATE TABLE APP.LADDER_FACT_T (ID NUMBER)";
+    let blocked = dispatcher
+        .dispatch("oracle_preview_sql", json!({"sql":sql,"commit":true}))
+        .unwrap();
+    assert_eq!(blocked["gate_decision"], "require_step_up");
+    assert!(blocked["execute_confirmation"].is_null());
+    let elevation = dispatcher
+        .dispatch(
+            "oracle_set_session_level",
+            json!({"level":"DDL","ttl_seconds":60}),
+        )
+        .unwrap();
+    let applied = dispatcher.dispatch("oracle_set_session_level", json!({"level":"DDL","ttl_seconds":60,"execute":true,"confirm":elevation["confirmation"]["confirm"]})).unwrap();
+    assert_eq!(applied["session"]["current_level"], "DDL");
+    let preview = dispatcher
+        .dispatch("oracle_preview_sql", json!({"sql":sql,"commit":true}))
+        .unwrap();
+    let result = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({"sql":sql,"commit":true,"confirm":preview["execute_confirmation"]["confirm"]}),
+        )
+        .unwrap();
+    assert_eq!(result["executed"], true);
+    assert_eq!(result["committed"], true);
+    assert_eq!(state.executed.lock().unwrap().len(), 1);
+    let status = dispatcher
+        .dispatch("oracle_set_session_level", json!({"action":"status"}))
+        .unwrap();
+    assert_eq!(status["session"]["current_level"], "DDL");
 }
 
 #[test]

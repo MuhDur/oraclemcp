@@ -12259,7 +12259,9 @@ async fn create_or_replace_inner(
         ActionKind::CreateOrReplace,
         args.timeout_seconds,
     ));
-    let bound_impact = if matches!(gate, LevelDecision::Allow) {
+    // Apply delegates to execute_sql, which performs both fresh fact checks.
+    // This snapshot is needed only for the preview's signed binding.
+    let bound_impact = if !args.execute && matches!(gate, LevelDecision::Allow) {
         BoundImpact::capture(
             FactProbeContext {
                 is_preview: !args.execute,

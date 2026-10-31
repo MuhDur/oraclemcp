@@ -10,6 +10,9 @@ struct FactConnection {
     scn: AtomicUsize,
     trigger_count: AtomicUsize,
     source_unreadable: AtomicBool,
+    object_absent: AtomicBool,
+    forbid_code_catalog: AtomicBool,
+    no_triggers: AtomicBool,
     dependency_owner: SyncMutex<Option<String>>,
 }
 
@@ -66,6 +69,9 @@ impl OracleConnection for FactConnection {
         if sql == CatalogQueryId::ClosureTriggers.spec().sql
             || sql == CatalogQueryId::DdlTriggers.spec().sql
         {
+            if self.no_triggers.load(Ordering::Relaxed) {
+                return Ok(Vec::new());
+            }
             return Ok((0..self.trigger_count.load(Ordering::Relaxed).max(1))
                 .map(|index| {
                     row(&[
@@ -89,9 +95,27 @@ impl OracleConnection for FactConnection {
                 ),
             ])]);
         }
+        if sql == CatalogQueryId::ClosureMemberObject.spec().sql {
+            if let Some(OracleBind::String(owner)) = binds.first() {
+                *self.dependency_owner.lock().unwrap() = Some(owner.clone());
+            }
+            return Ok(if self.object_absent.load(Ordering::Relaxed) {
+                Vec::new()
+            } else {
+                vec![row(&[
+                    ("OBJECT_ID", "1".into()),
+                    ("STATUS", "VALID".into()),
+                    ("LAST_DDL_TIME", "2026-10-31T00:00:00".into()),
+                ])]
+            });
+        }
         if sql == CatalogQueryId::DependentsTransitive.spec().sql
             || sql == CatalogQueryId::ClosureCompilerSettings.spec().sql
         {
+            assert!(
+                !self.forbid_code_catalog.load(Ordering::Relaxed),
+                "plain table facts must not scan stored-code catalogs"
+            );
             if sql == CatalogQueryId::DependentsTransitive.spec().sql
                 && let Some(OracleBind::String(json)) = binds.first()
             {
@@ -264,6 +288,35 @@ fn revalidation_query_count_bounded_per_action() {
             let before = conn.queries.load(Ordering::Relaxed);
             captured.revalidate(context).await.unwrap();
             assert!(conn.queries.load(Ordering::Relaxed) - before <= captured.probe.query_bound());
+        }
+    });
+}
+
+#[test]
+fn plain_table_fact_snapshots_use_four_reads_and_skip_stored_code() {
+    run_with_cx(|cx| async move {
+        let conn = FactConnection::default();
+        conn.forbid_code_catalog.store(true, Ordering::Relaxed);
+        conn.no_triggers.store(true, Ordering::Relaxed);
+        let binding = ExecGrantBinding::new("s", "l", "p", 1);
+        let grants = ScopedGrantStore::new();
+        let quarantine = SyncMutex::new(None);
+        let context = context(&cx, &conn, &binding, &grants, &quarantine);
+        for sql in [
+            "UPDATE APP0.T SET X=:1 WHERE ID=:2",
+            "INSERT INTO APP0.T (ID) VALUES (:1)",
+            "CREATE TABLE APP0.NEW_T (ID NUMBER)",
+        ] {
+            conn.object_absent
+                .store(sql.starts_with("CREATE"), Ordering::Relaxed);
+            let before = conn.queries.load(Ordering::Relaxed);
+            let captured = BoundImpact::capture(context, sql, "envelope", &[], None, None, None)
+                .await
+                .unwrap();
+            assert_eq!(conn.queries.load(Ordering::Relaxed) - before, 4);
+            let before = conn.queries.load(Ordering::Relaxed);
+            captured.revalidate(context).await.unwrap();
+            assert_eq!(conn.queries.load(Ordering::Relaxed) - before, 4);
         }
     });
 }
@@ -592,8 +645,12 @@ async fn live_fixture(cx: Cx, case: u8) -> Result<(), String> {
                     ))
                     .await?;
                     created.push(("VIEW", view.clone()));
+                    sql(format!("CREATE VIEW {} AS SELECT N FROM {}", qualify(&source_view), qualify(&view))).await?;
+                    created.push(("VIEW", source_view.clone()));
+                    format!("ALTER VIEW {} COMPILE", qualify(&view))
+                } else {
+                    format!("UPDATE {} SET N=:1 WHERE ID=:2", qualify(&table))
                 }
-                format!("UPDATE {} SET N=:1 WHERE ID=:2", qualify(&table))
             };
             let binding =
                 ExecGrantBinding::new("native-impact-session", "native-impact-lane", "fixture", 1);
@@ -615,12 +672,12 @@ async fn live_fixture(cx: Cx, case: u8) -> Result<(), String> {
                 active_profile: Some("native-impact"),
                 is_preview: false,
             };
-            let binds = if case == 2 {
+            let binds = if case != 3 {
                 Vec::new()
             } else {
                 vec![OracleBind::I64(11), OracleBind::I64(1)]
             };
-            let level = if case == 2 {
+            let level = if case != 3 {
                 OperatingLevel::Ddl
             } else {
                 OperatingLevel::ReadWrite
@@ -670,8 +727,8 @@ async fn live_fixture(cx: Cx, case: u8) -> Result<(), String> {
             if case == 1 {
                 sql(format!(
                     "CREATE OR REPLACE VIEW {} AS SELECT N+1 N FROM {}",
-                    qualify(&view),
-                    qualify(&table)
+                    qualify(&source_view),
+                    qualify(&view)
                 ))
                 .await?;
             } else if case == 2 {
