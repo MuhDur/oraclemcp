@@ -635,7 +635,10 @@ contains "$on_path_output" "oraclemcp --json doctor"
 contains "$on_path_output" "oraclemcp --json setup --write --profile db_ro"
 log_pass "PATH-present install path"
 
-if command -v script >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+# The PTY legs use util-linux `script -qefc` and run `timeout` from /usr/bin:/bin;
+# BSD script (macOS) takes different flags, so those hosts skip them.
+if command -v script >/dev/null 2>&1 && script --version 2>/dev/null | grep -q util-linux \
+  && PATH="/usr/bin:/bin" command -v timeout >/dev/null 2>&1; then
   PTY_PREFIX="$SMOKE_ROOT/pty-prefix-$$"
   pty_command=""
   printf -v pty_command 'bash install.sh --offline %q --version %q --target %q --prefix %q --verify checksum-only --no-completions --no-service' \
@@ -682,7 +685,7 @@ if command -v script >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
   contains "$pty_default_output" "Discover databases from tnsnames.ora now? [y/N]"
   log_pass "TTY guided install path"
 else
-  note "script or timeout not installed; skipping TTY prompt smoke"
+  note "util-linux script or /usr/bin timeout unavailable; skipping TTY prompt smoke"
   log_skip "TTY prompt smoke unavailable"
 fi
 
