@@ -35,13 +35,16 @@ use plsql_engine::{
     AnalysisRequest, InvocationIndexV1, InvocationShapeV1, analyze_project, engine_doctor_report,
     engine_full_doctor_report,
 };
-use plsql_ir::{FactPayload, FactStore, FlowEnv, lower_top_level};
+use plsql_ir::{FactPayload, lower_top_level};
 use plsql_lineage::{LineageDirection, column_readers, column_writers, dependencies, impact};
 use plsql_parser::{ParseOptions, parse_with_backend};
 use plsql_parser_antlr::Antlr4RustBackend;
-use plsql_sast::{CompletenessSnapshot, Rule, ScanUnit, run_scan};
+use plsql_sast::{CompletenessSnapshot, Rule};
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+mod sast_source;
+mod source_limits;
 
 pub const TOOL_NAMES: [&str; 9] = [
     "oracle_plsql_parse",
@@ -1180,6 +1183,7 @@ struct BlastRadiusArgs {
 }
 
 fn run_parse(args: ParseArgs) -> Result<Value, ErrorEnvelope> {
+    validate_engine_source(&args.source)?;
     // Header scanning alone does not validate a routine's body. Use the same
     // grammar backend as project analysis, and never lower a recovered parse
     // into a successful declaration report.
@@ -2819,35 +2823,22 @@ fn is_source_expression_keyword(word: &str) -> bool {
 
 fn run_sast(args: SastArgs) -> Result<Value, ErrorEnvelope> {
     let run = analyze_local_project(&args.project_root)?;
-    let facts = FactStore {
-        facts: run.fact_store.facts.clone(),
-    };
-    let mut nodes: Vec<_> = run.dep_graph.nodes.values().collect();
-    nodes.sort_by(|a, b| a.logical_id.as_str().cmp(b.logical_id.as_str()));
-    let flows: Vec<FlowEnv> = nodes.iter().map(|_| FlowEnv::default()).collect();
-    let units: Vec<ScanUnit<'_>> = nodes
-        .iter()
-        .zip(flows.iter())
-        .map(|(node, flow)| ScanUnit {
-            unit_logical_id: node.logical_id.as_str(),
-            source_file: node.logical_id.as_str(),
-            flow,
-        })
-        .collect();
     let completeness = CompletenessSnapshot {
         catalog_available: run.completeness.catalog_available || run.catalog.is_some(),
         plscope_available: run.completeness.plscope_available,
         files_total: run.completeness.files_total,
         files_recovered: run.completeness.files_recovered,
     };
-    let report = run_scan(&sast_rules(), &units, &facts, &completeness);
+    let scan = sast_source::scan(&run, &sast_rules(), &completeness)?;
+    let report = scan.report;
     match args.format.as_deref().unwrap_or("json") {
         "json" => Ok(json!({
             "project_root": args.project_root,
             "report": report,
             "histogram": plsql_sast::rule_firing_histogram(&report),
             "completeness": completeness,
-            "unit_count": units.len(),
+            "unit_count": scan.unit_count,
+            "rule_evaluation_count": scan.rule_evaluation_count,
         })),
         "sarif" => Ok(json!(plsql_sast::to_sarif(
             &report,
@@ -3049,6 +3040,7 @@ fn catalog_row_set(row_set: CatalogRowSetName) -> CatalogRowSet {
 }
 
 fn analyze_local_project(project_root: &str) -> Result<plsql_engine::AnalysisRun, ErrorEnvelope> {
+    source_limits::validate_project(Path::new(project_root))?;
     analyze_project(AnalysisRequest {
         project_root: PathBuf::from(project_root),
         ..AnalysisRequest::default()
@@ -3059,6 +3051,10 @@ fn analyze_local_project(project_root: &str) -> Result<plsql_engine::AnalysisRun
             format!("PL/SQL analysis failed: {error}"),
         )
     })
+}
+
+pub(crate) fn validate_engine_source(source: &str) -> Result<(), ErrorEnvelope> {
+    source_limits::validate_source(source)
 }
 
 fn parse_predict_mode(
@@ -3211,6 +3207,109 @@ mod tests {
         assert_eq!(value["error_count"], 0);
         assert_eq!(value["recovered"], false);
         assert_eq!(value["declarations"][0]["name"], "W4_VALID");
+    }
+
+    fn scan_synthetic_sast(source: &str) -> Value {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("routine.sql"), source).unwrap();
+        dispatch_static(
+            "oracle_plsql_sast",
+            json!({
+                "project_root": project.path().to_str().unwrap(),
+            }),
+        )
+        .expect("real source analysis and rule scan succeed")
+    }
+
+    #[test]
+    fn sast_reports_the_original_standalone_formal_to_dynamic_sql_flow() {
+        for source in [
+            "CREATE OR REPLACE PROCEDURE w4_unsafe(p_name VARCHAR2) AUTHID DEFINER AS BEGIN EXECUTE IMMEDIATE 'DELETE FROM ' || p_name; END;",
+            "CREATE OR REPLACE PROCEDURE w4_unsafe(p_name VARCHAR2) AUTHID DEFINER AS v_sql VARCHAR2(4000); BEGIN v_sql := 'DELETE FROM ' || p_name; EXECUTE IMMEDIATE v_sql; END;",
+            "CREATE OR REPLACE PROCEDURE w4_unsafe(p_name VARCHAR2) AS v_sql VARCHAR2(4000); BEGIN v_sql := p_name; EXECUTE IMMEDIATE v_sql; v_sql := 'SELECT 1 FROM dual'; END;",
+            "CREATE OR REPLACE PROCEDURE w4_unsafe(p_name VARCHAR2) AUTHID DEFINER AS BEGIN EXECUTE IMMEDIATE DBMS_ASSERT.ENQUOTE_LITERAL('x') || p_name; END;",
+            "CREATE OR REPLACE PROCEDURE w4_unsafe(p_name VARCHAR2) AUTHID DEFINER AS BEGIN EXECUTE IMMEDIATE 'DELETE FROM ' || DBMS_ASSERT.NOOP(p_name); END;",
+            "CREATE OR REPLACE FUNCTION w4_unsafe(p_name VARCHAR2) RETURN NUMBER AUTHID DEFINER AS BEGIN EXECUTE IMMEDIATE 'DELETE FROM ' || p_name; RETURN 1; END;",
+        ] {
+            let value = scan_synthetic_sast(source);
+            let finding = value["report"]["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|finding| finding["rule_id"] == "SEC001")
+                .expect("actual formal input reaches the SQL sink");
+            assert_eq!(finding["severity"], "critical");
+            assert_eq!(finding["location"]["file"], "routine.sql");
+            assert_eq!(finding["location"]["line"], 1);
+            assert!(finding["location"]["byte_span"][1].as_u64().unwrap() > 0);
+            assert_eq!(value["unit_count"], 1);
+            assert_eq!(
+                value["rule_evaluation_count"],
+                value["report"]["rules_run"].as_u64().unwrap()
+                    + value["report"]["rules_gated"].as_u64().unwrap()
+            );
+            assert!(
+                value["report"]["rules_gated"].as_u64().unwrap() > 0,
+                "missing unrelated fact families remain gated"
+            );
+        }
+    }
+
+    #[test]
+    fn sast_preserves_clean_literal_and_sanitized_controls() {
+        for source in [
+            "CREATE OR REPLACE PROCEDURE w4_clean AS BEGIN NULL; END;",
+            "CREATE OR REPLACE PROCEDURE w4_clean(p_name VARCHAR2) AS BEGIN EXECUTE IMMEDIATE 'DELETE FROM fixed_table'; END;",
+            "CREATE OR REPLACE PROCEDURE w4_clean(p_name VARCHAR2) AS v_sql VARCHAR2(4000); BEGIN v_sql := 'SELECT 1 FROM dual'; EXECUTE IMMEDIATE v_sql; v_sql := p_name; END;",
+            "CREATE OR REPLACE PROCEDURE w4_clean(p_name VARCHAR2) AS BEGIN EXECUTE IMMEDIATE 'DELETE FROM ' || SYS.DBMS_ASSERT.SIMPLE_SQL_NAME(p_name); END;",
+        ] {
+            let value = scan_synthetic_sast(source);
+            assert_eq!(value["report"]["findings"], json!([]), "{value}");
+            assert!(
+                value["report"]["rules_gated"].as_u64().unwrap() > 0,
+                "zero findings does not claim the missing fact families passed"
+            );
+        }
+    }
+
+    #[test]
+    fn sast_uses_real_package_member_formals_and_body() {
+        let value = scan_synthetic_sast(
+            "CREATE OR REPLACE PACKAGE w4_sast AS PROCEDURE q(p_name VARCHAR2); END;\n/\nCREATE OR REPLACE PACKAGE BODY w4_sast AS PROCEDURE q(p_name VARCHAR2) AS BEGIN EXECUTE IMMEDIATE 'DELETE FROM ' || p_name; END; END;\n/",
+        );
+        assert!(
+            value["report"]["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|finding| finding["rule_id"] == "SEC001"),
+            "{value}"
+        );
+    }
+
+    #[test]
+    fn sast_reports_an_unmodeled_block_as_a_flow_gap() {
+        for source in [
+            "CREATE OR REPLACE PROCEDURE w4_nested(p_name VARCHAR2) AS BEGIN BEGIN EXECUTE IMMEDIATE p_name; END; END;",
+            "CREATE OR REPLACE PROCEDURE w4_nested(p_name VARCHAR2) AS BEGIN IF p_name IS NOT NULL THEN EXECUTE IMMEDIATE p_name; END IF; END;",
+            "CREATE OR REPLACE PROCEDURE w4_nested(p_name VARCHAR2) AS BEGIN LOOP EXECUTE IMMEDIATE p_name; EXIT; END LOOP; END;",
+        ] {
+            let value = scan_synthetic_sast(source);
+            assert!(
+                value["report"]["skipped"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|skip| {
+                        skip["rule_id"] == "SEC001"
+                            && skip["reason"] == "missing_flow_facts"
+                            && skip["detail"]
+                                .as_str()
+                                .is_some_and(|detail| detail.contains("traversal is incomplete"))
+                    }),
+                "{value}"
+            );
+        }
     }
 
     fn write_view_chain_project() -> tempfile::TempDir {

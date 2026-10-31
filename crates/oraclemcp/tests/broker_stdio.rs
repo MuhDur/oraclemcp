@@ -178,6 +178,213 @@ fn test_binary() -> std::ffi::OsString {
     std::env::var_os("ORACLEMCP_BROKER_TEST_BINARY")
         .unwrap_or_else(|| env!("CARGO_BIN_EXE_oraclemcp").into())
 }
+
+#[cfg(feature = "plsql-intelligence")]
+mod served_plsql {
+    use super::*;
+    use std::io::Read;
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+
+    struct HttpProcess(Child);
+    impl Drop for HttpProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn http_rpc(address: SocketAddr, session: Option<&str>, frame: Value) -> (Value, String) {
+        let body = frame.to_string();
+        let session = session
+            .map(|id| format!("mcp-session-id: {id}\r\n"))
+            .unwrap_or_default();
+        let request = format!(
+            "POST /mcp HTTP/1.1\r\nhost: {address}\r\n{session}mcp-protocol-version: 2025-11-25\r\ncontent-type: application/json\r\naccept: application/json, text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let (headers, body) = response.split_once("\r\n\r\n").expect("HTTP response");
+        assert_eq!(
+            headers.lines().next().unwrap().split_whitespace().nth(1),
+            Some("200"),
+            "{response}"
+        );
+        let session = headers
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("mcp-session-id"))
+            .map(|(_, value)| value.trim().to_owned())
+            .unwrap_or_default();
+        let data = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .next_back()
+            .unwrap_or(body);
+        (
+            serde_json::from_str(data).expect("MCP JSON response"),
+            session,
+        )
+    }
+
+    #[test]
+    fn real_stdio_and_http_sast_keep_broker_alive_after_deep_input_refusal() {
+        const UNSAFE: &str = "CREATE OR REPLACE PROCEDURE p(p_name VARCHAR2) AS BEGIN EXECUTE IMMEDIATE 'DELETE FROM ' || DBMS_ASSERT.NOOP(p_name); END;";
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/plsql");
+        let original = std::fs::read_to_string(fixtures.join("sast_unsafe/routine.sql")).unwrap();
+        let clean = std::fs::read_to_string(fixtures.join("sast_clean/routine.sql")).unwrap();
+        let deep = format!(
+            "CREATE PROCEDURE p AS BEGIN {}NULL;{} END;",
+            "BEGIN ".repeat(512),
+            "END;".repeat(512)
+        );
+        let root = tempfile::tempdir().unwrap();
+        let broker = BrokerReaper::new(root.path());
+        let path = config(root.path(), false);
+        let mut source = std::fs::read_to_string(&path).unwrap();
+        source.push_str("\n[http]\njson_response = true\n");
+        std::fs::write(&path, source).unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let file = project.join("routine.sql");
+        let mut stdio = Client::spawn_with_settings(
+            root.path(),
+            &path,
+            0,
+            Some("offline"),
+            None,
+            None,
+            |command| {
+                // Exercise the product's lane stack size, independent of the test runner.
+                command.env_remove("RUST_MIN_STACK");
+            },
+        );
+        assert!(stdio.response(1).get("result").is_some());
+        stdio.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+        let pid = broker.broker_pid().unwrap();
+        let address = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let mut command = Command::new(test_binary());
+        for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("ORACLEMCP_")) {
+            command.env_remove(key);
+        }
+        let mut http = HttpProcess(
+            command
+                .args([
+                    "serve",
+                    "--allow-no-auth",
+                    "--profile",
+                    "shared",
+                    "--listen",
+                    &address.to_string(),
+                ])
+                .env("ORACLEMCP_CONFIG", &path)
+                .env("XDG_STATE_HOME", root.path().join("state"))
+                .env("BROKER_TEST_KEY", "synthetic-test-key-32-bytes-minimum")
+                .env("BROKER_TEST_PASSWORD", "offline")
+                .env_remove("RUST_MIN_STACK")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while TcpStream::connect(address).is_err() {
+            assert!(http.0.try_wait().unwrap().is_none(), "HTTP launcher exited");
+            assert!(std::time::Instant::now() < deadline, "bounded HTTP startup");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (_, session) = http_rpc(
+            address,
+            None,
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"offline-sast","version":"1"}}}),
+        );
+        assert!(!session.is_empty());
+        for transport in ["stdio", "http"] {
+            let mut rpc = |id: i64, name: &str, arguments: Value| {
+                let frame = json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}});
+                if transport == "stdio" {
+                    stdio.send(frame);
+                    stdio.response(id)
+                } else {
+                    http_rpc(address, Some(&session), frame).0
+                }
+            };
+            // NOOP is intentionally unsafe and exercised a real parser stack overflow.
+            for (id, source) in [
+                (2, original.as_str()),
+                (3, UNSAFE),
+                (4, deep.as_str()),
+                (5, clean.as_str()),
+                (6, UNSAFE),
+            ] {
+                std::fs::write(&file, source).unwrap();
+                let reply = rpc(id, "oracle_plsql_sast", json!({"project_root":project}));
+                if id == 4 {
+                    assert_eq!(reply["result"]["isError"], true, "{transport}: {reply}");
+                    assert_eq!(
+                        reply["result"]["structuredContent"]["error_class"], "INVALID_ARGUMENTS",
+                        "{reply}"
+                    );
+                    assert!(
+                        reply["result"]["structuredContent"]["message"]
+                            .as_str()
+                            .unwrap()
+                            .contains("nesting"),
+                        "{reply}"
+                    );
+                } else if id == 5 {
+                    assert_eq!(reply["result"]["isError"], false, "{transport}: {reply}");
+                    assert_eq!(
+                        reply["result"]["structuredContent"]["report"]["findings"],
+                        json!([]),
+                        "{reply}"
+                    );
+                    assert!(
+                        reply["result"]["structuredContent"]["report"]["rules_run"]
+                            .as_u64()
+                            .unwrap()
+                            >= 1,
+                        "literal SQL must exercise the real rule: {reply}"
+                    );
+                } else {
+                    assert_eq!(reply["result"]["isError"], false, "{transport}: {reply}");
+                    assert!(
+                        reply["result"]["structuredContent"]["report"]["findings"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|finding| finding["rule_id"] == "SEC001"
+                                && finding["severity"] == "critical"),
+                        "{reply}"
+                    );
+                }
+            }
+            let refused = rpc(7, "oracle_plsql_parse", json!({"source":deep}));
+            assert_eq!(
+                refused["result"]["structuredContent"]["error_class"], "INVALID_ARGUMENTS",
+                "{refused}"
+            );
+            let valid = rpc(8, "oracle_plsql_parse", json!({"source":UNSAFE}));
+            assert_eq!(valid["result"]["isError"], false, "{valid}");
+            assert_eq!(
+                broker.broker_pid(),
+                Some(pid),
+                "broker must survive, not restart"
+            );
+            assert!(is_test_broker(pid, root.path()), "original broker is alive");
+        }
+    }
+}
 impl Drop for Client {
     fn drop(&mut self) {
         let _ = self.process.kill();

@@ -32,6 +32,7 @@ oracledb = ["oraclemcp-db/oracledb"]
 # The offline engine resolves from the pinned plsql-intelligence workspace rev.
 plsql-intelligence = [
     "dep:chrono",
+    "dep:sqlparser",
     "dep:plsql-core",
     "dep:plsql-engine",
     "dep:plsql-catalog",
@@ -62,6 +63,7 @@ dashboard-bundle = ["oraclemcp-core/dashboard-bundle"]
 mimalloc = ["dep:mimalloc"]
 
 [dependencies]
+sqlparser = { version = "0.63", optional = true }
 oraclemcp-core = { path = "../oraclemcp-core", version = "0.11.0" }
 oraclemcp-db = { path = "../oraclemcp-db", version = "0.11.0" }
 oraclemcp-config = { path = "../oraclemcp-config", version = "0.11.0" }

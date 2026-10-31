@@ -696,6 +696,10 @@ impl LaneRuntime {
         };
         let join = thread::Builder::new()
             .name(thread_name)
+            // Grammar-backed offline tools run on this same bounded lane.
+            // Normal parser recursion needs more stack than the OS default;
+            // keep the existing thread/admission count unchanged.
+            .stack_size(8 * 1024 * 1024)
             .spawn(move || {
                 run_lane_thread_with_factory(receiver, thread_config);
             })
