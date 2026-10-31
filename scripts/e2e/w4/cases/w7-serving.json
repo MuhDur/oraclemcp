@@ -189,7 +189,14 @@
       "priv:SELECT_V_SQL"
     ],
     "expect": {
-      "error_class": "OPERATING_LEVEL_TOO_LOW"
+      "json_subset": {
+        "error_class": "FORBIDDEN_STATEMENT",
+        "isError": true,
+        "message": "read-only server refused this statement: a sub-statement is Forbidden",
+        "structured_reason": {
+          "category": "OTHER"
+        }
+      }
     },
     "audit_expect": [],
     "audit_zero_executions": true,

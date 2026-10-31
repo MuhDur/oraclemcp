@@ -807,7 +807,9 @@ def validate_case(case, filename):
         require(isinstance(case["call"]["vsql_absent_marker"], str)
                 and re.fullmatch(r"W4MARK_[A-Z0-9]{12,32}", case["call"]["vsql_absent_marker"]),
                 "vsql_absent_marker needs a unique synthetic marker")
-        require("error_class" in case["expect"] and "priv:SELECT_V_SQL" in case["requires"],
+        require(("error_class" in case["expect"]
+                 or "error_class" in case["expect"].get("json_subset", {}))
+                and "priv:SELECT_V_SQL" in case["requires"],
                 "V$SQL absence is only valid for a refusal case on a probed capable lane")
     if "cancel_marker" in case["call"]:
         require(isinstance(case["call"]["cancel_marker"], str)
@@ -4866,7 +4868,9 @@ def json_subset_refusal_selftest():
 
     cases = {case["case_id"]: case for case in load_cases()}
     for case_id in ("w4_runtime_issue47_killed_session_dml_not_replayed",
-                    "w4_runtime_issue50_session_busy"):
+                    "w4_runtime_issue50_session_busy",
+                    "w4_query_default_call_udf_refused_no_execution",
+                    "w4_query_cte_impure_body_refused"):
         case = cases[case_id]
         expected = case["expect"]
         structured = {"isError": True, "next_steps": ["inspect the current session before retrying"], **expected["json_subset"]}
@@ -4894,6 +4898,12 @@ def json_subset_refusal_selftest():
         for refusal_case in (case, step_case):
             require(coverage_status({case["tool"]: {}}, [refusal_case])["missing_positive"]
                     == [case["tool"]], "JSON refusal counted as positive tool coverage")
+        if "vsql_absent_marker" in case["call"]:
+            validate_case(case, "selftest")
+            rejected("success_shaped_marker_case", lambda: validate_case(
+                {**case, "expect": {"json_subset": {"rows": []}}}, "selftest"))
+            rejected("marker_without_privilege_probe", lambda: validate_case(
+                {**case, "requires": []}, "selftest"))
     for subset in ({"error_class": ""}, {"error_class": None},
                    {"error_class": "SESSION_BUSY", "isError": False}, {"isError": True}):
         rejected("invalid_refusal_expectation", lambda: verify_expect_shape({"json_subset": subset}))

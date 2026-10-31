@@ -59,13 +59,22 @@
     "transports": ["stdio", "http"],
     "requires": ["priv:SELECT_V_SQL"],
     "setup": [
-      {"sql": "CREATE OR REPLACE FUNCTION ${owner}.V1VIS_IMPURE_${run_id} RETURN NUMBER AUTHID DEFINER AS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_AUTO_${run_id}(ID) VALUES (991); COMMIT; RETURN 1; END;"}
+      {"sql": "CREATE OR REPLACE FUNCTION ${owner}.V1VIS_IMPURE_${run_id} RETURN NUMBER AUTHID DEFINER AS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_AUTO_${run_id}(ID) VALUES (991); COMMIT; RETURN 1; END;"},
+      {"sql": "DECLARE n NUMBER; c NUMBER; BEGIN n := ${owner}.V1VIS_IMPURE_${run_id}(); SELECT COUNT(*) INTO c FROM ${owner}.T_AUTO_${run_id} WHERE ID=991; IF n <> 1 OR n IS NULL OR c <> 1 THEN RAISE_APPLICATION_ERROR(-20001,'CTE effect fixture control failed'); END IF; END;"},
+      {"sql": "DELETE FROM ${owner}.T_AUTO_${run_id} WHERE ID=991"}
     ],
     "call": {
       "arguments": {"sql": "WITH p AS (SELECT ID, ${owner}.V1VIS_IMPURE_${run_id}() AS LABEL FROM ${owner}.T_PARENT_${run_id}) SELECT /* W4MARK_CTEIMPURE1234 */ p.ID, p.LABEL FROM p ORDER BY p.ID"},
       "vsql_absent_marker": "W4MARK_CTEIMPURE1234"
     },
-    "expect": {"error_class": "OPERATING_LEVEL_TOO_LOW"},
+    "expect": {
+      "json_subset": {
+        "error_class": "FORBIDDEN_STATEMENT",
+        "isError": true,
+        "message": "read-only server refused this statement: a sub-statement is Forbidden",
+        "structured_reason": {"category": "OTHER"}
+      }
+    },
     "db_reread": [
       {"sql": "SELECT ID FROM ${owner}.T_AUTO_${run_id} WHERE ID = 991 ORDER BY ID", "rows": []}
     ],
