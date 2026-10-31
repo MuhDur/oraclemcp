@@ -9751,7 +9751,6 @@ async fn preview_dml_inner(
         "danger": decision.danger,
         "objects_affected": decision.objects_affected,
         "reason": decision.reason,
-        "sandbox": sandbox,
         "action_envelope_digest": sandbox_envelope,
         "next_step": "nothing was committed. To apply this exact change: oracle_preview_sql for its confirmation, then oracle_execute with commit=true — which re-classifies and re-gates the statement rather than trusting this preview",
         "caveat": "the sandbox requires a current complete mutation-effect proof; its affected row count is an observation of this rolled-back execution, not a guarantee for a later execution under concurrency",

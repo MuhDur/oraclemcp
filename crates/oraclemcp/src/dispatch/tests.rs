@@ -19227,6 +19227,11 @@ fn preview_dml_runs_the_statement_in_a_sandbox_and_rolls_it_back() {
     assert_eq!(preview["rolled_back"], json!(true));
     assert_eq!(preview["committed"], json!(false));
     assert_eq!(preview["rows_affected"], json!(3));
+    assert_eq!(
+        preview["sandbox"],
+        json!({"status":"computed", "value":3}),
+        "successful sandbox must expose the typed computed row count",
+    );
     assert_eq!(preview["cannot_undo"], json!([]));
     assert!(
         preview["before"].is_object() && preview["after"].is_object(),
