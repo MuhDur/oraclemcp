@@ -47,6 +47,20 @@ version_count="$(printf '%s\n' "$versions" | sed '/^$/d' | wc -l | tr -d ' ')"
 [ "$version_count" = "1" ] || fail "workspace packages must share one version: $versions"
 version="$versions"
 
+python3 - "$version" "$ROOT/SECURITY.md" <<'PY' || fail "SECURITY.md current line must match the workspace minor"
+import re
+import sys
+from pathlib import Path
+
+expected = ".".join(sys.argv[1].split(".")[:2]) + ".x"
+rows = re.findall(
+    r"^\|\s*([^|]+?)\s*\|[^|\n]*\bcurrent line\b[^|\n]*\|\s*$",
+    Path(sys.argv[2]).read_text(), re.MULTILINE | re.IGNORECASE,
+)
+if rows != [expected]:
+    raise SystemExit(f"SECURITY.md current line {rows!r} != workspace {expected}")
+PY
+
 capabilities_descriptor="Compact discovery entry point: tools, operating level + gates, connection/standby status, feature tiers, version. Pass detail_level=full for the complete descriptor report."
 require_contains \
   "crates/oraclemcp-core/src/server.rs" \

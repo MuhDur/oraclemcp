@@ -9,6 +9,12 @@ companion to [ADR-0001](adr/0001-pinned-nightly-toolchain.md) (the *why*) and
 
 The current pin is **`nightly-2026-05-11`**.
 
+The maintained primary Oracle driver is `oraclemcp-driver-cx`, pinned by the
+workspace manifest. The official `oracledb` adapter is a bounded connect-time
+alternate for compatible password connections. Release archives and the single
+`ghcr.io/muhdur/oraclemcp` image include the PL/SQL-intelligence engine; the
+default source build includes it as well.
+
 > **Nightly is build-time-only.** The pin is a property of *building*
 > oraclemcp, not of *running* it. The shipped binary and the published image
 > carry no Rust toolchain. This runbook concerns people who build from source;
@@ -27,7 +33,7 @@ in the wrong place, so the precise mechanism is worth the extra sentences.
 asupersync 0.3.9 gates its nightly use behind a cargo feature:
 
 ```rust
-// asupersync-0.3.5/src/lib.rs:52-53
+// asupersync-0.3.9/src/lib.rs
 #![cfg_attr(feature = "nightly-outcome-try", feature(try_trait_v2))]
 #![cfg_attr(feature = "nightly-outcome-try", feature(try_trait_v2_residual))]
 ```

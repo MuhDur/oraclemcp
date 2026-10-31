@@ -105,6 +105,61 @@ fn no_overclaiming_framing_in_release_visible_text() {
     );
 }
 
+fn stale_driver_or_image_claim(line: &str) -> bool {
+    let line = line.to_ascii_lowercase();
+    line.contains("plsql-intelligence-latest")
+        || (line.contains("driver-cx")
+            && (line.contains("frozen") || line.contains("discontinued")))
+}
+
+#[test]
+fn driver_image_claim_matcher_rejects_retired_states() {
+    for stale in [
+        "image: ghcr.io/muhdur/oraclemcp:plsql-intelligence-latest",
+        "the frozen, async `oraclemcp-driver-cx` driver",
+        "Driver-cx is DISCONTINUED",
+        "discontinued driver-cx",
+    ] {
+        assert!(stale_driver_or_image_claim(stale), "{stale}");
+    }
+    for current in [
+        "The maintained primary driver is oraclemcp-driver-cx.",
+        "The release has one ghcr.io/muhdur/oraclemcp image.",
+        "The unrelated schema is frozen.",
+    ] {
+        assert!(!stale_driver_or_image_claim(current), "{current}");
+    }
+}
+
+#[test]
+fn maintained_docs_do_not_revive_retired_driver_or_image_claims() {
+    let root = workspace_root();
+    let mut files = vec![root.join("README.md"), root.join("AGENTS.md")];
+    collect(&root.join("docs"), &mut files);
+    let mut violations = Vec::new();
+    for file in files {
+        if file.starts_with(root.join("docs/plan"))
+            || file
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("CHANGELOG"))
+        {
+            continue;
+        }
+        let text = std::fs::read_to_string(&file).expect("read maintained documentation");
+        for (index, line) in text.lines().enumerate() {
+            if !line.contains("honesty-allow") && stale_driver_or_image_claim(line) {
+                violations.push(format!("{}:{}: {line}", file.display(), index + 1));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "stale driver/image claims:\n{}",
+        violations.join("\n")
+    );
+}
+
 #[test]
 fn call_routine_absent_from_agent_surface() {
     let root = workspace_root();

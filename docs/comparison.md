@@ -24,8 +24,10 @@ default** and **escalation-capable** up to `ADMIN` — but only through a
 preview → confirmation-token step-up that is **TTL-bounded** and capped by each
 profile's `max_level`. Every privileged action is written to a hash-chained,
 HMAC-SHA256-signed audit log. The whole thing ships as a single self-contained
-binary with the pure-Rust thin `oraclemcp-driver-cx` driver compiled in — no
-Oracle Instant Client, no ODPI-C, no JVM, no Python.
+binary with the maintained primary pure-Rust thin `oraclemcp-driver-cx` driver
+compiled in. It requires no Oracle Instant Client, ODPI-C, JVM, or Python.
+The release workflow includes the offline PL/SQL-intelligence engine in every
+archive and the single `ghcr.io/muhdur/oraclemcp` image.
 
 In privileged-access-management terms, oraclemcp applies PAM-style discipline to
 agent DB access — least privilege by default, just-in-time elevation, bounded
@@ -51,21 +53,26 @@ separately from the SQLcl and genai-toolbox comparison:
   pure Rust.
 - **Oracle's official Rust driver — [`oracledb`](https://crates.io/crates/oracledb),
   [`github.com/oracle/rust-oracledb`](https://github.com/oracle/rust-oracledb).**
-  Oracle maintains a pure-Rust, synchronous driver, currently `26.0.0-beta.3`
-  (published 2026-09-08; first published 2026-06-14). It requires no Oracle
-  Client libraries and targets Oracle Database 12 through 26ai. The shipped
-  default remains the async `oraclemcp-driver-cx` 0.9.3 at the pinned T0.2a
-  development revision, the renamed continuation of the original Rust thin driver that
-  Oracle's `oracledb` replaces. The official `oracledb` adapter is compiled
-  into shipped artifacts as an experimental, reduced-capability, bounded
-  acquisition-only alternate for compatible password connections after a raw
-  `oraclemcp-driver-cx` acquisition failure; it does not replace the primary
-  driver, execute statements after routing, or handle IAM/cwallet/PEM routes. The
+  This workspace pins Oracle's pure-Rust synchronous driver at `26.0.0-beta.3`.
+  It requires no Oracle Client libraries. The maintained primary driver remains
+  the async `oraclemcp-driver-cx`, pinned at `0.9.3` with a git revision in
+  `Cargo.toml`. The official `oracledb` adapter is compiled
+  into release builds as an experimental, reduced-capability, bounded
+  connect-time alternate for compatible password connections after a raw
+  `oraclemcp-driver-cx` acquisition failure. The new session stays on its
+  selected backend; statements are never replayed through another backend.
+  IAM/cwallet/PEM connections stay on driver-cx. The
   `oraclemcp-driver-cx` repository is
   [`github.com/MuhDur/rust-oracledb`](https://github.com/MuhDur/rust-oracledb).
 
-The dates and descriptions above were checked against crates.io and GitHub on
-2026-09-16. Verify their current behavior and versions against the projects' own
+OCI Autonomous Database has an open post-ACCEPT authentication/TTC failure
+report ([#54](https://github.com/MuhDur/oraclemcp/issues/54)). This branch does
+not prove that a driver fix resolves it. The token and wallet paths must not be
+read as proof of ADB compatibility; autonomous OCI token minting is not
+implemented either.
+
+The Oracle MCP repository dates above were checked on 2026-09-16. Driver pins
+describe this workspace. Verify upstream behavior against the projects' own
 documentation before relying on them; they release independently of oraclemcp.
 
 ---

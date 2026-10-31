@@ -10,17 +10,18 @@ we protect, how to report a vulnerability, and which versions receive fixes.
 
 ## Supported versions
 
-Security fixes land on the latest released minor line. There is no long-term
-support branch.
+Security fixes land on the current minor line. The previous minor receives
+critical fixes only; there is no long-term support branch.
 
 | Version | Supported          |
 |---------|--------------------|
-| 0.10.x  | ✅ (current line)  |
-| 0.9.x   | ⚠️ critical fixes only |
-| < 0.9   | ❌                 |
+| 0.11.x  | ✅ (current line)  |
+| 0.10.x  | ⚠️ critical fixes only |
+| < 0.10  | ❌                 |
 
-The `0.10.0 → 0.11.0` line is the current release train; deploy the latest
-`0.11.x`. Earlier minor lines receive no fixes.
+The current line is `0.11.x`; `0.12.x` is planned. The release-version bump must
+update this table with the workspace minor. Lines older than `0.10.x` receive
+no fixes.
 
 ## Reporting a vulnerability
 

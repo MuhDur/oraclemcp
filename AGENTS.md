@@ -5,8 +5,11 @@ Operating rules for agents working in this repository.
 **oraclemcp** is an unofficial, safe-by-default Oracle Database
 [MCP](https://modelcontextprotocol.io) server in pure Rust: a small Cargo
 workspace of 9 engine-free `oraclemcp-*` library crates plus the `oraclemcp`
-binary. The default binary embeds the `plsql-intelligence` engine for offline
-tools; `--no-default-features` omits it. The SQL guard remains independent of
+binary. Release archives, the single `ghcr.io/muhdur/oraclemcp` image, and the
+default source build embed the `plsql-intelligence` engine for offline tools;
+custom `--no-default-features` builds omit it. The maintained primary driver is
+`oraclemcp-driver-cx`, with a bounded official `oracledb` connect-time alternate
+for compatible password connections. The SQL guard remains independent of
 the PL/SQL engine. The separate `plsql-mcp` server is deprecated. Independent
 open-source project; not affiliated with Oracle.
 

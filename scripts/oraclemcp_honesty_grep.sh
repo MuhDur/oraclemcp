@@ -21,10 +21,15 @@ PATTERN='safe[- ]by[- ]default|read-only binary|fully audited'
 # Release-visible surfaces. Test/fuzz sources and the planning doc are excluded
 # (not shipped / discuss the framing on purpose).
 mapfile -t FILES < <(
-  git ls-files README.md docs crates server.json Dockerfile '*Dockerfile' \
+  git ls-files --full-name -- ':(top)README.md' ':(top)docs' ':(top)crates' \
+    ':(top)server.json' ':(top)Dockerfile' ':(top)*Dockerfile' \
     | grep -E '(^server\.json$)|\.(md|rs|toml)$|(^|/)Dockerfile$' \
     | grep -vE '/tests?/|tests\.rs$|/fuzz/'
 )
+[ "${#FILES[@]}" -gt 0 ] || {
+  echo "oraclemcp-honesty-grep: refusing an empty release-visible file scan" >&2
+  exit 1
+}
 
 violations=0
 for f in "${FILES[@]}"; do
@@ -43,7 +48,8 @@ done
 # them again.  honesty-allow: pattern definition
 CHANNEL_PATTERN='brew install|winget install|MuhDur\.oraclemcp|homebrew-oraclemcp|npx oraclemcp'  # honesty-allow: pattern definition
 mapfile -t CHANNEL_FILES < <(
-  git ls-files README.md 'docs/*.md' packaging .github/workflows scripts \
+  git ls-files --full-name -- ':(top)README.md' ':(top)docs/*.md' \
+    ':(top)packaging' ':(top).github/workflows' ':(top)scripts' \
     | grep -vE '^docs/plan/'
 )
 for f in "${CHANNEL_FILES[@]}"; do
@@ -55,6 +61,29 @@ for f in "${CHANNEL_FILES[@]}"; do
     printf 'RETIRED channel    %s:%s:%s\n' "$f" "$line" "${text#"${text%%[![:space:]]*}"}"
     violations=$((violations + 1))
   done < <(grep -niE "$CHANNEL_PATTERN" "$f" 2>/dev/null || true)
+done
+
+# Driver/image claims in maintained docs. Planning and changelog history may
+# describe retired states; current install guidance must not revive them.
+DRIVER_DOC_PATTERN='plsql-intelligence-latest|((frozen|discontinued).*driver-cx)|(driver-cx.*(frozen|discontinued))'
+mapfile -t DRIVER_DOC_FILES < <(
+  git ls-files --full-name -- ':(top)README.md' ':(top)AGENTS.md' ':(top)docs' \
+    | grep -E '\.md$' \
+    | grep -vE '^docs/plan/|(^|/)CHANGELOG[^/]*$'
+)
+[ "${#DRIVER_DOC_FILES[@]}" -gt 0 ] || {
+  echo "oraclemcp-honesty-grep: refusing an empty driver/image documentation scan" >&2
+  exit 1
+}
+for f in "${DRIVER_DOC_FILES[@]}"; do
+  [ -n "$f" ] || continue
+  while IFS=: read -r line text; do
+    case "$text" in
+      *honesty-allow*) continue ;;
+    esac
+    printf 'STALE driver/image %s:%s:%s\n' "$f" "$line" "${text#"${text%%[![:space:]]*}"}"
+    violations=$((violations + 1))
+  done < <(grep -niE "$DRIVER_DOC_PATTERN" "$f" || true)
 done
 
 if [ "$violations" -gt 0 ]; then

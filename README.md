@@ -19,7 +19,7 @@
 
 ### Drivers
 
-oraclemcp connects through its **own mature, pure-Rust Oracle driver** as the **primary** path. The official `oracledb` crate from Oracle — whose crate name we handed to Oracle in a friendly handshake — is currently in **beta**, and therefore ships purely as a bounded, connect-time **fallback** for the rare case something goes awry. No Oracle Instant Client, ODPI-C, or C toolchain is required.
+The maintained primary driver is **`oraclemcp-driver-cx`**, oraclemcp's pure-Rust thin Oracle driver. The pinned official Oracle `oracledb` beta also ships as a bounded connect-time fallback for compatible password connections. No Oracle Instant Client, ODPI-C, or C toolchain is required.
 
 ```mermaid
 flowchart LR
@@ -31,13 +31,15 @@ flowchart LR
 
 <sub>Only a failed basic-password connect ever falls back; IAM, wallet, and TCPS/PEM always stay on driver-cx, and a fallback never migrates a live session.</sub>
 
+OCI Autonomous Database connectivity has an open post-ACCEPT authentication/TTC failure report ([#54](https://github.com/MuhDur/oraclemcp/issues/54)); this branch does not establish that a driver fix has resolved it. Token sources and wallet support do not prove ADB connectivity. Autonomous OCI token minting is also not implemented.
+
 ## At a glance
 
 | | |
 |---|---|
 | **Tools** | **43 governed MCP tools** + 25 compatibility aliases, each with a real JSON Schema and MCP safety hints |
 | **Safety** | fail-closed SQL classifier · 4-level ladder `READ_ONLY → READ_WRITE → DDL → ADMIN` · DML rollback-by-default · signed, hash-chained audit |
-| **Auth** | username/password over TCP · IAM / OCI ADB token · TLS/TCPS + PEM · Oracle wallet (`cwallet.sso`) |
+| **Auth** | username/password over TCP · pre-fetched IAM database tokens · TLS/TCPS + PEM · Oracle wallet (`cwallet.sso`); ADB limitation above |
 | **Oracle** | 18c · 21c · 23ai — including governed native **VECTOR** search |
 | **Code** | **9 pure-Rust crates + binary** · `#![forbid(unsafe_code)]` · **~3,300 tests** + a differential fuzzer |
 | **Transports** | stdio (default) + Streamable HTTP with rustls TLS/mTLS and optional OAuth |
@@ -417,7 +419,9 @@ rustup toolchain install nightly-2026-05-11 --component rustfmt --component clip
 cargo +nightly-2026-05-11 install oraclemcp
 ```
 
-Live database access is built in through the pure-Rust thin driver — **no Oracle Instant Client, ODPI-C, or C toolchain**. Optionally set `TNS_ADMIN` for net-service-name connections. The default build embeds the offline PL/SQL engine; `--no-default-features` omits it.
+Live database access uses the maintained primary `oraclemcp-driver-cx` driver and requires no Oracle Instant Client, ODPI-C, or C toolchain. Set `TNS_ADMIN` for net-service-name connections when needed.
+
+The release workflow builds every archive and the single **`ghcr.io/muhdur/oraclemcp`** image with the offline PL/SQL-intelligence engine included. The default source build includes it too; custom `--no-default-features` builds omit it. There is no separate engine image.
 
 ## License
 
