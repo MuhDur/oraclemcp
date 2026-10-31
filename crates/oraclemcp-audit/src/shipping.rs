@@ -66,8 +66,8 @@ use crate::sink::path_identity;
 use crate::sink::{AuditError, AuditSink, FileAuditSink, open_file_identity};
 #[cfg(unix)]
 use crate::sink::{
-    authenticate_held_audit_directory, cap_metadata_identity,
-    open_existing_audit_directory_nofollow, open_private_append_file_at,
+    authenticate_held_audit_directory, cap_metadata_identity, open_existing_audit_directory,
+    open_private_append_file_at,
 };
 use crate::verify::{ChainVerifier, JsonlReader, VerifyOutcome};
 
@@ -273,7 +273,7 @@ impl WormFileForwarder {
                 ))
             })?;
         #[cfg(unix)]
-        let parent = open_existing_audit_directory_nofollow(parent_path)
+        let (parent, resolved_parent) = open_existing_audit_directory(parent_path)
             .map_err(|error| ShippingError::Transport(error.to_string()))?;
         #[cfg(unix)]
         match parent.symlink_metadata(name) {
@@ -337,7 +337,7 @@ impl WormFileForwarder {
         #[cfg(unix)]
         {
             run_worm_parent_open_hook();
-            authenticate_held_audit_directory(&parent, parent_path)
+            authenticate_held_audit_directory(&parent, &resolved_parent)
                 .map_err(|error| ShippingError::Transport(error.to_string()))?;
         }
         #[cfg(windows)]

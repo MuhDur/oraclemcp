@@ -578,6 +578,7 @@ fn lexically_normalize_audit_directory(path: &Path) -> Result<PathBuf, AuditErro
 /// subsequent child operations bound to this exact directory even if its
 /// configured pathname is replaced.
 #[cfg(unix)]
+#[derive(Debug)]
 pub(crate) enum AuditDirectoryOpenError {
     /// A real component was absent. Anchor readers preserve the historical
     /// absent-sidecar result only for this precise outcome.
@@ -607,37 +608,209 @@ impl From<AuditDirectoryOpenError> for AuditError {
 }
 
 #[cfg(unix)]
-pub(crate) fn open_existing_audit_directory_nofollow(
-    path: &Path,
-) -> Result<CapDir, AuditDirectoryOpenError> {
-    use cap_fs_ext::DirExt as _;
+fn open_existing_audit_directory_nofollow(path: &Path) -> Result<CapDir, AuditDirectoryOpenError> {
+    walk_audit_directory(
+        path,
+        AuditDirectoryWalk::NoFollow,
+        rustix::process::geteuid().as_raw(),
+    )
+    .map(|(directory, _)| directory)
+}
 
-    let normalized =
-        lexically_normalize_audit_directory(path).map_err(AuditDirectoryOpenError::Rejected)?;
+/// Resolve admitted system links only during the initial open. Callers retain
+/// the physical path for subsequent strict no-follow identity checks.
+#[cfg(unix)]
+pub(crate) fn open_existing_audit_directory(
+    path: &Path,
+) -> Result<(CapDir, PathBuf), AuditDirectoryOpenError> {
+    walk_audit_directory(
+        path,
+        AuditDirectoryWalk::Configured,
+        rustix::process::geteuid().as_raw(),
+    )
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AuditDirectoryWalk {
+    Configured,
+    NoFollow,
+    RootLinkTarget,
+}
+
+#[cfg(unix)]
+fn trusted_audit_root_link(link_uid: u32, parent_uid: u32, parent_mode: u32) -> bool {
+    // Symlink permission bits are not enforced on Unix. The containing
+    // directory's ownership and permissions protect the link from replacement.
+    link_uid == 0 && parent_uid == 0 && parent_mode & 0o022 == 0
+}
+
+#[cfg(unix)]
+fn trusted_audit_root_target(uid: u32, mode: u32, final_component: bool) -> bool {
+    uid == 0 && (mode & 0o022 == 0 || (final_component && mode & 0o1000 != 0))
+}
+
+#[cfg(unix)]
+fn private_audit_sticky_child(uid: u32, mode: u32, expected_uid: u32) -> bool {
+    uid == expected_uid && mode & 0o777 == 0o700
+}
+
+#[cfg(unix)]
+fn walk_audit_directory(
+    path: &Path,
+    policy: AuditDirectoryWalk,
+    expected_uid: u32,
+) -> Result<(CapDir, PathBuf), AuditDirectoryOpenError> {
+    use cap_fs_ext::DirExt as _;
+    use cap_std::fs::MetadataExt as _;
+
+    // A target must be walked before interpreting `..`: lexical cancellation
+    // could otherwise hide an extra symlink in e.g. `link/../directory`.
+    let normalized = if policy == AuditDirectoryWalk::RootLinkTarget {
+        path.to_path_buf()
+    } else {
+        lexically_normalize_audit_directory(path).map_err(AuditDirectoryOpenError::Rejected)?
+    };
+    let rejected = |detail: String| {
+        AuditDirectoryOpenError::Rejected(AuditError::Io(format!(
+            "audit directory {} contains an unsafe or unreadable component: {detail}",
+            path.display()
+        )))
+    };
     let mut current = CapDir::open_ambient_dir("/", ambient_authority()).map_err(|error| {
         AuditDirectoryOpenError::Rejected(AuditError::Io(format!(
             "cannot open audit directory root while resolving {}: {error}",
             path.display()
         )))
     })?;
-    for component in normalized.components() {
+    if policy == AuditDirectoryWalk::RootLinkTarget {
+        let root = current
+            .dir_metadata()
+            .map_err(|e| rejected(e.to_string()))?;
+        if !trusted_audit_root_target(root.uid(), root.mode(), false) {
+            return Err(rejected("filesystem root is not trusted".to_owned()));
+        }
+    }
+    let mut physical = PathBuf::from("/");
+    let mut target_parents = Vec::new();
+    let mut require_private_child = false;
+    let mut components = normalized.components().peekable();
+    while let Some(component) = components.next() {
+        if component == Component::ParentDir {
+            if !physical.pop() {
+                return Err(rejected(
+                    "system symlink target escapes its filesystem root".to_owned(),
+                ));
+            }
+            current = target_parents
+                .pop()
+                .ok_or_else(|| rejected("system symlink target has no held parent".to_owned()))?;
+            continue;
+        }
         let Component::Normal(name) = component else {
             continue;
         };
-        current = match current.open_dir_nofollow(name) {
-            Ok(next) => next,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(AuditDirectoryOpenError::Missing);
+        let next = match current.open_dir_nofollow(name) {
+            Ok(next) => {
+                physical.push(name);
+                next
             }
             Err(error) => {
-                return Err(AuditDirectoryOpenError::Rejected(AuditError::Io(format!(
-                    "audit directory {} contains an unsafe or unreadable component: {error}",
-                    path.display()
-                ))));
+                let link = current.symlink_metadata(name).ok();
+                let Some(link) = link.filter(|metadata| metadata.file_type().is_symlink()) else {
+                    return if error.kind() == std::io::ErrorKind::NotFound {
+                        Err(AuditDirectoryOpenError::Missing)
+                    } else {
+                        Err(rejected(error.to_string()))
+                    };
+                };
+                if policy != AuditDirectoryWalk::Configured || require_private_child {
+                    return Err(rejected(
+                        "symlink is not an admitted system ancestor".to_owned(),
+                    ));
+                }
+                let parent = current
+                    .dir_metadata()
+                    .map_err(|e| rejected(e.to_string()))?;
+                if !trusted_audit_root_link(link.uid(), parent.uid(), parent.mode()) {
+                    return Err(rejected(
+                        "symlink or its containing directory is not root-trusted".to_owned(),
+                    ));
+                }
+                let target = current
+                    .read_link_contents(name)
+                    .map_err(|e| rejected(e.to_string()))?;
+                let target = if target.is_absolute() {
+                    target
+                } else {
+                    physical.join(target)
+                };
+                let (target_directory, target_path) =
+                    walk_audit_directory(&target, AuditDirectoryWalk::RootLinkTarget, expected_uid)
+                        .map_err(|e| rejected(format!("unsafe system symlink target: {e}")))?;
+                let visible = current
+                    .symlink_metadata(name)
+                    .map_err(|e| rejected(e.to_string()))?;
+                let parent_after = current
+                    .dir_metadata()
+                    .map_err(|e| rejected(e.to_string()))?;
+                if (link.dev(), link.ino()) != (visible.dev(), visible.ino())
+                    || !visible.file_type().is_symlink()
+                    || !trusted_audit_root_link(
+                        visible.uid(),
+                        parent_after.uid(),
+                        parent_after.mode(),
+                    )
+                {
+                    return Err(rejected(
+                        "system symlink changed while opening its target".to_owned(),
+                    ));
+                }
+                let target_metadata = target_directory
+                    .dir_metadata()
+                    .map_err(|e| rejected(e.to_string()))?;
+                if !trusted_audit_root_target(target_metadata.uid(), target_metadata.mode(), true) {
+                    return Err(rejected(
+                        "system symlink target is not root-trusted".to_owned(),
+                    ));
+                }
+                require_private_child = target_metadata.mode() & 0o022 != 0;
+                physical = target_path;
+                current = target_directory;
+                continue;
             }
         };
+        let metadata = next.dir_metadata().map_err(|e| rejected(e.to_string()))?;
+        if require_private_child
+            && !private_audit_sticky_child(metadata.uid(), metadata.mode(), expected_uid)
+        {
+            return Err(rejected(
+                "sticky system target requires an owned 0700 child directory".to_owned(),
+            ));
+        }
+        require_private_child = false;
+        if policy == AuditDirectoryWalk::RootLinkTarget
+            && !trusted_audit_root_target(
+                metadata.uid(),
+                metadata.mode(),
+                components.peek().is_none(),
+            )
+        {
+            return Err(rejected(
+                "system symlink target has an untrusted ancestor".to_owned(),
+            ));
+        }
+        if policy == AuditDirectoryWalk::RootLinkTarget {
+            target_parents.push(current);
+        }
+        current = next;
     }
-    Ok(current)
+    if require_private_child {
+        return Err(rejected(
+            "sticky system target requires a private child directory".to_owned(),
+        ));
+    }
+    Ok((current, physical))
 }
 
 /// Fail closed if a configured audit parent was replaced after it was opened.
@@ -688,7 +861,8 @@ struct HeldAuditParent {
     /// for `fsync`, so the durable operation uses this separately authenticated
     /// descriptor rather than reopening the pathname after child creation.
     sync_handle: File,
-    configured_path: PathBuf,
+    /// Physical pathname fixed by the initial system-link resolution.
+    resolved_path: PathBuf,
 }
 
 #[cfg(unix)]
@@ -699,8 +873,8 @@ impl HeldAuditParent {
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
-        let dir =
-            open_existing_audit_directory_nofollow(&configured_path).map_err(AuditError::from)?;
+        let (dir, resolved_path) =
+            open_existing_audit_directory(&configured_path).map_err(AuditError::from)?;
         run_file_audit_parent_handle_hook();
         // Derive the durable descriptor from the held capability instead of
         // reopening `configured_path`.  An ambient reopen would follow a
@@ -739,7 +913,7 @@ impl HeldAuditParent {
         Ok(Self {
             dir,
             sync_handle,
-            configured_path,
+            resolved_path,
         })
     }
 
@@ -748,7 +922,7 @@ impl HeldAuditParent {
     /// the subsequent sync always targets the descriptor that contained the
     /// just-created entries.
     pub(crate) fn authenticate_current_path(&self) -> Result<(), AuditError> {
-        authenticate_held_audit_directory(&self.dir, &self.configured_path)
+        authenticate_held_audit_directory(&self.dir, &self.resolved_path)
     }
 
     /// Sync the *held* directory descriptor, never a freshly resolved pathname.
@@ -758,7 +932,7 @@ impl HeldAuditParent {
         self.sync_handle.sync_all().map_err(|e| {
             AuditError::Io(format!(
                 "cannot fsync held audit directory {}: {e}",
-                self.configured_path.display()
+                self.resolved_path.display()
             ))
         })
     }
@@ -2771,8 +2945,8 @@ impl BoundAuditLedger {
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
                 .unwrap_or_else(|| Path::new("."));
-            let parent = match open_existing_audit_directory_nofollow(parent_path) {
-                Ok(parent) => parent,
+            let parent = match open_existing_audit_directory(parent_path) {
+                Ok((parent, _)) => parent,
                 Err(AuditDirectoryOpenError::Missing) => return Ok(None),
                 Err(AuditDirectoryOpenError::Rejected(error)) => return Err(error),
             };

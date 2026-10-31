@@ -63,7 +63,7 @@ use crate::sink::open_windows_audit_directory_nofollow;
 #[cfg(unix)]
 use crate::sink::{
     AuditDirectoryOpenError, authenticate_held_audit_directory, create_new_private_file_at,
-    open_existing_audit_directory_nofollow,
+    open_existing_audit_directory,
 };
 use crate::verify::JsonlReader;
 
@@ -191,8 +191,8 @@ impl AnchorFile {
                         self.path.display()
                     ))
                 })?;
-            let directory =
-                open_existing_audit_directory_nofollow(parent_path).map_err(AuditError::from)?;
+            let (directory, resolved_parent) =
+                open_existing_audit_directory(parent_path).map_err(AuditError::from)?;
             run_anchor_parent_open_hook();
             let tmp = anchor_tmp_path(&self.path);
             let tmp_name = tmp
@@ -215,7 +215,7 @@ impl AnchorFile {
             directory
                 .rename(tmp_name, &directory, name)
                 .map_err(io_err)?;
-            authenticate_held_audit_directory(&directory, parent_path)
+            authenticate_held_audit_directory(&directory, &resolved_parent)
         }
         #[cfg(not(unix))]
         {
@@ -341,8 +341,8 @@ fn load_standalone_anchor(path: &Path) -> Result<Option<ChainAnchor>, AnchorLoad
         .unwrap_or_else(|| Path::new("."));
     let name = anchor_file_name(path)?;
     #[cfg(unix)]
-    let directory = match open_existing_audit_directory_nofollow(parent_path) {
-        Ok(directory) => directory,
+    let (directory, resolved_parent) = match open_existing_audit_directory(parent_path) {
+        Ok(opened) => opened,
         Err(AuditDirectoryOpenError::Missing) => return Ok(None),
         Err(AuditDirectoryOpenError::Rejected(error)) => {
             return Err(AnchorLoadError {
@@ -384,7 +384,7 @@ fn load_standalone_anchor(path: &Path) -> Result<Option<ChainAnchor>, AnchorLoad
     };
     let anchor = load_anchor_from_directory(path, name, &directory)?;
     #[cfg(unix)]
-    authenticate_held_audit_directory(&directory, parent_path).map_err(|error| {
+    authenticate_held_audit_directory(&directory, &resolved_parent).map_err(|error| {
         AnchorLoadError {
             message: format!("{}: {error}", path.display()),
         }
