@@ -235,11 +235,13 @@ pub oraclemcp_error::ReasonCategory::ProtectedByRas
 pub oraclemcp_error::ReasonCategory::ProtectedByRedaction
 pub oraclemcp_error::ReasonCategory::RequiresHigherLevel
 pub oraclemcp_error::ReasonCategory::SecurityFeatureVisibilityUnknown
+pub oraclemcp_error::ReasonCategory::StagingLaneUnavailable
 pub oraclemcp_error::ReasonCategory::TransactionControl
 pub oraclemcp_error::ReasonCategory::UnbalancedBlock
 pub oraclemcp_error::ReasonCategory::UnprovenSideEffect
+pub oraclemcp_error::ReasonCategory::UseChangeRequest
 impl oraclemcp_error::ReasonCategory
-pub const oraclemcp_error::ReasonCategory::ALL: [Self; 19]
+pub const oraclemcp_error::ReasonCategory::ALL: [Self; 21]
 pub const fn oraclemcp_error::ReasonCategory::meaning(self) -> &'static str
 pub const fn oraclemcp_error::ReasonCategory::next_action(self) -> &'static str
 pub const fn oraclemcp_error::ReasonCategory::typical_cause(self) -> &'static str

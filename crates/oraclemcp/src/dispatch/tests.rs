@@ -12924,6 +12924,46 @@ fn cancelled_query_never_reaches_database() {
 }
 
 #[test]
+fn edition_preflight_cancellation_while_waiting_for_state_stays_timeout() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    runtime.block_on(async {
+        let cx = Cx::current().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher = OracleDispatcher::new(Box::new(ZeroCallOracleConnection {
+            calls: calls.clone(),
+        }));
+        let held = dispatcher.state.lock(&cx).await.unwrap();
+        let recorded = std::cell::Cell::new(false);
+        let mut pending = Box::pin(dispatcher.dispatch_with_cx_inner_core(
+            &cx,
+            DispatchContext::default(),
+            "oracle_query",
+            json!({"sql":"SELECT 1 FROM dual"}),
+            &recorded,
+        ));
+        std::future::poll_fn(|task| {
+            assert!(
+                pending.as_mut().poll(task).is_pending(),
+                "request must wait for the held lane state"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        cx.set_cancel_requested(true);
+        let error = pending
+            .await
+            .expect_err("queued cancellation must remain typed");
+        assert_eq!(error.error_class, ErrorClass::Timeout);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "cancelled preflight reached Oracle"
+        );
+        drop(held);
+    });
+}
+
+#[test]
 fn cancellation_after_mutating_execute_rolls_back_dirty_session() {
     let state = Arc::new(ExecState::default());
     let dispatcher = OracleDispatcher::new_with_profile_level(

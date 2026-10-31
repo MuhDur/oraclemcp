@@ -13170,13 +13170,38 @@ impl OracleDispatcher {
         validate_declared_args(name, &args)?;
         validate_json_array_arguments(name, &args)?;
         validate_enum_arguments(name, &args)?;
+        // Read the local budget before waiting for policy state; cancellation
+        // must retain its typed refusal without touching OracleConnection.
+        let mut request_budget = self.dispatch_request_budget(cx, context)?;
+        if let Some(timeout) = explicit_timeout_duration(&args)? {
+            request_budget = request_budget.tighten_timeout(timeout);
+            request_budget.enforce(cx).map_err(DbError::into_envelope)?;
+        }
         // An opted-in profile routes all code changes through the server-owned
         // change-request staging capability. This preflight precedes even
-        // timeout getters, schema discovery, reconnect and audit DB evidence.
+        // driver timeout getters, schema discovery, reconnect and audit DB evidence.
         {
-            let state = self.state.lock(cx).await.map_err(|_| {
-                ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
+            let state = self.state.lock(cx).await.map_err(|error| {
+                use asupersync::sync::LockError;
+                match error {
+                    LockError::Cancelled | LockError::TimedOut(_) => ErrorEnvelope::new(
+                        ErrorClass::Timeout,
+                        "tool call cancelled or timed out while waiting for edition policy",
+                    ),
+                    LockError::Poisoned | LockError::PolledAfterCompletion => {
+                        ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
+                    }
+                }
             })?;
+            // Observe time spent waiting without charging another shared
+            // checkpoint to the operation's cooperative quota.
+            if cx.is_cancel_requested() || request_budget.is_exhausted_at(cx.now()) {
+                return Err(DbError::Cancelled(
+                    "request cancelled or budget exhausted while waiting for edition policy"
+                        .to_owned(),
+                )
+                .into_envelope());
+            }
             let opted_in = state.profile_generation.as_ref().is_some_and(|lease| {
                 lease
                     .config()
@@ -13224,11 +13249,6 @@ impl OracleDispatcher {
                         .with_next_step("use oracle_change_request to stage and verify in a dedicated child-edition lane"));
                 }
             }
-        }
-        let mut request_budget = self.dispatch_request_budget(cx, context)?;
-        if let Some(timeout) = explicit_timeout_duration(&args)? {
-            request_budget = request_budget.tighten_timeout(timeout);
-            request_budget.enforce(cx).map_err(DbError::into_envelope)?;
         }
         let tool = canonical_tool_name(name);
         if tool == "oracle_switch_profile" {

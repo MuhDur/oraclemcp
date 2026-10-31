@@ -1410,6 +1410,7 @@ pub oraclemcp_db::CatalogQueryId::SessionContext
 pub oraclemcp_db::CatalogQueryId::SessionPrivileges
 pub oraclemcp_db::CatalogQueryId::SessionRoles
 pub oraclemcp_db::CatalogQueryId::SourceTypes
+pub oraclemcp_db::CatalogQueryId::StagingCurrentEdition
 pub oraclemcp_db::CatalogQueryId::StandaloneArguments
 pub oraclemcp_db::CatalogQueryId::StandaloneProcedures
 pub oraclemcp_db::CatalogQueryId::StatspackProbe
@@ -1445,7 +1446,7 @@ pub oraclemcp_db::CatalogQueryId::VirtualColumnsForRelations32
 pub oraclemcp_db::CatalogQueryId::VpdRlsPoliciesByObject
 pub oraclemcp_db::CatalogQueryId::VpdRlsPoliciesBySchema
 impl oraclemcp_db::CatalogQueryId
-pub const oraclemcp_db::CatalogQueryId::ALL: [Self; 180]
+pub const oraclemcp_db::CatalogQueryId::ALL: [Self; 181]
 pub const fn oraclemcp_db::CatalogQueryId::spec(self) -> oraclemcp_db::CatalogReadSpec
 impl core::clone::Clone for oraclemcp_db::CatalogQueryId
 pub fn oraclemcp_db::CatalogQueryId::clone(&self) -> oraclemcp_db::CatalogQueryId

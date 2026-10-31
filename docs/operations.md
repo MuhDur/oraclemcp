@@ -103,9 +103,11 @@ the classifier or policy.
 | reason category | `PROTECTED_BY_REDACTION` | Data Redaction policy protects the relation | protected-relation access lacks an approved policy path | use a profile authorized for the protected relation or ask the policy owner for a safe access path | `—` |
 | reason category | `REQUIRES_HIGHER_LEVEL` | statement needs a higher operating level | write, DDL, or DCL exceeds current session cap | request the required operating level with oracle_set_session_level | `—` |
 | reason category | `SECURITY_FEATURE_VISIBILITY_UNKNOWN` | required security catalog evidence is unavailable | least-privilege catalog read could not prove policy status | ask the administrator to grant the minimum security-catalog visibility needed for proof | `—` |
+| reason category | `STAGING_LANE_UNAVAILABLE` | a separate child-edition lane is unavailable | capacity, authentication or the current-edition assertion failed | resolve staging connection or capacity availability, then retry oracle_change_request | `—` |
 | reason category | `TRANSACTION_CONTROL` | caller attempted server-owned transaction control | COMMIT, ROLLBACK, SAVEPOINT, or SET TRANSACTION | let the server own transaction control; remove COMMIT, ROLLBACK, SAVEPOINT, and SET TRANSACTION | `—` |
 | reason category | `UNBALANCED_BLOCK` | block delimiters or literals do not lex cleanly | unterminated literal or BEGIN/END desynchronization | correct the block delimiters and literals, then submit one static statement | `—` |
 | reason category | `UNPROVEN_SIDE_EFFECT` | read-only closure could not be proven | function, view, or base object proof is incomplete | use only relations and functions whose read-only closure can be proven | `—` |
+| reason category | `USE_CHANGE_REQUEST` | editionable code must use a change request | ordinary tools attempted edition selection or editionable DDL on an opted-in profile | use oracle_change_request to stage and verify code in a dedicated child-edition lane | `—` |
 <!-- /generated:refusals -->
 
 ---
