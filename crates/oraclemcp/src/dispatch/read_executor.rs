@@ -615,6 +615,8 @@ pub(super) struct ReadProofPolicy<'a> {
     pub(super) fga_evidence: FgaEvidencePolicy,
     pub(super) require_security_feature_evidence: bool,
     pub(super) trusted_views: &'a [String],
+    /// Proves trusted VPD policy functions; None keeps every policy Unknown.
+    pub(super) policy_functions: Option<&'a dyn oraclemcp_db::PolicyFunctionProver>,
 }
 
 /// Bind a special read path's view admission before it can submit caller SQL.
@@ -719,6 +721,7 @@ async fn resolve_query_block_read_with_routines(
         &plan,
         policy.fga_evidence,
         policy.trusted_views,
+        policy.policy_functions,
     )
     .await
     .map_err(|error| match error {
@@ -971,6 +974,7 @@ impl AdmittedWitnessRead {
                 fga_evidence: FgaEvidencePolicy::RequireProof,
                 require_security_feature_evidence: true,
                 trusted_views: &[],
+                policy_functions: None,
             },
         )
         .await?;
@@ -1404,6 +1408,9 @@ impl<'a> GuardedReadExecutor<'a> {
                     ));
                 }
             }
+            let policy_functions = state
+                .profile_classifier
+                .policy_function_prover(&state.catalog_cache);
             let classified = resolve_query_block_read_with_routines(
                 cx,
                 state.conn.as_ref(),
@@ -1414,6 +1421,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     state.fga_evidence_policy,
                     state.require_security_feature_evidence,
                     state.trusted_views.as_ref(),
+                    policy_functions.as_deref(),
                 ),
                 Some(Arc::clone(&engine_proof.oracle)),
             )
@@ -1758,6 +1766,9 @@ impl<'a> GuardedReadExecutor<'a> {
                     .unwrap_or_else(|| parsed.sql.clone());
                 let executed_sql =
                     with_audit_marker(&policy_sql, state.active_profile.as_deref(), "oracle_query");
+                let policy_functions = state
+                    .profile_classifier
+                    .policy_function_prover(&state.catalog_cache);
                 let classified = resolve_query_block_read_with_routines(
                     cx,
                     state.conn.as_ref(),
@@ -1768,6 +1779,7 @@ impl<'a> GuardedReadExecutor<'a> {
                         fga_evidence: state.fga_evidence_policy,
                         require_security_feature_evidence: state.require_security_feature_evidence,
                         trusted_views: state.trusted_views.as_ref(),
+                        policy_functions: policy_functions.as_deref(),
                     },
                     Some(Arc::clone(&engine_proof.oracle)),
                 )

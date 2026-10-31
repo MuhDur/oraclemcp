@@ -1103,7 +1103,7 @@ impl CatalogQueryId {
             Self::PolicyRowsForRelations32 => (
                 POLICY_ROWS_FOR_RELATIONS_32_SQL,
                 T32,
-                "prove no enabled SELECT policy across bounded relations",
+                "read enabled SELECT policies and their functions across bounded relations",
                 InternalProof,
                 ReadPurity,
             ),
@@ -3054,9 +3054,9 @@ pub(crate) const VIRTUAL_COLUMN_SQL: &str = "SELECT column_name FROM SYS.all_tab
     AND virtual_column = 'YES' AND ROWNUM <= 1";
 pub(crate) const TARGET_COLUMN_CATALOG_PROOF_SQL: &str = "SELECT column_name FROM SYS.all_tab_cols \
     WHERE owner = :1 AND table_name = :2 AND ROWNUM <= 1";
-pub(crate) const POLICY_ROWS_FOR_RELATIONS_32_SQL: &str = "SELECT object_owner, object_name FROM SYS.ALL_POLICIES \
+pub(crate) const POLICY_ROWS_FOR_RELATIONS_32_SQL: &str = "SELECT object_owner, object_name, policy_name, pf_owner, package, function FROM SYS.ALL_POLICIES \
     WHERE enable = 'YES' AND sel = 'YES' \
-    AND (object_owner, object_name) IN ((:1, :2), (:3, :4), (:5, :6), (:7, :8), (:9, :10), (:11, :12), (:13, :14), (:15, :16), (:17, :18), (:19, :20), (:21, :22), (:23, :24), (:25, :26), (:27, :28), (:29, :30), (:31, :32), (:33, :34), (:35, :36), (:37, :38), (:39, :40), (:41, :42), (:43, :44), (:45, :46), (:47, :48), (:49, :50), (:51, :52), (:53, :54), (:55, :56), (:57, :58), (:59, :60), (:61, :62), (:63, :64)) AND ROWNUM <= 1";
+    AND (object_owner, object_name) IN ((:1, :2), (:3, :4), (:5, :6), (:7, :8), (:9, :10), (:11, :12), (:13, :14), (:15, :16), (:17, :18), (:19, :20), (:21, :22), (:23, :24), (:25, :26), (:27, :28), (:29, :30), (:31, :32), (:33, :34), (:35, :36), (:37, :38), (:39, :40), (:41, :42), (:43, :44), (:45, :46), (:47, :48), (:49, :50), (:51, :52), (:53, :54), (:55, :56), (:57, :58), (:59, :60), (:61, :62), (:63, :64)) AND ROWNUM <= 257";
 pub(crate) const FGA_POLICIES_FOR_RELATIONS_32_SQL: &str = "SELECT object_schema, object_name, policy_name, policy_text, pf_schema, pf_package, pf_function, enabled, sel, ins, upd, del \
     FROM (SELECT object_schema, object_name, policy_name, policy_text, pf_schema, pf_package, pf_function, enabled, sel, ins, upd, del \
           FROM SYS.all_audit_policies \

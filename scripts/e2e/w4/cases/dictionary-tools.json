@@ -2312,5 +2312,349 @@
   "audit_expect": [],
   "audit_zero_executions": true,
   "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
+ },
+ {
+  "case_id": "w4_query_34rdk_trusted_pure_policy_function_admitted",
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": [
+   "stdio",
+   "http"
+  ],
+  "requires": [],
+  "setup": [
+   {
+    "sql": "CREATE TABLE ${owner}.T34_PURE_${run_id} (ID NUMBER)"
+   },
+   {
+    "sql": "INSERT INTO ${owner}.T34_PURE_${run_id} (ID) VALUES (1)"
+   },
+   {
+    "sql": "CREATE TABLE ${owner}.T34_PURE_LOG_${run_id} (ID NUMBER)"
+   },
+   {
+    "sql": "CREATE OR REPLACE FUNCTION ${owner}.F34_PURE_${run_id}(P_SCHEMA VARCHAR2, P_OBJECT VARCHAR2) RETURN VARCHAR2 IS\nBEGIN\n  RETURN '1=1';\nEND;"
+   },
+   {
+    "sql": "BEGIN DBMS_RLS.ADD_POLICY(object_schema => '${owner}', object_name => 'T34_PURE_${run_id}', policy_name => 'P34_PURE_${run_id}', function_schema => '${owner}', policy_function => 'F34_PURE_${run_id}', statement_types => 'SELECT'); END;"
+   }
+  ],
+  "setup_phase": "before_server",
+  "setup_ready_sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'F34_PURE_${run_id}' AND STATUS = 'VALID'",
+  "profile_variant": "trusted_views",
+  "call": {
+   "arguments": {
+    "sql": "SELECT ID FROM ${owner}.T34_PURE_${run_id} /* W4MARK_34RDKPURE0000 */",
+    "max_rows": 1
+   }
+  },
+  "expect": {
+   "rows": [
+    {
+     "ID": "1"
+    }
+   ]
+  },
+  "db_reread": [],
+  "audit_expect": [
+   {
+    "tool": "oracle_query",
+    "decision": "ALLOWED",
+    "outcome": "PENDING"
+   },
+   {
+    "tool": "oracle_query",
+    "decision": "ALLOWED",
+    "outcome": "SUCCEEDED"
+   }
+  ],
+  "on_unsupported": {
+   "error_class": "FORBIDDEN_STATEMENT"
+  }
+ },
+ {
+  "case_id": "w4_query_34rdk_trusted_writing_policy_function_refused",
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": [
+   "stdio",
+   "http"
+  ],
+  "requires": [
+   "priv:SELECT_V_SQL"
+  ],
+  "setup": [
+   {
+    "sql": "CREATE TABLE ${owner}.T34_WRITE_${run_id} (ID NUMBER)"
+   },
+   {
+    "sql": "INSERT INTO ${owner}.T34_WRITE_${run_id} (ID) VALUES (1)"
+   },
+   {
+    "sql": "CREATE TABLE ${owner}.T34_WRITE_LOG_${run_id} (ID NUMBER)"
+   },
+   {
+    "sql": "CREATE OR REPLACE FUNCTION ${owner}.F34_WRITE_${run_id}(P_SCHEMA VARCHAR2, P_OBJECT VARCHAR2) RETURN VARCHAR2 IS\nBEGIN\n  INSERT INTO ${owner}.T34_WRITE_LOG_${run_id} (ID) VALUES (1);\n  RETURN '1=1';\nEND;"
+   },
+   {
+    "sql": "BEGIN DBMS_RLS.ADD_POLICY(object_schema => '${owner}', object_name => 'T34_WRITE_${run_id}', policy_name => 'P34_WRITE_${run_id}', function_schema => '${owner}', policy_function => 'F34_WRITE_${run_id}', statement_types => 'SELECT'); END;"
+   }
+  ],
+  "setup_phase": "before_server",
+  "setup_ready_sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'F34_WRITE_${run_id}' AND STATUS = 'VALID'",
+  "profile_variant": "trusted_views",
+  "call": {
+   "arguments": {
+    "sql": "SELECT ID FROM ${owner}.T34_WRITE_${run_id} /* W4MARK_34RDKWRIT0000 */",
+    "max_rows": 1
+   },
+   "vsql_absent_marker": "W4MARK_34RDKWRIT0000"
+  },
+  "expect": {
+   "error_class": "FORBIDDEN_STATEMENT"
+  },
+  "db_reread": [
+   {
+    "sql": "SELECT COUNT(*) FROM ${owner}.T34_WRITE_LOG_${run_id}",
+    "rows": [
+     [
+      0
+     ]
+    ]
+   }
+  ],
+  "audit_expect": [],
+  "audit_zero_executions": true,
+  "on_unsupported": {
+   "error_class": "FORBIDDEN_STATEMENT"
+  }
+ },
+ {
+  "case_id": "w4_query_34rdk_trusted_autonomous_policy_function_refused",
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": [
+   "stdio",
+   "http"
+  ],
+  "requires": [
+   "priv:SELECT_V_SQL"
+  ],
+  "setup": [
+   {
+    "sql": "CREATE TABLE ${owner}.T34_AUTO_${run_id} (ID NUMBER)"
+   },
+   {
+    "sql": "INSERT INTO ${owner}.T34_AUTO_${run_id} (ID) VALUES (1)"
+   },
+   {
+    "sql": "CREATE TABLE ${owner}.T34_AUTO_LOG_${run_id} (ID NUMBER)"
+   },
+   {
+    "sql": "CREATE OR REPLACE FUNCTION ${owner}.F34_AUTO_${run_id}(P_SCHEMA VARCHAR2, P_OBJECT VARCHAR2) RETURN VARCHAR2 IS\nPRAGMA AUTONOMOUS_TRANSACTION;\nBEGIN\n  INSERT INTO ${owner}.T34_AUTO_LOG_${run_id} (ID) VALUES (1);\n  COMMIT;\n  RETURN '1=1';\nEND;"
+   },
+   {
+    "sql": "BEGIN DBMS_RLS.ADD_POLICY(object_schema => '${owner}', object_name => 'T34_AUTO_${run_id}', policy_name => 'P34_AUTO_${run_id}', function_schema => '${owner}', policy_function => 'F34_AUTO_${run_id}', statement_types => 'SELECT'); END;"
+   }
+  ],
+  "setup_phase": "before_server",
+  "setup_ready_sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'F34_AUTO_${run_id}' AND STATUS = 'VALID'",
+  "profile_variant": "trusted_views",
+  "call": {
+   "arguments": {
+    "sql": "SELECT ID FROM ${owner}.T34_AUTO_${run_id} /* W4MARK_34RDKAUTO0000 */",
+    "max_rows": 1
+   },
+   "vsql_absent_marker": "W4MARK_34RDKAUTO0000"
+  },
+  "expect": {
+   "error_class": "FORBIDDEN_STATEMENT"
+  },
+  "db_reread": [
+   {
+    "sql": "SELECT COUNT(*) FROM ${owner}.T34_AUTO_LOG_${run_id}",
+    "rows": [
+     [
+      0
+     ]
+    ]
+   }
+  ],
+  "audit_expect": [],
+  "audit_zero_executions": true,
+  "on_unsupported": {
+   "error_class": "FORBIDDEN_STATEMENT"
+  }
+ },
+ {
+  "case_id": "w4_query_34rdk_trusted_pure_function_returning_a_call_refused",
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": [
+   "stdio",
+   "http"
+  ],
+  "requires": [
+   "priv:SELECT_V_SQL"
+  ],
+  "setup": [
+   {
+    "sql": "CREATE TABLE ${owner}.T34_CALL_${run_id} (ID NUMBER)"
+   },
+   {
+    "sql": "INSERT INTO ${owner}.T34_CALL_${run_id} (ID) VALUES (1)"
+   },
+   {
+    "sql": "CREATE TABLE ${owner}.T34_CALL_LOG_${run_id} (ID NUMBER)"
+   },
+   {
+    "sql": "CREATE OR REPLACE FUNCTION ${owner}.F34_CALL_${run_id}(P_SCHEMA VARCHAR2, P_OBJECT VARCHAR2) RETURN VARCHAR2 IS\nBEGIN\n  RETURN 'ID > 0 AND ${owner}.PKG_W4_${run_id}.PURE_FN(ID) > 0';\nEND;"
+   },
+   {
+    "sql": "BEGIN DBMS_RLS.ADD_POLICY(object_schema => '${owner}', object_name => 'T34_CALL_${run_id}', policy_name => 'P34_CALL_${run_id}', function_schema => '${owner}', policy_function => 'F34_CALL_${run_id}', statement_types => 'SELECT'); END;"
+   }
+  ],
+  "setup_phase": "before_server",
+  "setup_ready_sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'F34_CALL_${run_id}' AND STATUS = 'VALID'",
+  "profile_variant": "trusted_views",
+  "call": {
+   "arguments": {
+    "sql": "SELECT ID FROM ${owner}.T34_CALL_${run_id} /* W4MARK_34RDKCALL0000 */",
+    "max_rows": 1
+   },
+   "vsql_absent_marker": "W4MARK_34RDKCALL0000"
+  },
+  "expect": {
+   "error_class": "FORBIDDEN_STATEMENT"
+  },
+  "db_reread": [
+   {
+    "sql": "SELECT COUNT(*) FROM ${owner}.T34_CALL_LOG_${run_id}",
+    "rows": [
+     [
+      0
+     ]
+    ]
+   }
+  ],
+  "audit_expect": [],
+  "audit_zero_executions": true,
+  "on_unsupported": {
+   "error_class": "FORBIDDEN_STATEMENT"
+  }
+ },
+ {
+  "case_id": "w4_query_34rdk_untrusted_pure_policy_function_refused",
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": [
+   "stdio",
+   "http"
+  ],
+  "requires": [
+   "priv:SELECT_V_SQL"
+  ],
+  "setup": [
+   {
+    "sql": "CREATE TABLE ${owner}.T34_FREE_${run_id} (ID NUMBER)"
+   },
+   {
+    "sql": "INSERT INTO ${owner}.T34_FREE_${run_id} (ID) VALUES (1)"
+   },
+   {
+    "sql": "CREATE TABLE ${owner}.T34_FREE_LOG_${run_id} (ID NUMBER)"
+   },
+   {
+    "sql": "CREATE OR REPLACE FUNCTION ${owner}.F34_FREE_${run_id}(P_SCHEMA VARCHAR2, P_OBJECT VARCHAR2) RETURN VARCHAR2 IS\nBEGIN\n  RETURN '1=1';\nEND;"
+   },
+   {
+    "sql": "BEGIN DBMS_RLS.ADD_POLICY(object_schema => '${owner}', object_name => 'T34_FREE_${run_id}', policy_name => 'P34_FREE_${run_id}', function_schema => '${owner}', policy_function => 'F34_FREE_${run_id}', statement_types => 'SELECT'); END;"
+   }
+  ],
+  "setup_phase": "before_server",
+  "setup_ready_sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'F34_FREE_${run_id}' AND STATUS = 'VALID'",
+  "profile_variant": "trusted_views",
+  "call": {
+   "arguments": {
+    "sql": "SELECT ID FROM ${owner}.T34_FREE_${run_id} /* W4MARK_34RDKFREE0000 */",
+    "max_rows": 1
+   },
+   "vsql_absent_marker": "W4MARK_34RDKFREE0000"
+  },
+  "expect": {
+   "error_class": "FORBIDDEN_STATEMENT"
+  },
+  "db_reread": [
+   {
+    "sql": "SELECT COUNT(*) FROM ${owner}.T34_FREE_LOG_${run_id}",
+    "rows": [
+     [
+      0
+     ]
+    ]
+   }
+  ],
+  "audit_expect": [],
+  "audit_zero_executions": true,
+  "on_unsupported": {
+   "error_class": "FORBIDDEN_STATEMENT"
+  }
+ },
+ {
+  "case_id": "w4_query_34rdk_trusted_row_locking_policy_function_refused",
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": [
+   "stdio",
+   "http"
+  ],
+  "requires": [
+   "priv:SELECT_V_SQL"
+  ],
+  "setup": [
+   {
+    "sql": "CREATE TABLE ${owner}.T34_LOCK_${run_id} (ID NUMBER)"
+   },
+   {
+    "sql": "INSERT INTO ${owner}.T34_LOCK_${run_id} (ID) VALUES (1)"
+   },
+   {
+    "sql": "CREATE TABLE ${owner}.T34_LOCK_LOG_${run_id} (ID NUMBER)"
+   },
+   {
+    "sql": "CREATE OR REPLACE FUNCTION ${owner}.F34_LOCK_${run_id}(P_SCHEMA VARCHAR2, P_OBJECT VARCHAR2) RETURN VARCHAR2 IS\nn NUMBER;\nBEGIN\n  SELECT ID INTO n FROM ${owner}.T34_LOCK_LOG_${run_id} WHERE ROWNUM = 1 FOR UPDATE;\n  RETURN '1=1';\nEND;"
+   },
+   {
+    "sql": "BEGIN DBMS_RLS.ADD_POLICY(object_schema => '${owner}', object_name => 'T34_LOCK_${run_id}', policy_name => 'P34_LOCK_${run_id}', function_schema => '${owner}', policy_function => 'F34_LOCK_${run_id}', statement_types => 'SELECT'); END;"
+   }
+  ],
+  "setup_phase": "before_server",
+  "setup_ready_sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'F34_LOCK_${run_id}' AND STATUS = 'VALID'",
+  "profile_variant": "trusted_views",
+  "call": {
+   "arguments": {
+    "sql": "SELECT ID FROM ${owner}.T34_LOCK_${run_id} /* W4MARK_34RDKLOCK0000 */",
+    "max_rows": 1
+   },
+   "vsql_absent_marker": "W4MARK_34RDKLOCK0000"
+  },
+  "expect": {
+   "error_class": "FORBIDDEN_STATEMENT"
+  },
+  "db_reread": [
+   {
+    "sql": "SELECT COUNT(*) FROM ${owner}.T34_LOCK_LOG_${run_id}",
+    "rows": [
+     [
+      0
+     ]
+    ]
+   }
+  ],
+  "audit_expect": [],
+  "audit_zero_executions": true,
+  "on_unsupported": {
+   "error_class": "FORBIDDEN_STATEMENT"
+  }
  }
 ]

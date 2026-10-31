@@ -11019,6 +11019,64 @@ pub type oraclemcp_db::PlscopeStatement::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PlscopeStatement where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::PlscopeStatement where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::PlscopeStatement::vzip(self) -> V
+pub struct oraclemcp_db::PolicyFunctionRef
+pub oraclemcp_db::PolicyFunctionRef::function: alloc::string::String
+pub oraclemcp_db::PolicyFunctionRef::owner: alloc::string::String
+pub oraclemcp_db::PolicyFunctionRef::package: core::option::Option<alloc::string::String>
+impl core::clone::Clone for oraclemcp_db::PolicyFunctionRef
+pub fn oraclemcp_db::PolicyFunctionRef::clone(&self) -> oraclemcp_db::PolicyFunctionRef
+impl core::cmp::Eq for oraclemcp_db::PolicyFunctionRef
+impl core::cmp::PartialEq for oraclemcp_db::PolicyFunctionRef
+pub fn oraclemcp_db::PolicyFunctionRef::eq(&self, &oraclemcp_db::PolicyFunctionRef) -> bool
+impl core::fmt::Debug for oraclemcp_db::PolicyFunctionRef
+pub fn oraclemcp_db::PolicyFunctionRef::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_db::PolicyFunctionRef
+pub fn oraclemcp_db::PolicyFunctionRef::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for oraclemcp_db::PolicyFunctionRef
+impl core::marker::Freeze for oraclemcp_db::PolicyFunctionRef
+impl core::marker::Send for oraclemcp_db::PolicyFunctionRef
+impl core::marker::Sync for oraclemcp_db::PolicyFunctionRef
+impl core::marker::Unpin for oraclemcp_db::PolicyFunctionRef
+impl core::marker::UnsafeUnpin for oraclemcp_db::PolicyFunctionRef
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::PolicyFunctionRef
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::PolicyFunctionRef
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::PolicyFunctionRef where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::PolicyFunctionRef where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::PolicyFunctionRef where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::PolicyFunctionRef::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::PolicyFunctionRef where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::PolicyFunctionRef where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::PolicyFunctionRef where U: core::convert::From<T>
+pub fn oraclemcp_db::PolicyFunctionRef::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::PolicyFunctionRef where U: core::convert::Into<T>
+pub type oraclemcp_db::PolicyFunctionRef::Error = core::convert::Infallible
+pub fn oraclemcp_db::PolicyFunctionRef::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::PolicyFunctionRef where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::PolicyFunctionRef::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::PolicyFunctionRef::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::PolicyFunctionRef where T: core::clone::Clone
+pub type oraclemcp_db::PolicyFunctionRef::Owned = T
+pub fn oraclemcp_db::PolicyFunctionRef::clone_into(&self, &mut T)
+pub fn oraclemcp_db::PolicyFunctionRef::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::PolicyFunctionRef
+impl<T> core::any::Any for oraclemcp_db::PolicyFunctionRef where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::PolicyFunctionRef::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::PolicyFunctionRef where T: ?core::marker::Sized
+pub fn oraclemcp_db::PolicyFunctionRef::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::PolicyFunctionRef where T: ?core::marker::Sized
+pub fn oraclemcp_db::PolicyFunctionRef::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::PolicyFunctionRef where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::PolicyFunctionRef::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::PolicyFunctionRef
+pub fn oraclemcp_db::PolicyFunctionRef::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::PolicyFunctionRef
+impl<T> tracing::instrument::Instrument for oraclemcp_db::PolicyFunctionRef
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::PolicyFunctionRef
+impl<T> typenum::type_operators::Same for oraclemcp_db::PolicyFunctionRef
+pub type oraclemcp_db::PolicyFunctionRef::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PolicyFunctionRef where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::PolicyFunctionRef where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::PolicyFunctionRef::vzip(self) -> V
 pub struct oraclemcp_db::PoolMetrics
 pub oraclemcp_db::PoolMetrics::acquired: u64
 pub oraclemcp_db::PoolMetrics::discarded: u64
@@ -14595,6 +14653,8 @@ pub fn oraclemcp_db::RustOracleConnection::set_policy_observation_pool(&self, co
 pub fn oraclemcp_db::RustOracleConnection::set_request_deadline(&self, &asupersync::cx::cx::Cx, core::option::Option<asupersync::types::id::Time>) -> core::result::Result<(), oraclemcp_db::DbError>
 pub fn oraclemcp_db::RustOracleConnection::set_request_quota(&self, &asupersync::cx::cx::Cx, core::option::Option<oraclemcp_db::DbRequestQuota>) -> core::result::Result<(), oraclemcp_db::DbError>
 pub fn oraclemcp_db::RustOracleConnection::unregister_cqn_query<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, oraclemcp_db::CqnQueryRegistration) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub trait oraclemcp_db::PolicyFunctionProver
+pub fn oraclemcp_db::PolicyFunctionProver::proves_policy_function<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 dyn oraclemcp_db::OracleConnection, &'life3 oraclemcp_db::PolicyFunctionRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<bool, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
 pub trait oraclemcp_db::RefreshableIamTokenSource: core::marker::Send + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe
 pub fn oraclemcp_db::RefreshableIamTokenSource::get_token(&self) -> oraclemcp_db::IamTokenFuture<'_>
 pub async fn oraclemcp_db::apply_native_redaction_policy(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, bool, bool, &oraclemcp_db::NativeRedactionPolicy) -> core::result::Result<(), oraclemcp_db::NativeRedactionApplyError>
@@ -14682,6 +14742,7 @@ pub async fn oraclemcp_db::plan_cost_timeline(&asupersync::cx::cx::Cx, &dyn orac
 pub async fn oraclemcp_db::plan_cost_timeline_with_license(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, u32, bool) -> core::result::Result<oraclemcp_db::PlanCostTimeline, oraclemcp_error::ErrorEnvelope>
 pub async fn oraclemcp_db::plscope_identifiers(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::PlscopeIdentifier>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::plscope_statements(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::PlscopeStatement>, oraclemcp_db::DbError>
+pub fn oraclemcp_db::policy_predicate_proven_builtin(core::option::Option<&str>) -> bool
 pub async fn oraclemcp_db::preflight(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<oraclemcp_db::PreflightReport, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::primary_key_columns(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::probe_dependents_transitive(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &[oraclemcp_db::DependentObject], oraclemcp_db::DepCaps) -> core::result::Result<oraclemcp_db::DependentsClosure, oraclemcp_db::DependentsError>
@@ -14691,7 +14752,7 @@ pub async fn oraclemcp_db::probe_native_redaction(&asupersync::cx::cx::Cx, &dyn 
 pub async fn oraclemcp_db::probe_privileges(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> oraclemcp_db::PrivilegeProfile
 pub async fn oraclemcp_db::probe_write_posture(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, bool) -> oraclemcp_db::WritePosture
 pub async fn oraclemcp_db::prove_hard_parse_effect_closure(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &[oraclemcp_guard::resolver::ResolvedObject]) -> oraclemcp_db::HardParseEffectClosureV1
-pub async fn oraclemcp_db::prove_semantic_read_plan(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &oraclemcp_db::OracleCatalogResolverCache, &oraclemcp_guard::resolver::SemanticReadPlan, oraclemcp_db::FgaEvidencePolicy, &[alloc::string::String]) -> core::result::Result<oraclemcp_db::ReadPlanProof, oraclemcp_db::ReadPlanProofError>
+pub async fn oraclemcp_db::prove_semantic_read_plan(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &oraclemcp_db::OracleCatalogResolverCache, &oraclemcp_guard::resolver::SemanticReadPlan, oraclemcp_db::FgaEvidencePolicy, &[alloc::string::String], core::option::Option<&dyn oraclemcp_db::PolicyFunctionProver>) -> core::result::Result<oraclemcp_db::ReadPlanProof, oraclemcp_db::ReadPlanProofError>
 pub async fn oraclemcp_db::read_catalog_resolve_context(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, oraclemcp_guard::resolver::CatalogGeneration, oraclemcp_guard::resolver::StatementScope) -> core::result::Result<oraclemcp_guard::resolver::ResolveCtx, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::read_closure_database_identity(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<oraclemcp_db::catalog_facts::ClosureDatabaseIdentity, oraclemcp_db::catalog_facts::Revalidation>
 pub fn oraclemcp_db::read_lob_sql(&str, &str, &str, &str) -> core::result::Result<alloc::string::String, oraclemcp_db::DbError>

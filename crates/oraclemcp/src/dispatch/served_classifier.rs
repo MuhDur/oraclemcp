@@ -15,6 +15,9 @@ pub(super) struct ProfileClassifier {
     drain: Option<ProfileDrainState>,
     #[cfg(feature = "plsql-intelligence")]
     restriction: Option<OperatorPureFunctionAllowlist>,
+    /// `profiles.trusted_policy_functions`: VPD functions eligible for proof.
+    #[cfg(feature = "plsql-intelligence")]
+    trusted_policy_functions: Arc<[String]>,
     read_policy: RoutineReadPolicy,
     finding: SyncMutex<Option<&'static str>>,
 }
@@ -27,6 +30,8 @@ impl Default for ProfileClassifier {
             drain: None,
             #[cfg(feature = "plsql-intelligence")]
             restriction: None,
+            #[cfg(feature = "plsql-intelligence")]
+            trusted_policy_functions: Arc::from([]),
             read_policy: RoutineReadPolicy::default(),
             finding: SyncMutex::new(None),
         }
@@ -56,10 +61,40 @@ impl ProfileClassifier {
         lease: Option<&ProfileGenerationLease>,
     ) -> Self {
         Self {
+            #[cfg(feature = "plsql-intelligence")]
+            trusted_policy_functions: lease
+                .and_then(|lease| lease.config()?.profile(lease.profile()))
+                .and_then(|profile| profile.trusted_policy_functions.clone())
+                .unwrap_or_default()
+                .into(),
             profile,
             generation: lease.map_or(0, ProfileGenerationLease::generation),
             drain: lease.map(|lease| lease.state.clone()),
             ..Self::default()
+        }
+    }
+
+    /// The VPD policy-function prover for one read on this profile
+    /// generation. None when the profile trusts no policy function: the list
+    /// only makes a function eligible for the served engine proof.
+    pub(super) fn policy_function_prover<'a>(
+        &'a self,
+        cache: &'a OracleCatalogResolverCache,
+    ) -> Option<Box<dyn oraclemcp_db::PolicyFunctionProver + 'a>> {
+        #[cfg(feature = "plsql-intelligence")]
+        {
+            if self.trusted_policy_functions.is_empty() {
+                return None;
+            }
+            let _ = cache;
+            Some(Box::new(engine::PolicyFunctionProof {
+                trusted: &self.trusted_policy_functions,
+            }))
+        }
+        #[cfg(not(feature = "plsql-intelligence"))]
+        {
+            let _ = cache;
+            None
         }
     }
 
@@ -850,7 +885,7 @@ mod engine {
                     cache,
                     &sql,
                     false,
-                    read_proof_policy(policy.fga, policy.security, &policy.trusted_views),
+                    read_proof_policy(policy.fga, policy.security, &policy.trusted_views, None),
                 )
                 .await
                 .map_err(|_| "dependency_read_effects_unproven")?;
@@ -1021,6 +1056,109 @@ mod engine {
             ..Default::default()
         });
         effects_from_engine_result(run, facts, root)
+    }
+
+    /// Proves one trusted VPD policy function for a read on the executing
+    /// connection through the shared mutation-effect port in its VpdPolicy
+    /// context: fresh hash-bound source, Clean engine closure, re-read source
+    /// and dependencies, and every returned predicate proven constant. This
+    /// read admission adds what the port leaves to its consumer: the function
+    /// must be listed, standalone, and do nothing but read.
+    pub(super) struct PolicyFunctionProof<'a> {
+        pub(super) trusted: &'a [String],
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl oraclemcp_db::PolicyFunctionProver for PolicyFunctionProof<'_> {
+        async fn proves_policy_function(
+            &self,
+            cx: &Cx,
+            conn: &dyn OracleConnection,
+            function: &oraclemcp_db::PolicyFunctionRef,
+        ) -> Result<bool, DbError> {
+            match self.prove(cx, conn, function).await {
+                Ok(()) => Ok(true),
+                Err(reason) => {
+                    tracing::debug!(
+                        owner = function.owner,
+                        function = function.function,
+                        reason,
+                        "VPD policy function stays unproven"
+                    );
+                    Ok(false)
+                }
+            }
+        }
+    }
+
+    impl PolicyFunctionProof<'_> {
+        async fn prove(
+            &self,
+            cx: &Cx,
+            conn: &dyn OracleConnection,
+            function: &oraclemcp_db::PolicyFunctionRef,
+        ) -> Result<(), &'static str> {
+            use oraclemcp_db::mutation_closure::{
+                MutationEffectOracle, MutationRoutineUse, read_mutation_routine_source,
+            };
+            if function.package.is_some() {
+                return Err("policy_function_package_member_unsupported");
+            }
+            if !policy_function_is_trusted(self.trusted, function) {
+                return Err("policy_function_untrusted");
+            }
+            let mut source = read_mutation_routine_source(
+                cx,
+                conn,
+                &function.owner,
+                &function.function,
+                "FUNCTION",
+                None,
+            )
+            .await
+            .map_err(|_| "policy_function_source_unavailable")?;
+            source.use_context = MutationRoutineUse::VpdPolicy;
+            let proof = crate::mutation_closure::EngineMutationEffects
+                .prove_source(cx, conn, &source)
+                .await
+                .map_err(|_| "policy_function_unproven")?;
+            policy_proof_admits_read(&proof, &source)
+        }
+    }
+
+    /// A read may run a policy function only when the port proved exactly the
+    /// submitted source in its VPD context and it does nothing but read.
+    fn policy_proof_admits_read(
+        proof: &oraclemcp_db::mutation_closure::MutationRoutineProof,
+        source: &oraclemcp_db::mutation_closure::MutationRoutineSource,
+    ) -> Result<(), &'static str> {
+        if proof.use_context != oraclemcp_db::mutation_closure::MutationRoutineUse::VpdPolicy
+            || proof.source_sha256 != source.source_sha256
+        {
+            return Err("policy_function_proof_mismatch");
+        }
+        if !proof.mutations.is_empty()
+            || proof
+                .effects
+                .iter()
+                .any(|effect| effect != RoutineEffect::ReadDb)
+        {
+            return Err("policy_function_has_effects");
+        }
+        Ok(())
+    }
+
+    fn policy_function_is_trusted(
+        trusted: &[String],
+        function: &oraclemcp_db::PolicyFunctionRef,
+    ) -> bool {
+        function.package.is_none()
+            && trusted.iter().any(|candidate| {
+                matches!(
+                    oraclemcp_guard::parse_trusted_proof_target(candidate).as_deref(),
+                    Some([owner, name]) if owner == &function.owner && name == &function.function
+                )
+            })
     }
 
     fn effects_from_engine_result(
@@ -1231,6 +1369,113 @@ mod engine {
                     .call_effects("UPDATE APP.T SET N = 1 WHERE ID = 1")
                     .is_none()
             );
+        }
+
+        #[test]
+        fn policy_function_read_admission_requires_a_read_only_vpd_proof() {
+            use oraclemcp_db::mutation_closure::{
+                MutationRequest, MutationRoutineProof, MutationRoutineSource, MutationRoutineUse,
+            };
+            let source = MutationRoutineSource {
+                use_context: MutationRoutineUse::VpdPolicy,
+                owner: "APP".into(),
+                name: "POLICY_FN".into(),
+                object_type: "FUNCTION".into(),
+                member: None,
+                subprogram_id: Some(1),
+                object_id: 7,
+                last_ddl_time: "unit fixture".into(),
+                compiler_settings: BTreeMap::new(),
+                expression_columns: BTreeMap::new(),
+                expression_storage_type: None,
+                source: "FUNCTION POLICY_FN RETURN VARCHAR2 IS BEGIN RETURN '1=1'; END;".into(),
+                source_sha256: "a".repeat(64),
+                source_line_count: 1,
+            };
+            let proof = |effects: &[RoutineEffect]| MutationRoutineProof {
+                use_context: MutationRoutineUse::VpdPolicy,
+                source_sha256: source.source_sha256.clone(),
+                closure_fingerprint: "b".repeat(64),
+                effects: oraclemcp_guard::RoutineEffectsV1::new(effects.iter().copied()),
+                mutations: Vec::new(),
+            };
+            assert_eq!(policy_proof_admits_read(&proof(&[]), &source), Ok(()));
+            assert_eq!(
+                policy_proof_admits_read(&proof(&[RoutineEffect::ReadDb]), &source),
+                Ok(())
+            );
+            for effects in [
+                vec![RoutineEffect::Dml],
+                vec![RoutineEffect::ReadDb, RoutineEffect::RowLock],
+                vec![RoutineEffect::SessionState],
+            ] {
+                assert_eq!(
+                    policy_proof_admits_read(&proof(&effects), &source),
+                    Err("policy_function_has_effects"),
+                    "{effects:?}"
+                );
+            }
+            let mut writes = proof(&[RoutineEffect::ReadDb]);
+            writes.mutations.push(MutationRequest {
+                target: oraclemcp_guard::ResolvedObject {
+                    owner: "APP".into(),
+                    name: "LOG".into(),
+                    kind: oraclemcp_guard::CatalogObjectKind::Table,
+                    container: None,
+                    member: None,
+                    overloads: Vec::new(),
+                    quote_exact: false,
+                    synonym_chain: Vec::new(),
+                    db_link: None,
+                    identity: oraclemcp_guard::ResolvedIdentity {
+                        object_id: 9,
+                        edition: None,
+                    },
+                },
+                statement_kind: oraclemcp_guard::mutation_closure::MutationStatementKind::Insert,
+                columns: oraclemcp_guard::mutation_closure::MutationColumns::All,
+            });
+            assert_eq!(
+                policy_proof_admits_read(&writes, &source),
+                Err("policy_function_has_effects")
+            );
+            let mut other_context = proof(&[]);
+            other_context.use_context = MutationRoutineUse::DmlTrigger;
+            let mut other_bytes = proof(&[]);
+            other_bytes.source_sha256 = "c".repeat(64);
+            for mismatch in [other_context, other_bytes] {
+                assert_eq!(
+                    policy_proof_admits_read(&mismatch, &source),
+                    Err("policy_function_proof_mismatch")
+                );
+            }
+        }
+
+        #[test]
+        fn policy_function_trust_is_exact_and_standalone_only() {
+            let function = |package: Option<&str>, name: &str| oraclemcp_db::PolicyFunctionRef {
+                owner: "APP".into(),
+                package: package.map(str::to_owned),
+                function: name.into(),
+            };
+            let trusted = ["APP.POLICY_FN".to_owned(), "APP.PKG.MEMBER_FN".to_owned()];
+            assert!(policy_function_is_trusted(
+                &trusted,
+                &function(None, "POLICY_FN")
+            ));
+            assert!(!policy_function_is_trusted(
+                &trusted,
+                &function(None, "OTHER_FN")
+            ));
+            // A trusted package member stays outside the served proof.
+            assert!(!policy_function_is_trusted(
+                &trusted,
+                &function(Some("PKG"), "MEMBER_FN")
+            ));
+            assert!(!policy_function_is_trusted(
+                &[],
+                &function(None, "POLICY_FN")
+            ));
         }
 
         #[test]

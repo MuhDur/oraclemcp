@@ -2460,8 +2460,49 @@ mod profile_drain_state_tests {
             policy.fga_evidence_policy,
             policy.require_security_feature_evidence,
             policy.trusted_views.as_ref(),
+            None,
         );
         assert_eq!(read_policy.trusted_views, ["APP.V35_OUTER"]);
+    }
+
+    /// The profile's list reaches the served read proof as a prover; a
+    /// profile that trusts no policy function gets none, so every VPD row
+    /// stays Unknown.
+    #[test]
+    fn issue34rdk_trusted_policy_functions_reach_the_served_read_proof() {
+        let config = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "trusted"
+            description = "trusted policy function profile"
+            connect_string = "trusted:1521/svc"
+            trusted_policy_functions = ["APP.POLICY_FN"]
+
+            [[profiles]]
+            name = "plain"
+            description = "no trusted policy function"
+            connect_string = "plain:1521/svc"
+            "#,
+        )
+        .expect("trusted policy function config");
+        let drain = ProfileDrainState::from_config(config);
+        let cache = OracleCatalogResolverCache::new();
+        for (profile, expect_prover) in [
+            ("trusted", cfg!(feature = "plsql-intelligence")),
+            ("plain", false),
+        ] {
+            let lease = match drain.admit_mcp_profile(profile, true) {
+                ProfileGenerationAdmission::Ready(lease) => lease,
+                other => panic!("{profile} was not admitted: {other:?}"),
+            };
+            let classifier =
+                served_classifier::ProfileClassifier::activate(Some(profile.into()), Some(&lease));
+            assert_eq!(
+                classifier.policy_function_prover(&cache).is_some(),
+                expect_prover,
+                "{profile}"
+            );
+        }
     }
 
     #[test]
@@ -5815,7 +5856,7 @@ async fn resolve_read_only_relations(
         cache,
         sql,
         false,
-        read_proof_policy(fga_policy, false, &[]),
+        read_proof_policy(fga_policy, false, &[], None),
     )
     .await
 }
@@ -5835,7 +5876,12 @@ async fn resolve_read_only_relations_with_security_policy(
         cache,
         sql,
         false,
-        read_proof_policy(fga_policy, require_security_feature_evidence, trusted_views),
+        read_proof_policy(
+            fga_policy,
+            require_security_feature_evidence,
+            trusted_views,
+            None,
+        ),
     )
     .await
 }
@@ -5863,11 +5909,13 @@ fn read_proof_policy<'a>(
     fga_evidence: FgaEvidencePolicy,
     require_security_feature_evidence: bool,
     trusted_views: &'a [String],
+    policy_functions: Option<&'a dyn oraclemcp_db::PolicyFunctionProver>,
 ) -> read_executor::ReadProofPolicy<'a> {
     read_executor::ReadProofPolicy {
         fga_evidence,
         require_security_feature_evidence,
         trusted_views,
+        policy_functions,
     }
 }
 
@@ -15915,6 +15963,9 @@ impl OracleDispatcher {
                 // proves a callback could run. The ordinary read-only guard
                 // still rejects every non-READ_ONLY statement before EXPLAIN.
                 ensure_read_only(&a.sql)?;
+                let explain_policy_functions = state
+                    .profile_classifier
+                    .policy_function_prover(&state.catalog_cache);
                 let read = read_executor::resolve_query_block_read_with_security_policy(
                     cx,
                     conn,
@@ -15925,6 +15976,7 @@ impl OracleDispatcher {
                         fga_evidence: state.fga_evidence_policy,
                         require_security_feature_evidence: state.require_security_feature_evidence,
                         trusted_views: state.trusted_views.as_ref(),
+                        policy_functions: explain_policy_functions.as_deref(),
                     },
                 )
                 .await?;

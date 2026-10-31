@@ -646,6 +646,33 @@ impl CatalogResolver for OracleCatalogResolverCache {
     }
 }
 
+/// The function an enabled SELECT VPD policy runs, as ALL_POLICIES names it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PolicyFunctionRef {
+    /// `PF_OWNER`: the schema owning the function.
+    pub owner: String,
+    /// `PACKAGE`, when the function is a package member.
+    pub package: Option<String>,
+    /// `FUNCTION`: the function or package member name.
+    pub function: String,
+}
+
+/// Proves that a VPD policy function, and the predicate it returns, run no
+/// user-controlled code. This crate supplies no prover: without one every
+/// policy row stays `Unknown`. A prover may only narrow that refusal for a
+/// function it fully proves; it never admits a relation by itself.
+#[async_trait::async_trait(?Send)]
+pub trait PolicyFunctionProver {
+    /// True only when the function and every predicate it can return are
+    /// proven to run no user code on this connection.
+    async fn proves_policy_function(
+        &self,
+        cx: &Cx,
+        conn: &dyn OracleConnection,
+        function: &PolicyFunctionRef,
+    ) -> Result<bool, DbError>;
+}
+
 /// Prove that exact resolved relations cannot invoke user-controlled code on a
 /// plain fetch under the currently visible catalog and statement value names.
 ///
@@ -661,7 +688,7 @@ pub async fn resolved_relations_read_purity(
     values: &[RawName],
 ) -> Result<oraclemcp_guard::Purity, DbError> {
     let state = Mutex::new(StatementViewProofState::default());
-    resolved_relations_read_purity_inner(cx, conn, relations, values, &state).await
+    resolved_relations_read_purity_inner(cx, conn, relations, values, &state, None).await
 }
 
 async fn resolved_relations_read_purity_inner(
@@ -670,6 +697,7 @@ async fn resolved_relations_read_purity_inner(
     relations: &[ResolvedObject],
     values: &[RawName],
     state: &Mutex<StatementViewProofState>,
+    policy_functions: Option<&dyn PolicyFunctionProver>,
 ) -> Result<Purity, DbError> {
     if relations.is_empty() {
         return Ok(oraclemcp_guard::Purity::ProvenReadOnly);
@@ -700,9 +728,10 @@ async fn resolved_relations_read_purity_inner(
         while binds.len() < 64 {
             binds.push(OracleBind::from(""));
         }
-        if !run_catalog_query(cx, conn, CatalogQueryId::PolicyRowsForRelations32, &binds)
-            .await?
-            .is_empty()
+        let policies =
+            run_catalog_query(cx, conn, CatalogQueryId::PolicyRowsForRelations32, &binds).await?;
+        if !policies.is_empty()
+            && !policy_functions_are_proven(cx, conn, chunk, &policies, policy_functions).await?
         {
             return Ok(oraclemcp_guard::Purity::Unknown);
         }
@@ -766,6 +795,54 @@ async fn resolved_relations_read_purity_inner(
     Ok(oraclemcp_guard::Purity::ProvenReadOnly)
 }
 
+/// Every enabled SELECT policy on these relations must name a function the
+/// prover fully proves. A saturated batch, a row for another relation, or a
+/// row without a function identity is uncertainty, never absence.
+async fn policy_functions_are_proven(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    relations: &[ResolvedObject],
+    policies: &[OracleRow],
+    prover: Option<&dyn PolicyFunctionProver>,
+) -> Result<bool, DbError> {
+    let Some(prover) = prover else {
+        return Ok(false);
+    };
+    if policies.len() >= 257 {
+        return Ok(false);
+    }
+    let mut proven = HashSet::new();
+    for row in policies {
+        let (Some(object_owner), Some(object_name), Some(owner), Some(function)) = (
+            required_text(row, "OBJECT_OWNER"),
+            required_text(row, "OBJECT_NAME"),
+            required_text(row, "PF_OWNER"),
+            required_text(row, "FUNCTION"),
+        ) else {
+            return Ok(false);
+        };
+        if !relations
+            .iter()
+            .any(|relation| relation.owner == object_owner && relation.name == object_name)
+        {
+            return Ok(false);
+        }
+        let function = PolicyFunctionRef {
+            owner: owner.to_owned(),
+            package: row.text("PACKAGE").map(str::to_owned),
+            function: function.to_owned(),
+        };
+        if proven.contains(&function) {
+            continue;
+        }
+        if !prover.proves_policy_function(cx, conn, &function).await? {
+            return Ok(false);
+        }
+        proven.insert(function);
+    }
+    Ok(true)
+}
+
 /// Extend the ordinary relation proof with the narrowly configured application
 /// views whose source can itself complete the same semantic proof.  The
 /// configuration is eligibility only: an unavailable, malformed, truncated,
@@ -774,6 +851,7 @@ async fn resolved_relations_read_purity_inner(
 struct TrustedViewProofContext<'a> {
     fga_policy: FgaEvidencePolicy,
     trusted_views: &'a [String],
+    policy_functions: Option<&'a dyn PolicyFunctionProver>,
     view_depth: u8,
     view_path: &'a [ReadObjectIdentity],
     state: &'a Mutex<StatementViewProofState>,
@@ -807,8 +885,15 @@ async fn resolved_relations_read_purity_with_trusted_views(
             policy_relations.push(relation.clone());
         }
     }
-    resolved_relations_read_purity_inner(cx, conn, &policy_relations, values, policy.context.state)
-        .await
+    resolved_relations_read_purity_inner(
+        cx,
+        conn,
+        &policy_relations,
+        values,
+        policy.context.state,
+        policy.context.policy_functions,
+    )
+    .await
 }
 
 fn trusted_view_identity_is_eligible(relation: &ResolvedObject, trusted_views: &[String]) -> bool {
@@ -1736,10 +1821,14 @@ fn parse_fga_policy(row: &OracleRow) -> Result<FgaPolicyEvidence, &'static str> 
     })
 }
 
-fn fga_condition_proven_builtin(condition: Option<&str>) -> bool {
-    // A null condition is Oracle's unconditional policy. These exact constant
-    // forms contain no callable expression. All other text stays unproven:
-    // Oracle's audit condition grammar can invoke a user function.
+/// Whether a policy predicate is proven to call no code: NULL (Oracle's
+/// unconditional policy) or exactly the constant `1=1`. FGA audit conditions
+/// and the predicates VPD policy functions return share this rule.
+#[must_use]
+pub fn policy_predicate_proven_builtin(condition: Option<&str>) -> bool {
+    // These exact constant forms contain no callable expression. All other
+    // text stays unproven: an Oracle predicate can invoke a user function,
+    // and a bare identifier may name a zero-argument function.
     condition.is_none_or(|text| matches!(text.trim(), "1=1" | "1 = 1"))
 }
 
@@ -1843,7 +1932,7 @@ pub async fn fga_closure(
             if policy.handler.is_some() {
                 return FgaClosure::Autonomous { policy };
             }
-            if !fga_condition_proven_builtin(policy.audit_condition.as_deref()) {
+            if !policy_predicate_proven_builtin(policy.audit_condition.as_deref()) {
                 return FgaClosure::Unknown {
                     reason: "fga_audit_condition_unknown",
                 };
@@ -2157,6 +2246,7 @@ pub async fn prove_semantic_read_plan(
     plan: &SemanticReadPlan,
     fga_policy: FgaEvidencePolicy,
     trusted_views: &[String],
+    policy_functions: Option<&dyn PolicyFunctionProver>,
 ) -> Result<ReadPlanProof, ReadPlanProofError> {
     let state = Mutex::new(StatementViewProofState::default());
     prove_semantic_read_plan_inner(
@@ -2167,6 +2257,7 @@ pub async fn prove_semantic_read_plan(
         TrustedViewProofContext {
             fga_policy,
             trusted_views,
+            policy_functions,
             view_depth: 0,
             view_path: &[],
             state: &state,
@@ -6984,6 +7075,7 @@ mod tests {
                 context: TrustedViewProofContext {
                     fga_policy: FgaEvidencePolicy::RequireProof,
                     trusted_views,
+                    policy_functions: None,
                     view_depth: 0,
                     view_path: &[],
                     state: &Mutex::new(StatementViewProofState::default()),
@@ -7166,6 +7258,7 @@ mod tests {
                         context: TrustedViewProofContext {
                             fga_policy: FgaEvidencePolicy::RequireProof,
                             trusted_views: &trusted_views,
+                            policy_functions: None,
                             view_depth: 0,
                             view_path: &[],
                             state: &Mutex::new(StatementViewProofState::default()),
@@ -7208,6 +7301,7 @@ mod tests {
                         context: TrustedViewProofContext {
                             fga_policy: FgaEvidencePolicy::RequireProof,
                             trusted_views: &trusted_views,
+                            policy_functions: None,
                             view_depth: 0,
                             view_path: &[],
                             state: &Mutex::new(StatementViewProofState::default()),
@@ -7249,6 +7343,7 @@ mod tests {
                         context: TrustedViewProofContext {
                             fga_policy: FgaEvidencePolicy::RequireProof,
                             trusted_views: &trusted_views,
+                            policy_functions: None,
                             view_depth: 0,
                             view_path: &[],
                             state: &Mutex::new(StatementViewProofState::default()),
@@ -7290,6 +7385,7 @@ mod tests {
                         context: TrustedViewProofContext {
                             fga_policy: FgaEvidencePolicy::RequireProof,
                             trusted_views: &trusted_views,
+                            policy_functions: None,
                             view_depth: 1,
                             view_path: &view_path,
                             state: &Mutex::new(StatementViewProofState::default()),
@@ -7323,6 +7419,7 @@ mod tests {
                         context: TrustedViewProofContext {
                             fga_policy: FgaEvidencePolicy::RequireProof,
                             trusted_views: &trusted_views,
+                            policy_functions: None,
                             view_depth: MAX_TRUSTED_VIEW_DEPTH,
                             view_path: &[],
                             state: &Mutex::new(StatementViewProofState::default()),
@@ -7626,6 +7723,99 @@ mod tests {
                     .expect("driver capped expression evidence"),
                 Purity::Unknown,
             );
+        });
+    }
+
+    struct FixedPolicyProver {
+        proves: bool,
+        calls: Mutex<Vec<PolicyFunctionRef>>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl PolicyFunctionProver for FixedPolicyProver {
+        async fn proves_policy_function(
+            &self,
+            _cx: &Cx,
+            _conn: &dyn OracleConnection,
+            function: &PolicyFunctionRef,
+        ) -> Result<bool, DbError> {
+            self.calls.lock().unwrap().push(function.clone());
+            Ok(self.proves)
+        }
+    }
+
+    fn policy_row(object: &str, owner: Option<&str>, function: Option<&str>) -> OracleRow {
+        row(&[
+            ("OBJECT_OWNER", Some("APP")),
+            ("OBJECT_NAME", Some(object)),
+            ("POLICY_NAME", Some("SYNTHETIC_VPD")),
+            ("PF_OWNER", owner),
+            ("PACKAGE", None),
+            ("FUNCTION", function),
+        ])
+    }
+
+    /// The port only narrows a refusal: without a prover, or when it does not
+    /// prove every policy function, a VPD table stays Unknown.
+    #[test]
+    fn vpd_policy_rows_are_proven_only_through_the_policy_function_prover() {
+        run_with_cx(|cx| async move {
+            let purity = |rows: Vec<OracleRow>, prover: Option<&'static FixedPolicyProver>| {
+                let cx = cx.clone();
+                async move {
+                    let conn = ScriptedRows::new([rows, Vec::new(), Vec::new(), Vec::new()]);
+                    let state = Mutex::new(StatementViewProofState::default());
+                    resolved_relations_read_purity_inner(
+                        &cx,
+                        &conn,
+                        &[table_object()],
+                        &[],
+                        &state,
+                        prover.map(|prover| prover as &dyn PolicyFunctionProver),
+                    )
+                    .await
+                    .expect("policy evidence")
+                }
+            };
+            let yes: &'static FixedPolicyProver = Box::leak(Box::new(FixedPolicyProver {
+                proves: true,
+                calls: Mutex::new(Vec::new()),
+            }));
+            let no: &'static FixedPolicyProver = Box::leak(Box::new(FixedPolicyProver {
+                proves: false,
+                calls: Mutex::new(Vec::new()),
+            }));
+            let proven = vec![policy_row("ORDERS", Some("APP"), Some("POLICY_FN"))];
+            assert_eq!(purity(proven.clone(), None).await, Purity::Unknown);
+            assert_eq!(purity(proven.clone(), Some(no)).await, Purity::Unknown);
+            assert_eq!(
+                purity(proven.clone(), Some(yes)).await,
+                Purity::ProvenReadOnly
+            );
+            assert_eq!(
+                yes.calls.lock().unwrap().as_slice(),
+                [PolicyFunctionRef {
+                    owner: "APP".into(),
+                    package: None,
+                    function: "POLICY_FN".into(),
+                }]
+            );
+            // Two policies naming one function are proven once.
+            yes.calls.lock().unwrap().clear();
+            let twice = vec![proven[0].clone(), proven[0].clone()];
+            assert_eq!(purity(twice, Some(yes)).await, Purity::ProvenReadOnly);
+            assert_eq!(yes.calls.lock().unwrap().len(), 1);
+            // Uncertain rows are refused before the prover is consulted.
+            yes.calls.lock().unwrap().clear();
+            for rows in [
+                vec![policy_row("ORDERS", None, Some("POLICY_FN"))],
+                vec![policy_row("ORDERS", Some("APP"), None)],
+                vec![policy_row("OTHER", Some("APP"), Some("POLICY_FN"))],
+                vec![proven[0].clone(); 257],
+            ] {
+                assert_eq!(purity(rows, Some(yes)).await, Purity::Unknown);
+            }
+            assert!(yes.calls.lock().unwrap().is_empty());
         });
     }
 

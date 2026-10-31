@@ -1445,7 +1445,7 @@ credential_ref = "env:W4_DB_PASSWORD"
 max_level = "READ_ONLY"
 default_level = "READ_ONLY"
 trusted_views = ["{owner}.V35_INNER_{run_owner_suffix}", "{owner}.V35_OUTER_{run_owner_suffix}", "{owner}.V35_SIDE_{run_owner_suffix}", "{owner}.V35_UOUT_{run_owner_suffix}", "{owner}.V35_VPD_{run_owner_suffix}", '{owner}."v35 quoted {run_owner_suffix}"']
-trusted_policy_functions = ["{owner}.PKG_W4_{run_owner_suffix}.POLICY_FN"]
+trusted_policy_functions = ["{owner}.PKG_W4_{run_owner_suffix}.POLICY_FN", "{owner}.F34_PURE_{run_owner_suffix}", "{owner}.F34_WRITE_{run_owner_suffix}", "{owner}.F34_AUTO_{run_owner_suffix}", "{owner}.F34_CALL_{run_owner_suffix}", "{owner}.F34_LOCK_{run_owner_suffix}"]
 
 [[profiles]]
 name = "{lane}_owner"
