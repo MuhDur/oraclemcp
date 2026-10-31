@@ -97,8 +97,8 @@ plsql-output = { version = "=0.7.0", default-features = false }
 # Train-0.12 development pins. These exact public sibling revisions keep the
 # unreleased driver and PL/SQL crates in sync until R.5 publishes their RCs.
 [patch.crates-io]
-oraclemcp-driver-cx = { git = "https://github.com/MuhDur/rust-oracledb", rev = "9802f542abe59ccaef11e58f8ee7f052ea3fe2df" }
-oraclemcp-driver-cx-protocol = { git = "https://github.com/MuhDur/rust-oracledb", rev = "9802f542abe59ccaef11e58f8ee7f052ea3fe2df" }
+oraclemcp-driver-cx = { git = "https://github.com/MuhDur/rust-oracledb", rev = "4116fe7bb2355822c34530e1b5bc4a51b7be962b" }
+oraclemcp-driver-cx-protocol = { git = "https://github.com/MuhDur/rust-oracledb", rev = "4116fe7bb2355822c34530e1b5bc4a51b7be962b" }
 plsql-core = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "ca3ded2d720542cba062ba50302a849d41aaf3c1" }
 plsql-engine = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "ca3ded2d720542cba062ba50302a849d41aaf3c1" }
 plsql-catalog = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "ca3ded2d720542cba062ba50302a849d41aaf3c1" }
