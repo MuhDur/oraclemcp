@@ -701,6 +701,7 @@ impl OracleDispatcher {
                     auditor: Some(auditor),
                     subject: &subject,
                     db_evidence: None,
+                    impact: None,
                 },
                 tool,
                 sql,
@@ -4070,6 +4071,7 @@ async fn enforce_query_cost_gate(
                     auditor: ctx.auditor,
                     subject: ctx.subject,
                     db_evidence: None,
+                    impact: None,
                 },
                 "plan_table_unavailable",
             )?;
@@ -4097,6 +4099,7 @@ async fn enforce_query_cost_gate(
         auditor: ctx.auditor,
         subject: ctx.subject,
         db_evidence: audit_db_evidence.as_ref(),
+        impact: None,
     };
     if hard_parse_observation || plan_table_observation.is_some() {
         append_hard_parse_evidence_unavailable_audit(
@@ -4104,6 +4107,7 @@ async fn enforce_query_cost_gate(
                 auditor: ctx.auditor,
                 subject: ctx.subject,
                 db_evidence: None,
+                impact: None,
             },
             "oracle_query",
             hard_parse_observation,
@@ -5140,6 +5144,8 @@ use read_executor::{
 };
 
 mod impact;
+mod impact_grants;
+use impact_grants::*;
 
 mod workspace;
 use workspace::CheckpointWorkspace;
@@ -6406,171 +6412,6 @@ fn ensure_query_cost_plan_write_allowed(
     }
 }
 
-fn execute_grant_token_fields(
-    binding: &ExecGrantBinding,
-    active_profile: Option<&str>,
-    required_level: OperatingLevel,
-) -> Vec<String> {
-    vec![
-        active_profile.unwrap_or("").to_owned(),
-        binding.session_id.clone(),
-        binding.lane_id.clone(),
-        binding.subject_id.clone(),
-        binding.generation.to_string(),
-        required_level.as_str().to_owned(),
-    ]
-}
-
-fn sign_execute_grant_reference(
-    raw_grant_id: &str,
-    binding: &ExecGrantBinding,
-    active_profile: Option<&str>,
-    required_level: OperatingLevel,
-) -> String {
-    let fields = execute_grant_token_fields(binding, active_profile, required_level);
-    let refs = fields.iter().map(String::as_str).collect::<Vec<_>>();
-    sign_token(EXECUTE_GRANT_TOKEN_SCOPE, raw_grant_id, &refs)
-}
-
-fn verify_execute_grant_reference(
-    token: &str,
-    binding: &ExecGrantBinding,
-    active_profile: Option<&str>,
-    required_level: OperatingLevel,
-) -> Option<String> {
-    let fields = execute_grant_token_fields(binding, active_profile, required_level);
-    let refs = fields.iter().map(String::as_str).collect::<Vec<_>>();
-    verify_token(EXECUTE_GRANT_TOKEN_SCOPE, token, &refs)
-}
-
-fn issue_confirmation_grant(
-    grants: &ExecGrantStore,
-    binding: &ExecGrantBinding,
-    active_profile: Option<&str>,
-    material: &str,
-    required_level: OperatingLevel,
-) -> String {
-    let raw = grants.issue(
-        material,
-        binding.clone(),
-        required_level,
-        Duration::from_secs(EXECUTE_APPROVED_TOKEN_TTL_SECONDS),
-    );
-    sign_execute_grant_reference(&raw, binding, active_profile, required_level)
-}
-
-struct ConfirmationGrantRequest<'a> {
-    material: &'a str,
-    required_level: OperatingLevel,
-    active_profile: Option<&'a str>,
-    grants: &'a ExecGrantStore,
-    binding: &'a ExecGrantBinding,
-    confirm: Option<&'a str>,
-    challenge_message: &'static str,
-    suggested_tool: &'a str,
-    next_step: &'static str,
-}
-
-fn consume_confirmation_grant(
-    request: ConfirmationGrantRequest<'_>,
-) -> Result<String, ErrorEnvelope> {
-    let Some(confirm) = request
-        .confirm
-        .and_then(|value| non_empty_arg(Some(value.to_owned())))
-    else {
-        return Err(
-            ErrorEnvelope::new(ErrorClass::ChallengeRequired, request.challenge_message)
-                .with_suggested_tool(request.suggested_tool)
-                .with_next_step(request.next_step),
-        );
-    };
-    let raw_id = verify_execute_grant_reference(
-        &confirm,
-        request.binding,
-        request.active_profile,
-        request.required_level,
-    )
-    .ok_or_else(|| {
-        ErrorEnvelope::new(
-            ErrorClass::ChallengeRequired,
-            "confirmation grant is invalid for this statement, lane, principal, generation, or active profile",
-        )
-        .with_suggested_tool(request.suggested_tool)
-        .with_next_step(request.next_step)
-    })?;
-    request
-        .grants
-        .consume(
-            &raw_id,
-            request.material,
-            request.binding,
-            request.required_level,
-        )
-        // Separate dispatcher stores share a broker PID and restart their
-        // counters. The verified reference also binds the session/generation;
-        // its stripped raw ID alone would alias in the shared durable ledger.
-        .map(|_| confirm)
-        .map_err(|e| confirmation_grant_error(e, request.suggested_tool, request.next_step))
-}
-
-fn confirmation_grant_error(
-    e: ExecGrantError,
-    suggested_tool: &str,
-    next_step: &'static str,
-) -> ErrorEnvelope {
-    match e {
-        ExecGrantError::Unknown => ErrorEnvelope::new(
-            ErrorClass::ChallengeRequired,
-            "confirmation grant is unknown or already used; preview again",
-        )
-        .with_suggested_tool(suggested_tool)
-        .with_next_step(next_step),
-        ExecGrantError::Expired => ErrorEnvelope::new(
-            ErrorClass::ChallengeRequired,
-            "confirmation grant expired; preview again",
-        )
-        .with_suggested_tool(suggested_tool)
-        .with_next_step(next_step),
-        ExecGrantError::DigestMismatch => ErrorEnvelope::new(
-            ErrorClass::RepreviewRequired,
-            "REPREVIEW_REQUIRED: confirmation grant belongs to a different SQL or execution envelope",
-        )
-        .with_suggested_tool(suggested_tool)
-        .with_next_step(next_step),
-        ExecGrantError::SessionMismatch => ErrorEnvelope::new(
-            ErrorClass::RuntimeStateRequired,
-            "confirmation grant belongs to a different MCP session",
-        ),
-        ExecGrantError::LaneMismatch => ErrorEnvelope::new(
-            ErrorClass::RuntimeStateRequired,
-            "confirmation grant belongs to a different dispatch lane",
-        ),
-        ExecGrantError::SubjectMismatch => ErrorEnvelope::new(
-            ErrorClass::RuntimeStateRequired,
-            "confirmation grant belongs to a different principal",
-        ),
-        ExecGrantError::GenerationMismatch { presented, granted } => ErrorEnvelope::new(
-            ErrorClass::ChallengeRequired,
-            format!(
-                "confirmation grant was minted for generation {granted}, but current generation is {presented}"
-            ),
-        )
-        .with_suggested_tool(suggested_tool)
-        .with_next_step(next_step),
-        ExecGrantError::LevelExceedsGrant { requested, granted } => ErrorEnvelope::new(
-            ErrorClass::OperatingLevelTooLow,
-            format!(
-                "requested level {} exceeds the granted level {}",
-                requested.as_str(),
-                granted.as_str()
-            ),
-        ),
-        _ => ErrorEnvelope::new(ErrorClass::ChallengeRequired, "confirmation grant rejected")
-            .with_suggested_tool(suggested_tool)
-            .with_next_step(next_step),
-    }
-}
-
 fn session_level_view(session: &SessionLevelState) -> Value {
     json!({
         "current_level": session.effective_level(),
@@ -6637,6 +6478,7 @@ struct SessionGrantContext<'a> {
     active_profile: Option<&'a str>,
     grants: &'a ExecGrantStore,
     binding: &'a ExecGrantBinding,
+    generations: ImpactGenerations,
 }
 
 fn session_level_gate_json(session: &SessionLevelState, target: OperatingLevel) -> Value {
@@ -6899,7 +6741,10 @@ fn set_session_level(
     }
 
     let gate = session.evaluate(Some(target));
-    let grant_material = session_level_grant_material(target, ttl_seconds);
+    let grant_envelope = session_level_grant_material(target, ttl_seconds);
+    let grant_impact = local_impact(&grant_envelope, grant_ctx.generations);
+    let grant_material = oraclemcp_guard::GrantMaterial::new(&grant_envelope, &grant_impact)
+        .expect("current impact binding version");
     let confirm = matches!(gate, LevelDecision::RequireStepUp { .. }).then(|| {
         issue_confirmation_grant(
             grant_ctx.grants,
@@ -6953,6 +6798,7 @@ fn set_session_level(
             "target_level": target,
             "ttl_seconds": ttl_seconds,
             "session": session_level_view(session),
+            "impact": ImpactV1 { binding: grant_impact, ..ImpactV1::default() },
             "gate": session_level_gate_json(session, target),
             "confirmation": if matches!(gate, LevelDecision::RequireStepUp { .. }) {
                 json!({
@@ -7508,6 +7354,20 @@ fn resolve_scoped_grant(
     ctx: &DbToolCtx<'_>,
     material: &str,
 ) -> Result<std::sync::Arc<oraclemcp_guard::ScopedGrant>, WriteAuthRefusal> {
+    resolve_scoped_grant_reference(
+        ctx.scoped_grants,
+        ctx.grant_binding,
+        ctx.active_profile,
+        material,
+    )
+}
+
+fn resolve_scoped_grant_reference(
+    store: &ScopedGrantStore,
+    binding: &ExecGrantBinding,
+    active_profile: Option<&str>,
+    material: &str,
+) -> Result<std::sync::Arc<oraclemcp_guard::ScopedGrant>, WriteAuthRefusal> {
     if !material.starts_with("sgr1.") {
         return Err(WriteAuthRefusal::GrantTokenKindMismatch);
     }
@@ -7515,21 +7375,18 @@ fn resolve_scoped_grant(
     let id = reference
         .grant_id_unverified()
         .ok_or(WriteAuthRefusal::GrantMismatch)?;
-    let grant = ctx
-        .scoped_grants
-        .get(id, ctx.grant_binding)
-        .map_err(scoped_lookup_refusal)?;
+    let grant = store.get(id, binding).map_err(scoped_lookup_refusal)?;
     reference
-        .verify(&SCOPED_GRANT_KEY, ctx.grant_binding, &grant.scope_digest())
+        .verify(&SCOPED_GRANT_KEY, binding, &grant.scope_digest())
         .ok_or(WriteAuthRefusal::GrantMismatch)?;
-    if grant.profile() != ctx.active_profile.unwrap_or_default() {
+    if grant.profile() != active_profile.unwrap_or_default() {
         return Err(WriteAuthRefusal::GrantMismatch);
     }
     Ok(grant)
 }
 
 fn consume_execute_confirmation(
-    material: &str,
+    material: &oraclemcp_guard::GrantMaterial,
     required_level: OperatingLevel,
     active_profile: Option<&str>,
     grants: &ExecGrantStore,
@@ -7846,6 +7703,7 @@ struct AuditEntryCtx<'a> {
     auditor: Option<&'a Auditor>,
     subject: &'a AuditSubject,
     db_evidence: Option<&'a DbEvidence>,
+    impact: Option<&'a oraclemcp_audit::AuditImpactBinding>,
 }
 
 #[derive(Clone)]
@@ -7863,11 +7721,13 @@ struct DbToolCtx<'a> {
     execute_grants: &'a ExecGrantStore,
     scoped_grants: &'a ScopedGrantStore,
     grant_binding: &'a ExecGrantBinding,
+    impact_generations: ImpactGenerations,
     write_intents: Option<&'a WriteIntentLog>,
     catalog_cache: &'a OracleCatalogResolverCache,
     /// Arc N: the active profile's tightening-only policy, applied to every
     /// guarded statement on this path.
     sql_policy: Option<&'a SqlPolicyConfig>,
+    sql_policy_provider: Option<&'a SyncMutex<Option<SqlPolicyConfig>>>,
     /// The session's server-derived `CURRENT_SCHEMA`, used to qualify an
     /// unqualified policy target. Never a tool argument.
     current_schema: Option<&'a str>,
@@ -8311,7 +8171,22 @@ fn append_audit_with_observed_scn_and_failure(
 ) -> Result<(), ErrorEnvelope> {
     if let Some(auditor) = ctx.auditor {
         let draft = audit_draft(ctx, tool, sql, danger_level, rows_affected, outcome);
-        let result = if let Some(failure) = failure {
+        let result = if let Some(impact) = ctx.impact {
+            if observed_scn.is_some() {
+                return Err(ErrorEnvelope::new(
+                    ErrorClass::Internal,
+                    "write approval audit cannot carry a read snapshot",
+                ));
+            }
+            auditor.append_with_impact(
+                &draft,
+                audit_timestamp(),
+                true,
+                impact.clone(),
+                None,
+                failure.map(audit_failure_cause).transpose()?,
+            )
+        } else if let Some(failure) = failure {
             let cause = audit_failure_cause(failure)?;
             auditor.append_correlated_with_observed_scn_and_verdict_certificate_and_failure(
                 &draft,
@@ -8774,6 +8649,7 @@ async fn bind_result_masking_audit(
                 auditor: None,
                 subject,
                 db_evidence: None,
+                impact: None,
             },
             tool,
             sql,
@@ -8786,6 +8662,7 @@ async fn bind_result_masking_audit(
             auditor: Some(auditor),
             subject,
             db_evidence: db_evidence.as_ref(),
+            impact: None,
         },
         tool,
         sql,
@@ -9214,6 +9091,7 @@ async fn run_workspace_statement(
         auditor: ctx.audit.auditor,
         subject: ctx.audit.subject,
         db_evidence: db_evidence.as_ref(),
+        impact: None,
     };
     append_audit(
         audit_entry,
@@ -9615,6 +9493,7 @@ async fn preview_dml_inner(
         auditor: ctx.audit.auditor,
         subject: ctx.audit.subject,
         db_evidence: db_evidence.as_ref(),
+        impact: None,
     };
     // fsync-before-execute: the dry run really does run, so it is logged before
     // it can touch the database, and its rollback is logged after.
@@ -10082,6 +9961,17 @@ async fn execute_sql_inner(
         timeout_seconds: args.timeout_seconds,
         scoped_grant: args.scoped_grant.as_deref(),
     }));
+    let bound_impact = BoundImpact::capture(
+        ctx.fact_probe(),
+        &args.sql,
+        &action_material,
+        &binds,
+        Some(&policy),
+        args.scoped_grant.as_deref(),
+        proof.compile_parse_digest(),
+    )
+    .await?;
+    let action_material = bound_impact.material.clone();
     let confirmation_required = args.commit || args.hold || decision.non_transactional_effect;
     let confirmation_idempotency_key = if confirmation_required {
         Some(
@@ -10149,10 +10039,13 @@ async fn execute_sql_inner(
             return Err(primary);
         }
     };
+    let impact_audit =
+        bound_impact.audit_binding(oraclemcp_audit::AuditRevalidationStage::BeforeConsume)?;
     let audit_entry = AuditEntryCtx {
         auditor: audit.auditor,
         subject: audit.subject,
         db_evidence: db_evidence.as_ref(),
+        impact: Some(&impact_audit),
     };
 
     proof.revalidate(cx, conn).await?;
@@ -10263,6 +10156,22 @@ async fn execute_sql_inner(
         write_intent_id.as_deref(),
     )
     .await?;
+    bound_impact
+        .before_execute(
+            &ctx,
+            audit_entry,
+            audit_tool,
+            &executed_sql,
+            &danger_str,
+            write_intent_id.as_deref(),
+        )
+        .await?;
+    let impact_final =
+        bound_impact.audit_binding(oraclemcp_audit::AuditRevalidationStage::BeforeExecute)?;
+    let audit_entry = AuditEntryCtx {
+        impact: Some(&impact_final),
+        ..audit_entry
+    };
     let rows_affected = match execute_conn(cx, conn, &executed_sql, &binds).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -10795,6 +10704,25 @@ async fn compile_object_inner(
         ActionKind::CompileObject,
         args.timeout_seconds,
     ));
+    let bound_impact = if matches!(gate, LevelDecision::Allow) {
+        BoundImpact::capture(
+            FactProbeContext {
+                is_preview: !args.execute,
+                ..ctx.fact_probe()
+            },
+            &audited_sql,
+            &action_material,
+            &[],
+            None,
+            None,
+            proof.compile_parse_digest(),
+        )
+        .await?
+    } else {
+        BoundImpact::unobserved(&audited_sql, &action_material, ctx.impact_generations)
+    };
+    let action_material = bound_impact.material.clone();
+
     let confirm = matches!(gate, LevelDecision::Allow).then(|| {
         issue_confirmation_grant(
             ctx.execute_grants,
@@ -10806,7 +10734,7 @@ async fn compile_object_inner(
     });
 
     let preview = || {
-        json!({
+        let mut response = json!({
             "compiled": false,
             "preview": true,
             "owner": owner,
@@ -10831,7 +10759,9 @@ async fn compile_object_inner(
                 warnings,
                 confirm.as_deref(),
             ),
-        })
+        });
+        bound_impact.attach(&mut response);
+        response
     };
 
     if !args.execute {
@@ -10896,10 +10826,13 @@ async fn compile_object_inner(
             return Err(primary);
         }
     };
-    let audit_entry = AuditEntryCtx {
+    let impact_audit =
+        bound_impact.audit_binding(oraclemcp_audit::AuditRevalidationStage::BeforeConsume)?;
+    let mut audit_entry = AuditEntryCtx {
         auditor: audit.auditor,
         subject: audit.subject,
         db_evidence: db_evidence.as_ref(),
+        impact: Some(&impact_audit),
     };
     if let Err(err) = append_audit(
         audit_entry,
@@ -10919,6 +10852,8 @@ async fn compile_object_inner(
     ctx.catalog_cache
         .invalidate(catalog_invalidation_for_object_type(&object_type));
     let mut rows_affected = Vec::with_capacity(statements.len());
+    let impact_final =
+        bound_impact.audit_binding(oraclemcp_audit::AuditRevalidationStage::BeforeExecute)?;
     for stmt in &statements {
         revalidate_compile_before_ddl(
             &ctx,
@@ -10930,6 +10865,22 @@ async fn compile_object_inner(
             write_intent_id.as_deref(),
         )
         .await?;
+        if rows_affected.is_empty() {
+            bound_impact
+                .before_execute(
+                    &ctx,
+                    audit_entry,
+                    tool_name,
+                    &audited_sql,
+                    &danger_str,
+                    write_intent_id.as_deref(),
+                )
+                .await?;
+        }
+        audit_entry = AuditEntryCtx {
+            impact: Some(&impact_final),
+            ..audit_entry
+        };
         match execute_conn(cx, conn, stmt, &[]).await {
             Ok(rows) => rows_affected.push(rows),
             Err(e) => {
@@ -11838,6 +11789,7 @@ async fn patch_source_inner(
         ActionKind::PatchSource,
         args.timeout_seconds,
     ));
+
     let decision = DEFAULT_CLASSIFIER.classify(&patched_ddl);
     // Source patches and direct CREATE OR REPLACE now share the guard's
     // token-aware stored-unit shape analysis. There is no patch-only
@@ -11847,6 +11799,24 @@ async fn patch_source_inner(
     let patch_required_level = decision.required_level;
     let gate = decision.gate(session);
     let (gate_decision, blocked_reason, step_up_target) = gate_decision_json(&gate);
+    let bound_impact = if matches!(gate, LevelDecision::Allow) {
+        BoundImpact::capture(
+            FactProbeContext {
+                is_preview: !args.execute,
+                ..ctx.fact_probe()
+            },
+            &patched_ddl,
+            &action_material,
+            &[],
+            None,
+            None,
+            proof.compile_parse_digest(),
+        )
+        .await?
+    } else {
+        BoundImpact::unobserved(&patched_ddl, &action_material, ctx.impact_generations)
+    };
+    let action_material = bound_impact.material.clone();
     let confirm = match (patch_required_level, &gate) {
         (Some(level), LevelDecision::Allow) => Some(issue_confirmation_grant(
             ctx.execute_grants,
@@ -11904,6 +11874,7 @@ async fn patch_source_inner(
             ),
         });
         let mut preview = preview;
+        bound_impact.attach(&mut preview);
         // The stored side goes through the same header normalization as the
         // candidate, so the engine compares like with like.
         let stored_ddl = owner_qualified_patch_ddl(
@@ -11979,10 +11950,13 @@ async fn patch_source_inner(
             return Err(primary);
         }
     };
+    let impact_audit =
+        bound_impact.audit_binding(oraclemcp_audit::AuditRevalidationStage::BeforeConsume)?;
     let audit_entry = AuditEntryCtx {
         auditor: audit.auditor,
         subject: audit.subject,
         db_evidence: db_evidence.as_ref(),
+        impact: Some(&impact_audit),
     };
     if let Err(err) = append_audit(
         audit_entry,
@@ -12011,6 +11985,22 @@ async fn patch_source_inner(
         write_intent_id.as_deref(),
     )
     .await?;
+    bound_impact
+        .before_execute(
+            &ctx,
+            audit_entry,
+            tool_name,
+            &patched_ddl,
+            &danger_str,
+            write_intent_id.as_deref(),
+        )
+        .await?;
+    let impact_final =
+        bound_impact.audit_binding(oraclemcp_audit::AuditRevalidationStage::BeforeExecute)?;
+    let audit_entry = AuditEntryCtx {
+        impact: Some(&impact_final),
+        ..audit_entry
+    };
     let rows_affected = match execute_conn(cx, conn, &patched_ddl, &[]).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -12269,18 +12259,32 @@ async fn create_or_replace_inner(
         ActionKind::CreateOrReplace,
         args.timeout_seconds,
     ));
+    let bound_impact = if matches!(gate, LevelDecision::Allow) {
+        BoundImpact::capture(
+            FactProbeContext {
+                is_preview: !args.execute,
+                ..ctx.fact_probe()
+            },
+            &source,
+            &action_material,
+            &[],
+            None,
+            None,
+            proof.compile_parse_digest(),
+        )
+        .await?
+    } else {
+        BoundImpact::unobserved(&source, &action_material, ctx.impact_generations)
+    };
+    let action_material = bound_impact.material.clone();
+
     let confirm = match (args.execute, decision.required_level, &gate) {
         (false, Some(level), LevelDecision::Allow) if level >= OperatingLevel::Ddl => {
-            let raw = ctx.execute_grants.issue(
-                &action_material,
-                ctx.grant_binding.clone(),
-                level,
-                Duration::from_secs(EXECUTE_APPROVED_TOKEN_TTL_SECONDS),
-            );
-            Some(sign_execute_grant_reference(
-                &raw,
+            Some(issue_confirmation_grant(
+                ctx.execute_grants,
                 ctx.grant_binding,
                 active_profile,
+                &action_material,
                 level,
             ))
         }
@@ -12314,6 +12318,7 @@ async fn create_or_replace_inner(
             ),
         });
         let mut preview = preview;
+        bound_impact.attach(&mut preview);
         if let Some(object) = detected.as_ref() {
             let stored = impact::read_stored_unit(
                 cx,
@@ -12523,11 +12528,10 @@ async fn deploy_ddl_inner(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Val
             },
             session,
             ctx.execute_grants,
-            ctx.grant_binding,
-            ctx.sql_policy,
-            ctx.current_schema,
+            ctx.fact_probe(),
             &proof,
-        )?;
+        )
+        .await?;
         if let Value::Object(map) = &mut preview {
             map.insert("preview".to_owned(), json!(true));
             map.insert("applied".to_owned(), json!(false));
@@ -12583,15 +12587,20 @@ async fn deploy_ddl_inner(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Val
     Ok(out)
 }
 
-fn preview_sql(
+async fn preview_sql(
     args: &PreviewSqlArgs,
     session: &SessionLevelState,
     grants: &ExecGrantStore,
-    binding: &ExecGrantBinding,
-    sql_policy: Option<&SqlPolicyConfig>,
-    current_schema: Option<&str>,
+    fact_context: FactProbeContext<'_>,
     proof: &compile_parse_closure::PreparedSqlProof,
 ) -> Result<Value, ErrorEnvelope> {
+    let fact_context = FactProbeContext {
+        is_preview: true,
+        ..fact_context
+    };
+    let binding = fact_context.binding;
+    let sql_policy = fact_context.policy;
+    let current_schema = fact_context.current_schema;
     let sql = args.sql.as_str();
     let active_profile = proof.active_profile();
     // Previewing never admits or executes SQL. Mirror the read path's explicit
@@ -12682,6 +12691,7 @@ fn preview_sql(
         .iter()
         .map(json_to_bind)
         .collect::<Result<Vec<_>, _>>()?;
+    let mut bound_impact = None;
     let execute_confirm = match (required_level, &gate) {
         (Some(level), LevelDecision::Allow) if level > OperatingLevel::ReadOnly => {
             if decision.query_effect_requires_fetch {
@@ -12700,18 +12710,25 @@ fn preview_sql(
                     timeout_seconds: args.timeout_seconds,
                     scoped_grant: args.scoped_grant.as_deref(),
                 }));
-                let raw = grants.issue(
+                let captured = BoundImpact::capture(
+                    fact_context,
+                    sql,
                     &material,
-                    binding.clone(),
-                    level,
-                    Duration::from_secs(EXECUTE_APPROVED_TOKEN_TTL_SECONDS),
-                );
-                Some(sign_execute_grant_reference(
-                    &raw,
+                    &typed_binds,
+                    Some(&admission),
+                    args.scoped_grant.as_deref(),
+                    proof.compile_parse_digest(),
+                )
+                .await?;
+                let confirm = issue_confirmation_grant(
+                    grants,
                     binding,
                     active_profile,
+                    &captured.material,
                     level,
-                ))
+                );
+                bound_impact = Some(captured);
+                Some(confirm)
             }
         }
         _ => None,
@@ -12748,6 +12765,9 @@ fn preview_sql(
     }
     attach_routine_call_impact(&mut preview, proof, sql);
     proof.attach_compile_parse_binding(&mut preview);
+    if let Some(binding) = bound_impact {
+        binding.attach(&mut preview);
+    }
     Ok(preview)
 }
 
@@ -14100,6 +14120,7 @@ impl OracleDispatcher {
                     active_profile: active_profile.as_deref(),
                     grants: &state.execute_grants,
                     binding: &grant_binding,
+                    generations: impact_generations(&state, context),
                 },
                 name,
                 a,
@@ -14182,11 +14203,22 @@ impl OracleDispatcher {
                 &a,
                 &scoped_level,
                 &state.execute_grants,
-                &binding,
-                sql_policy.as_ref(),
-                current_schema.as_deref(),
+                FactProbeContext {
+                    cx,
+                    conn: state.conn.as_ref(),
+                    binding: &binding,
+                    generations: impact_generations(&state, context),
+                    policy: sql_policy.as_ref(),
+                    policy_provider: Some(&self.sql_policy),
+                    current_schema: current_schema.as_deref(),
+                    quarantine: &self.quarantine,
+                    scoped_grants: &state.scoped_grants,
+                    active_profile: state.active_profile.as_deref(),
+                    is_preview: true,
+                },
                 &proof,
-            )?;
+            )
+            .await?;
             impact::attach_ddl_source_impact(
                 &mut preview,
                 cx,
@@ -14268,9 +14300,11 @@ impl OracleDispatcher {
                 execute_grants: &state.execute_grants,
                 scoped_grants: &state.scoped_grants,
                 grant_binding: &grant_binding,
+                impact_generations: impact_generations(&state, context),
                 write_intents: self.write_intents.as_deref(),
                 catalog_cache: &state.catalog_cache,
                 sql_policy: sql_policy.as_ref(),
+                sql_policy_provider: Some(&self.sql_policy),
                 current_schema: current_schema.as_deref(),
                 audit,
                 quarantine: &self.quarantine,
@@ -14309,9 +14343,11 @@ impl OracleDispatcher {
                 execute_grants: &state.execute_grants,
                 scoped_grants: &state.scoped_grants,
                 grant_binding: &grant_binding,
+                impact_generations: impact_generations(&state, context),
                 write_intents: self.write_intents.as_deref(),
                 catalog_cache: &state.catalog_cache,
                 sql_policy: sql_policy.as_ref(),
+                sql_policy_provider: Some(&self.sql_policy),
                 current_schema: current_schema.as_deref(),
                 audit,
                 quarantine: &self.quarantine,
@@ -14620,6 +14656,7 @@ impl OracleDispatcher {
                 auditor: self.auditor.as_deref(),
                 subject: &generated_read_subject,
                 db_evidence: generated_read_db_evidence.as_ref(),
+                impact: None,
             },
             tool,
             quarantine: &self.quarantine,
@@ -14680,6 +14717,7 @@ impl OracleDispatcher {
                     auditor: self.auditor.as_deref(),
                     subject: &request_subject,
                     db_evidence: db_evidence.as_ref(),
+                    impact: None,
                 };
                 if !state.profile_generation.as_ref()
                     .is_some_and(ProfileGenerationLease::edition_change_requests_enabled)
@@ -14760,9 +14798,11 @@ impl OracleDispatcher {
                     execute_grants: &state.execute_grants,
                     scoped_grants: &state.scoped_grants,
                     grant_binding: &grant_binding,
+                impact_generations: impact_generations(&state, context),
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
                     sql_policy: sql_policy.as_ref(),
+                sql_policy_provider: Some(&self.sql_policy),
                     current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
@@ -14794,9 +14834,11 @@ impl OracleDispatcher {
                     execute_grants: &state.execute_grants,
                     scoped_grants: &state.scoped_grants,
                     grant_binding: &grant_binding,
+                impact_generations: impact_generations(&state, context),
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
                     sql_policy: sql_policy.as_ref(),
+                sql_policy_provider: Some(&self.sql_policy),
                     current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
@@ -14824,9 +14866,11 @@ impl OracleDispatcher {
                     execute_grants: &state.execute_grants,
                     scoped_grants: &state.scoped_grants,
                     grant_binding: &grant_binding,
+                impact_generations: impact_generations(&state, context),
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
                     sql_policy: sql_policy.as_ref(),
+                sql_policy_provider: Some(&self.sql_policy),
                     current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
@@ -14864,9 +14908,11 @@ impl OracleDispatcher {
                     execute_grants: &state.execute_grants,
                     scoped_grants: &state.scoped_grants,
                     grant_binding: &grant_binding,
+                impact_generations: impact_generations(&state, context),
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
                     sql_policy: sql_policy.as_ref(),
+                sql_policy_provider: Some(&self.sql_policy),
                     current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
@@ -14894,9 +14940,11 @@ impl OracleDispatcher {
                     execute_grants: &state.execute_grants,
                     scoped_grants: &state.scoped_grants,
                     grant_binding: &grant_binding,
+                impact_generations: impact_generations(&state, context),
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
                     sql_policy: sql_policy.as_ref(),
+                sql_policy_provider: Some(&self.sql_policy),
                     current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
@@ -14924,9 +14972,11 @@ impl OracleDispatcher {
                     execute_grants: &state.execute_grants,
                     scoped_grants: &state.scoped_grants,
                     grant_binding: &grant_binding,
+                impact_generations: impact_generations(&state, context),
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
                     sql_policy: sql_policy.as_ref(),
+                sql_policy_provider: Some(&self.sql_policy),
                     current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
@@ -14954,9 +15004,11 @@ impl OracleDispatcher {
                     execute_grants: &state.execute_grants,
                     scoped_grants: &state.scoped_grants,
                     grant_binding: &grant_binding,
+                impact_generations: impact_generations(&state, context),
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
                     sql_policy: sql_policy.as_ref(),
+                sql_policy_provider: Some(&self.sql_policy),
                     current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
@@ -16256,7 +16308,7 @@ impl OracleDispatcher {
                 let relation_security = read.relation_security;
                 read_executor::append_view_proof_admission_audit(
                     cx, conn,
-                    AuditEntryCtx { auditor: self.auditor.as_deref(), subject: &request_subject, db_evidence: None },
+                    AuditEntryCtx { auditor: self.auditor.as_deref(), subject: &request_subject, db_evidence: None, impact: None },
                     "oracle_explain_plan", &a.sql, &read.view_proofs,
                 ).await?;
                 if fga_evidence == FgaEvidence::Unavailable {
@@ -16265,6 +16317,7 @@ impl OracleDispatcher {
                             auditor: self.auditor.as_deref(),
                             subject: &request_subject,
                             db_evidence: None,
+                            impact: None,
                         },
                         "oracle_explain_plan",
                     )?;
@@ -16274,6 +16327,7 @@ impl OracleDispatcher {
                         auditor: self.auditor.as_deref(),
                         subject: &request_subject,
                         db_evidence: None,
+                        impact: None,
                     },
                     "oracle_explain_plan",
                     &relation_security,
@@ -16307,6 +16361,7 @@ impl OracleDispatcher {
                     auditor: self.auditor.as_deref(),
                     subject: &request_subject,
                     db_evidence: audit_db_evidence.as_ref(),
+                    impact: None,
                 };
                 let audit_transcript = explain_plan_audit_transcript(
                     &a.sql,
@@ -16326,6 +16381,7 @@ impl OracleDispatcher {
                             auditor: self.auditor.as_deref(),
                             subject: &request_subject,
                             db_evidence: None,
+                            impact: None,
                         },
                         "oracle_explain_plan",
                         hard_parse_observation,
@@ -16456,9 +16512,11 @@ impl OracleDispatcher {
                             execute_grants: &state.execute_grants,
                             scoped_grants: &state.scoped_grants,
                             grant_binding: &grant_binding,
+                impact_generations: impact_generations(&state, context),
                             write_intents: self.write_intents.as_deref(),
                             catalog_cache: &state.catalog_cache,
                             sql_policy: sql_policy.as_ref(),
+                sql_policy_provider: Some(&self.sql_policy),
                             current_schema: current_schema.as_deref(),
                             audit,
                             quarantine: &self.quarantine,

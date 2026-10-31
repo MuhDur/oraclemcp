@@ -25,7 +25,7 @@ impl AuditSink for SharedSink {
     }
 }
 
-fn auditor_with_sink() -> (Arc<Auditor>, Arc<MemoryAuditSink>) {
+pub(super) fn auditor_with_sink() -> (Arc<Auditor>, Arc<MemoryAuditSink>) {
     let sink = Arc::new(MemoryAuditSink::new());
     let key = SigningKey::new("test-key", b"0123456789abcdef0123456789abcdef".to_vec())
         .expect("valid test key");
@@ -72,6 +72,7 @@ pub(super) async fn generated_read_guard_refusal_with_audit(
                 auditor: Some(&auditor),
                 subject: &subject,
                 db_evidence: None,
+                impact: None,
             },
             tool: "oracle_describe",
             quarantine: &quarantine,
@@ -287,6 +288,7 @@ fn serialized_audit_failure_cause_omits_error_sql_and_identifiers() {
             auditor: Some(&auditor),
             subject: &subject,
             db_evidence: None,
+            impact: None,
         },
         "oracle_describe",
         "SELECT 1 FROM dual",
@@ -583,6 +585,7 @@ fn issue46_failed_degradation_audit_does_not_cache_unaudited_capability() {
             auditor: Some(&auditor),
             subject: &subject,
             db_evidence: None,
+            impact: None,
         };
         for attempt in 1..=2 {
             let error = observed_scn_for_audit(&cx, &connection, &cache, ctx)
@@ -609,6 +612,7 @@ fn issue46_failed_degradation_audit_does_not_cache_unaudited_capability() {
             auditor: Some(&healthy_auditor),
             subject: &subject,
             db_evidence: None,
+            impact: None,
         };
         for _ in 0..2 {
             assert_eq!(
@@ -651,6 +655,7 @@ fn issue46_reconnect_reprobes_once() {
             auditor: Some(&auditor),
             subject: &subject,
             db_evidence: None,
+            impact: None,
         };
         assert_eq!(
             observed_scn_for_audit(&cx, &connection, &cache, ctx)
@@ -691,6 +696,7 @@ fn scn_never_substitutes_v_database() {
             auditor: Some(&auditor),
             subject: &subject,
             db_evidence: None,
+            impact: None,
         };
         assert_eq!(
             observed_scn_for_audit(&cx, &connection, &cache, ctx)
@@ -1397,14 +1403,31 @@ fn broker_confirmation_intents_are_distinct_across_sessions_and_generations() {
     let mut intent_ids = Vec::new();
     for (binding, sql) in cases {
         let grants = ExecGrantStore::new();
-        let confirm =
-            issue_confirmation_grant(&grants, &binding, Some("shared"), sql, OperatingLevel::Ddl);
+        let material = oraclemcp_guard::GrantMaterial::new(
+            sql,
+            &local_impact(
+                sql,
+                ImpactGenerations {
+                    profile: binding.generation,
+                    lane: binding.generation,
+                },
+            ),
+        )
+        .unwrap();
+        let confirm = issue_confirmation_grant(
+            &grants,
+            &binding,
+            Some("shared"),
+            &material,
+            OperatingLevel::Ddl,
+        );
         raw_ids.push(
             verify_execute_grant_reference(&confirm, &binding, Some("shared"), OperatingLevel::Ddl)
-                .unwrap(),
+                .unwrap()
+                .raw_id,
         );
         let key = consume_confirmation_grant(ConfirmationGrantRequest {
-            material: sql,
+            material: &material,
             required_level: OperatingLevel::Ddl,
             active_profile: Some("shared"),
             grants: &grants,

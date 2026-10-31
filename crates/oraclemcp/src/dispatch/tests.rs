@@ -3381,6 +3381,7 @@ impl OracleConnection for PingFailingMock {
 
 #[derive(Default)]
 struct ExecState {
+    impact_schema_epoch: AtomicUsize,
     mutation_catalog_unreadable: AtomicBool,
     impact_count: Mutex<Option<u64>>,
     impact_read_error: Mutex<Option<DbError>>,
@@ -3806,6 +3807,15 @@ impl OracleConnection for ExecRecordingMock {
             .lock()
             .expect("query mutex")
             .push(sql.to_owned());
+        if sql == CatalogQueryId::SessionContext.spec().sql
+            && self.state.impact_schema_epoch.load(Ordering::SeqCst) != 0
+        {
+            return Ok(vec![semantic_row(&[
+                ("SESSION_USER", Some("APP")),
+                ("CURRENT_SCHEMA", Some("APP_DRIFT")),
+                ("EDITION_NAME", Some("ORA$BASE")),
+            ])]);
+        }
         if sql.to_ascii_lowercase().contains("dbms_xplan.display")
             && self.state.explain_display_error.load(Ordering::SeqCst)
         {
@@ -7614,10 +7624,26 @@ fn custom_tool_write_runs_with_confirmation_on_writable_profile() {
         executed[0].1,
         vec![OracleBind::String("Acme".to_owned()), OracleBind::I64(7)]
     );
+    let queries = state.queried.lock().expect("queried mutex");
     assert_eq!(
-        *state.queried.lock().expect("queried mutex"),
-        preview_queries,
-        "confirmation and apply add no candidate reads"
+        &queries[..preview_queries.len()],
+        preview_queries.as_slice()
+    );
+    let expected_fact_reads = [
+        CatalogQueryId::SessionContext.spec().sql,
+        CatalogQueryId::PdbIdentity.spec().sql,
+        CatalogQueryId::DependentsTransitive.spec().sql,
+        CatalogQueryId::ClosureCompilerSettings.spec().sql,
+        CatalogQueryId::ClosureTriggers.spec().sql,
+    ]
+    .repeat(4)
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    assert_eq!(
+        &queries[preview_queries.len()..],
+        expected_fact_reads.as_slice(),
+        "confirmation refusals/apply add only their bounded closed fact reads, never a candidate read"
     );
 }
 
@@ -9296,17 +9322,22 @@ fn edition_lifecycle_executes_a_legal_linear_child_and_retires_it_through_ddl_ga
     let queries = state.queries.lock().expect("edition query mutex");
     assert_eq!(
         queries.len(),
-        2,
-        "the lazy PDB identity read and one-child check must precede CREATE"
+        8,
+        "coordination, one-child preflight and three bounded context checkpoints must precede CREATE"
     );
+    let child_queries = queries
+        .iter()
+        .filter(|(sql, _)| sql.to_ascii_lowercase().contains("from sys.all_editions"))
+        .collect::<Vec<_>>();
+    assert_eq!(child_queries.len(), 1);
     assert!(
-        queries[1]
+        child_queries[0]
             .0
             .to_ascii_lowercase()
             .contains("from sys.all_editions")
     );
     assert_eq!(
-        queries[1].1,
+        child_queries[0].1,
         vec![OracleBind::String("LEGAL_PARENT".to_owned())],
         "the parent is a positional bind, never SQL interpolation"
     );
@@ -9359,8 +9390,8 @@ fn edition_second_child_is_refused_before_oracle_with_a_typed_one_child_envelope
     );
     assert_eq!(
         state.queries.lock().expect("edition query mutex").len(),
-        2,
-        "the lazy PDB identity read occurs only on the edition proposal path before its one-child preflight"
+        4,
+        "the preview context facts and lazy PDB identity precede the one-child refusal; apply fact reads never start"
     );
     assert!(
         state
@@ -9468,14 +9499,13 @@ fn edition_service_owned_reservation_refuses_a_second_session_before_dictionary_
     let queries = state.queries.lock().expect("edition query mutex");
     assert_eq!(
         queries.len(),
-        1,
-        "only the lazy PDB identity read is permitted"
+        3,
+        "only preview context facts and the lazy PDB identity read are permitted"
     );
     assert!(
-        !queries[0]
-            .0
-            .to_ascii_lowercase()
-            .contains("from sys.all_editions"),
+        queries
+            .iter()
+            .all(|(sql, _)| !sql.to_ascii_lowercase().contains("from sys.all_editions")),
         "the local reservation resolves the concurrent conflict before the edition dictionary preflight"
     );
     assert!(

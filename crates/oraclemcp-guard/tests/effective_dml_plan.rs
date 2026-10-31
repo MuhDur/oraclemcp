@@ -746,3 +746,75 @@ fn dml_shape_requires_the_exact_resolved_target() {
     target.identity.object_id = 0;
     assert!(impact_shape("DELETE FROM APP.ORDERS WHERE ID=1", &target).is_err());
 }
+
+#[test]
+fn exec_grant_effective_plan_drift_is_non_consuming() {
+    use oraclemcp_guard::{ExecGrantError, ExecGrantStore, GrantMaterial};
+    let base = plan_with(
+        vec!["P1".into(), "P2".into()],
+        [1; 32],
+        [2; 32],
+        "TENANT_ID = 3",
+        5,
+    );
+    let mut impact = ImpactBindingV1::default();
+    impact.decisive.bind_effective_plan(&base);
+    let approved = GrantMaterial::new("opaque-action-envelope", &impact).unwrap();
+    for changed in [
+        plan_with(
+            vec!["P2".into(), "P1".into()],
+            [1; 32],
+            [2; 32],
+            "TENANT_ID = 3",
+            5,
+        ),
+        plan_with(
+            vec!["P1".into(), "P2".into()],
+            [3; 32],
+            [2; 32],
+            "TENANT_ID = 3",
+            5,
+        ),
+        plan_with(
+            vec!["P1".into(), "P2".into()],
+            [1; 32],
+            [4; 32],
+            "TENANT_ID = 3",
+            5,
+        ),
+        plan_with(
+            vec!["P1".into(), "P2".into()],
+            [1; 32],
+            [2; 32],
+            "TENANT_ID = 4",
+            5,
+        ),
+        plan_with(
+            vec!["P1".into(), "P2".into()],
+            [1; 32],
+            [2; 32],
+            "TENANT_ID = 3",
+            4,
+        ),
+    ] {
+        let mut drifted = impact.clone();
+        drifted.decisive.bind_effective_plan(&changed);
+        let drifted = GrantMaterial::new("opaque-action-envelope", &drifted).unwrap();
+        let binding = ExecGrantBinding::new("session", "lane", "subject", 3);
+        let grants = ExecGrantStore::new();
+        let token = grants.issue(
+            approved.clone(),
+            binding.clone(),
+            OperatingLevel::ReadWrite,
+            Duration::from_secs(60),
+        );
+        assert_eq!(
+            grants.consume(&token, &drifted, &binding, OperatingLevel::ReadWrite),
+            Err(ExecGrantError::DecisiveMismatch)
+        );
+        assert_eq!(
+            grants.consume(&token, &approved, &binding, OperatingLevel::ReadWrite),
+            Ok(OperatingLevel::ReadWrite)
+        );
+    }
+}

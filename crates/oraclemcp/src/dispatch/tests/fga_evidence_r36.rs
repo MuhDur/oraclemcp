@@ -284,6 +284,7 @@ fn hard_parse_evidence_unavailable_has_a_readable_signed_record() {
             auditor: Some(&auditor),
             subject: &subject,
             db_evidence: None,
+            impact: None,
         },
         "oracle_explain_plan",
         true,

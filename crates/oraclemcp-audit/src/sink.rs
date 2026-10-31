@@ -40,8 +40,9 @@ use std::os::windows::fs::OpenOptionsExt;
 use crate::anchor::{AnchorFile, ChainAnchor};
 use crate::keyring::AuditKeyring;
 use crate::record::{
-    AuditCorrelation, AuditEntryDraft, AuditFailureCause, AuditFailureCauseError, AuditRecord,
-    AuditVerdictCertificate, BoundAuditVerdictCertificate, GENESIS_HASH, SigningKey,
+    AuditCorrelation, AuditEntryDraft, AuditFailureCause, AuditFailureCauseError,
+    AuditImpactBinding, AuditRecord, AuditVerdictCertificate, BoundAuditVerdictCertificate,
+    GENESIS_HASH, SigningKey,
 };
 use crate::rekor::{AsyncRekorAnchor, AuditChainHead};
 use crate::verify::{BrokenReason, ChainVerifier, JsonlError, JsonlReader, VerifyOutcome};
@@ -166,6 +167,9 @@ pub enum AuditError {
     /// certificate.
     #[error("invalid verdict certificate core hash")]
     InvalidVerdictCertificateCoreHash,
+    /// An approval fingerprint was not a canonical SHA-256 digest.
+    #[error("invalid impact binding digest")]
+    InvalidImpactBinding,
     /// A failure cause failed the category-token/ORA-code redaction checks.
     #[error(transparent)]
     InvalidFailureCause(#[from] AuditFailureCauseError),
@@ -3283,6 +3287,7 @@ impl Auditor {
             None,
             None,
             Some(failure),
+            None,
         )
     }
 
@@ -3317,6 +3322,7 @@ impl Auditor {
             core_hash.as_deref(),
             verdict_certificate,
             Some(failure),
+            None,
         )
     }
 
@@ -3376,6 +3382,7 @@ impl Auditor {
             verdict_certificate_core_hash,
             None,
             None,
+            None,
         )
     }
 
@@ -3402,6 +3409,47 @@ impl Auditor {
             core_hash.as_deref(),
             verdict_certificate,
             None,
+            None,
+        )
+    }
+
+    /// Durably append the statement and decisive digests at an approval
+    /// checkpoint, optionally retaining the classifier's verdict certificate.
+    pub fn append_with_impact(
+        &self,
+        draft: &AuditEntryDraft,
+        timestamp: String,
+        durable: bool,
+        impact: AuditImpactBinding,
+        verdict_certificate: Option<&AuditVerdictCertificate>,
+        failure: Option<AuditFailureCause>,
+    ) -> Result<AuditRecord, AuditError> {
+        if !is_canonical_sha256(&impact.statement_digest)
+            || !is_canonical_sha256(&impact.decisive_digest)
+        {
+            return Err(AuditError::InvalidImpactBinding);
+        }
+        if let Some(failure) = &failure {
+            if draft.outcome != crate::AuditOutcome::Failed {
+                return Err(AuditError::FailureCauseOnNonFailure);
+            }
+            if !failure.is_redaction_safe() {
+                return Err(AuditError::InvalidFailureCause(
+                    AuditFailureCauseError::InvalidCategory,
+                ));
+            }
+        }
+        let core_hash = verdict_certificate.map(AuditVerdictCertificate::core_hash);
+        self.append_correlated_with_observed_scn_and_certificate_internal(
+            draft,
+            timestamp,
+            durable,
+            None,
+            None,
+            core_hash.as_deref(),
+            verdict_certificate,
+            failure,
+            Some(impact),
         )
     }
 
@@ -3416,6 +3464,7 @@ impl Auditor {
         verdict_certificate_core_hash: Option<&str>,
         verdict_certificate: Option<&AuditVerdictCertificate>,
         failure: Option<AuditFailureCause>,
+        impact: Option<AuditImpactBinding>,
     ) -> Result<AuditRecord, AuditError> {
         if verdict_certificate_core_hash.is_some_and(|hash| !is_canonical_sha256(hash)) {
             return Err(AuditError::InvalidVerdictCertificateCoreHash);
@@ -3440,6 +3489,10 @@ impl Auditor {
                 verdict_certificate_core_hash.map(str::to_owned),
                 failure,
             );
+        let record = match impact {
+            Some(impact) => record.bind_impact(impact, self.keyring.active()),
+            None => record,
+        };
         let bound_certificate = verdict_certificate
             .cloned()
             .map(|certificate| certificate.bind_to_record(&record))

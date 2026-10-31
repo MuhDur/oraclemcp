@@ -74,7 +74,11 @@ fn authorization_digests_preserve_semantic_whitespace() {
     let binding = ExecGrantBinding::new("session", "lane", "subject", 7);
     let grants = ExecGrantStore::new();
     let grant = grants.issue(
-        QUOTED_IDENTIFIER_TWO_SPACES,
+        oraclemcp_guard::GrantMaterial::new(
+            QUOTED_IDENTIFIER_TWO_SPACES,
+            &oraclemcp_guard::ImpactBindingV1::default(),
+        )
+        .unwrap(),
         binding.clone(),
         OperatingLevel::ReadWrite,
         Duration::from_secs(60),
@@ -82,7 +86,11 @@ fn authorization_digests_preserve_semantic_whitespace() {
     assert_eq!(
         grants.consume(
             &grant,
-            QUOTED_IDENTIFIER_ONE_SPACE,
+            &oraclemcp_guard::GrantMaterial::new(
+                QUOTED_IDENTIFIER_ONE_SPACE,
+                &oraclemcp_guard::ImpactBindingV1::default()
+            )
+            .unwrap(),
             &binding,
             OperatingLevel::ReadWrite,
         ),

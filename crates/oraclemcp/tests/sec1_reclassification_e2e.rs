@@ -55,6 +55,25 @@ fn catalog_row(columns: &[(&str, Option<&str>)]) -> OracleRow {
 }
 
 fn sample_rows_catalog(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>> {
+    // Approval revalidation observes the closed catalog before the deliberately
+    // uncertain sample read. Those observations must not consume its fault.
+    if sql == oraclemcp_db::CatalogQueryId::PdbIdentity.spec().sql {
+        return Some(vec![catalog_row(&[
+            ("DBID", Some("424242")),
+            ("CON_UID", Some("3")),
+        ])]);
+    }
+    if [
+        oraclemcp_db::CatalogQueryId::DependentsTransitive,
+        oraclemcp_db::CatalogQueryId::DependentsTransitiveVisible,
+        oraclemcp_db::CatalogQueryId::ClosureCompilerSettings,
+        oraclemcp_db::CatalogQueryId::DdlTriggers,
+    ]
+    .iter()
+    .any(|id| sql == id.spec().sql)
+    {
+        return Some(Vec::new());
+    }
     if sql
         == oraclemcp_db::CatalogQueryId::FgaPoliciesForRelations32
             .spec()

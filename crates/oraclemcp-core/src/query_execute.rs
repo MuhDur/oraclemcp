@@ -26,8 +26,8 @@
 use oraclemcp_audit::{AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{
-    BlockReason, Classifier, ExecGrantBinding, ExecGrantError, ExecGrantStore, GuardDecision,
-    LevelDecision, OperatingLevel, SessionLevelState,
+    BlockReason, Classifier, ExecGrantBinding, ExecGrantError, ExecGrantStore, GrantMaterial,
+    GuardDecision, ImpactBindingV1, LevelDecision, OperatingLevel, SessionLevelState,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -35,6 +35,8 @@ use serde_json::{Value, json};
 /// Runs a pre-classified, pre-approved statement at the granted operating level
 /// (engine/DB-side, within the consuming session's lease transaction).
 pub trait StatementExecutor: Send + Sync {
+    /// Re-read bounded decisive facts, without executing or analyzing the statement.
+    fn impact_binding(&self, sql: &str) -> Result<ImpactBindingV1, ErrorEnvelope>;
     /// Execute `sql` at `level`; return rows affected.
     fn execute(&self, sql: &str, level: OperatingLevel) -> Result<u64, ErrorEnvelope>;
 }
@@ -89,9 +91,13 @@ fn grant_error_to_envelope(e: ExecGrantError) -> ErrorEnvelope {
             "execution grant has expired; request a fresh approval",
         )
         .with_next_step("re-run oracle_query and complete the step-up to mint a new grant"),
+        ExecGrantError::DecisiveMismatch => ErrorEnvelope::new(
+            ErrorClass::RepreviewRequired,
+            "REPREVIEW_REQUIRED: decisive impact facts changed",
+        ),
         ExecGrantError::DigestMismatch => ErrorEnvelope::new(
-            ErrorClass::InvalidArguments,
-            "sql does not match the approved statement (digest mismatch)",
+            ErrorClass::RepreviewRequired,
+            "REPREVIEW_REQUIRED: SQL does not match the approved statement",
         ),
         ExecGrantError::SessionMismatch => ErrorEnvelope::new(
             ErrorClass::RuntimeStateRequired,
@@ -248,8 +254,15 @@ pub fn oracle_query_execute(
         params.subject_id.clone(),
         params.generation,
     );
+    let impact = executor.impact_binding(&params.sql)?;
+    let material = GrantMaterial::new(&params.sql, &impact).map_err(|_| {
+        ErrorEnvelope::new(
+            ErrorClass::RepreviewRequired,
+            "impact binding version changed",
+        )
+    })?;
     let granted = grants
-        .consume(&params.token, &params.sql, &binding, requested)
+        .consume(&params.token, &material, &binding, requested)
         .map_err(grant_error_to_envelope)?;
 
     // 2) fsync-before-execute: durably log the approved statement BEFORE it runs,
@@ -269,18 +282,43 @@ pub fn oracle_query_execute(
         outcome: AuditOutcome::Pending,
     };
     auditor
-        .append_correlated_with_observed_scn_and_verdict_certificate(
+        .append_with_impact(
             &pre,
             now(),
             true,
-            None,
-            None,
+            oraclemcp_audit::AuditImpactBinding {
+                statement_digest: oraclemcp_guard::sql_digest(&params.sql),
+                decisive_digest: format!(
+                    "sha256:{}",
+                    material
+                        .decisive_digest
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                ),
+                revalidated_at: oraclemcp_audit::AuditRevalidationStage::BeforeConsume,
+            },
             Some(&audit_certificate),
+            None,
         )
         .map_err(audit_error_to_envelope)?;
 
     // 3) Execute exactly the approved statement at the granted level.
-    let result = executor.execute(&params.sql, granted);
+    let result = executor.impact_binding(&params.sql).and_then(|current| {
+        let current = GrantMaterial::new(&params.sql, &current).map_err(|_| {
+            ErrorEnvelope::new(
+                ErrorClass::RepreviewRequired,
+                "impact binding version changed",
+            )
+        })?;
+        if current != material {
+            return Err(ErrorEnvelope::new(
+                ErrorClass::RepreviewRequired,
+                "REPREVIEW_REQUIRED: decisive impact facts changed before execution",
+            ));
+        }
+        executor.execute(&params.sql, granted)
+    });
 
     // 4) Durably log the outcome (append-only; the chain is the record of truth).
     let (outcome, rows) = match &result {
@@ -300,13 +338,28 @@ pub fn oracle_query_execute(
         outcome,
     };
     auditor
-        .append_correlated_with_observed_scn_and_verdict_certificate(
+        .append_with_impact(
             &post,
             now(),
             true,
-            None,
-            None,
+            oraclemcp_audit::AuditImpactBinding {
+                statement_digest: oraclemcp_guard::sql_digest(&params.sql),
+                decisive_digest: format!(
+                    "sha256:{}",
+                    material
+                        .decisive_digest
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                ),
+                revalidated_at: if result.is_ok() {
+                    oraclemcp_audit::AuditRevalidationStage::BeforeExecute
+                } else {
+                    oraclemcp_audit::AuditRevalidationStage::BeforeConsume
+                },
+            },
             Some(&audit_certificate),
+            None,
         )
         .map_err(audit_error_to_envelope)?;
 
@@ -350,6 +403,9 @@ mod tests {
         }
     }
     impl StatementExecutor for MockExecutor {
+        fn impact_binding(&self, _sql: &str) -> Result<ImpactBindingV1, ErrorEnvelope> {
+            Ok(ImpactBindingV1::default())
+        }
         fn execute(&self, _sql: &str, _level: OperatingLevel) -> Result<u64, ErrorEnvelope> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.result
@@ -402,6 +458,10 @@ mod tests {
 
     const SQL: &str = "UPDATE orders SET status='X' WHERE id=42";
 
+    fn material(sql: &str) -> GrantMaterial {
+        GrantMaterial::new(sql, &ImpactBindingV1::default()).expect("binding version")
+    }
+
     fn binding() -> ExecGrantBinding {
         ExecGrantBinding::new("sess-1", "lane-1", "subject-1", 1)
     }
@@ -442,7 +502,7 @@ mod tests {
     fn valid_grant_executes_once_and_audits_pre_and_post() {
         let grants = ExecGrantStore::new();
         let tok = grants.issue(
-            SQL,
+            material(SQL),
             binding(),
             OperatingLevel::ReadWrite,
             Duration::from_secs(60),
@@ -507,7 +567,7 @@ mod tests {
     fn digest_mismatch_does_not_execute() {
         let grants = ExecGrantStore::new();
         let tok = grants.issue(
-            SQL,
+            material(SQL),
             binding(),
             OperatingLevel::ReadWrite,
             Duration::from_secs(60),
@@ -525,7 +585,7 @@ mod tests {
             clock(),
         )
         .expect_err("digest mismatch");
-        assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+        assert_eq!(err.error_class, ErrorClass::RepreviewRequired);
         assert_eq!(exec.call_count(), 0);
         assert!(
             sink.records().is_empty(),
@@ -538,7 +598,7 @@ mod tests {
         let sql = "SELECT app_seq.NEXTVAL FROM dual";
         let grants = ExecGrantStore::new();
         let tok = grants.issue(
-            sql,
+            material(sql),
             binding(),
             OperatingLevel::ReadWrite,
             Duration::from_secs(60),
@@ -563,7 +623,7 @@ mod tests {
         assert!(sink.records().is_empty());
         assert!(
             grants
-                .consume(&tok, sql, &binding(), OperatingLevel::ReadWrite,)
+                .consume(&tok, &material(sql), &binding(), OperatingLevel::ReadWrite,)
                 .is_ok(),
             "the structural refusal must happen before consuming the single-use grant"
         );
@@ -573,7 +633,7 @@ mod tests {
     fn stale_generation_does_not_execute() {
         let grants = ExecGrantStore::new();
         let tok = grants.issue(
-            SQL,
+            material(SQL),
             binding(),
             OperatingLevel::ReadWrite,
             Duration::from_secs(60),
@@ -620,7 +680,7 @@ mod tests {
     fn requesting_above_grant_is_rejected() {
         let grants = ExecGrantStore::new();
         let tok = grants.issue(
-            "DROP TABLE t",
+            material("DROP TABLE t"),
             binding(),
             OperatingLevel::ReadWrite,
             Duration::from_secs(60),
@@ -646,7 +706,7 @@ mod tests {
     fn executor_failure_is_audited_as_failed_and_propagated() {
         let grants = ExecGrantStore::new();
         let tok = grants.issue(
-            SQL,
+            material(SQL),
             binding(),
             OperatingLevel::ReadWrite,
             Duration::from_secs(60),
@@ -683,7 +743,7 @@ mod tests {
         let grants = ExecGrantStore::new();
         // A perfectly valid grant for the UPDATE at READ_WRITE.
         let tok = grants.issue(
-            SQL,
+            material(SQL),
             binding(),
             OperatingLevel::ReadWrite,
             Duration::from_secs(60),

@@ -140,6 +140,17 @@ fn envelope_action_kind_mismatch_refused() {
     let grants = ExecGrantStore::new();
     let binding = ExecGrantBinding::new("session", "lane", "subject", 1);
     let preview_material = ddl_action_material(sql, ActionKind::CreateOrReplace, None);
+    let preview_material = oraclemcp_guard::GrantMaterial::new(
+        &preview_material,
+        &local_impact(
+            &preview_material,
+            ImpactGenerations {
+                profile: binding.generation,
+                lane: binding.generation,
+            },
+        ),
+    )
+    .unwrap();
     let token = issue_confirmation_grant(
         &grants,
         &binding,
@@ -148,6 +159,17 @@ fn envelope_action_kind_mismatch_refused() {
         OperatingLevel::Ddl,
     );
     let apply_material = ddl_action_material(sql, ActionKind::ExecuteDdlAdmin, None);
+    let apply_material = oraclemcp_guard::GrantMaterial::new(
+        &apply_material,
+        &local_impact(
+            &apply_material,
+            ImpactGenerations {
+                profile: binding.generation,
+                lane: binding.generation,
+            },
+        ),
+    )
+    .unwrap();
     let error = consume_execute_confirmation(
         &apply_material,
         OperatingLevel::Ddl,
@@ -1410,5 +1432,133 @@ mod qa85_terminal_boundaries {
             .expect_err("uncertain optional diagnostic quarantines later reuse");
         assert_eq!(later.error_class, ErrorClass::RuntimeStateRequired);
         assert!(later.message.contains("quarantined"), "{}", later.message);
+    }
+}
+
+#[test]
+fn revalidate_served_final_checkpoint_prevents_execution_after_consume() {
+    use oraclemcp_audit::{AuditError, AuditRecord, AuditSink, SigningKey};
+    struct DriftOnAttempt(Arc<ExecState>);
+    impl AuditSink for DriftOnAttempt {
+        fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
+            if record.tool == "oracle_execute" && record.outcome == AuditOutcome::Pending {
+                self.0.impact_schema_epoch.store(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+        fn flush(&self) -> Result<(), AuditError> {
+            Ok(())
+        }
+    }
+    let (dispatcher, state) = dispatcher();
+    let token = confirm(
+        &dispatcher,
+        json!({"sql": UPDATE, "binds": ["Ada", 7], "commit": true}),
+    );
+    let auditor = Arc::new(Auditor::new(
+        Box::new(DriftOnAttempt(state.clone())),
+        SigningKey::new("final-impact", vec![9; 32]).unwrap(),
+    ));
+    let dispatcher = dispatcher.with_auditor(auditor);
+    let error = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({
+                "sql": UPDATE, "binds": ["Ada", 7], "commit": true, "confirm": token,
+            }),
+        )
+        .expect_err("facts changed by the pre-execution audit callback must refuse");
+    assert_eq!(error.error_class, ErrorClass::RepreviewRequired);
+    assert_eq!(error.statement_outcome, Some(StatementOutcome::NotStarted));
+    assert!(state.executed.lock().unwrap().is_empty());
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn preview_signs_the_exact_displayed_decisive_binding() {
+    let (dispatcher, _) = dispatcher();
+    let preview = dispatcher
+        .dispatch(
+            "oracle_preview_sql",
+            json!({"sql": UPDATE, "binds": ["Ada", 7], "commit": true}),
+        )
+        .unwrap();
+    let binding: oraclemcp_guard::ImpactBindingV1 =
+        serde_json::from_value(preview["impact"]["binding"].clone()).unwrap();
+    let token = preview["execute_confirmation"]["confirm"].as_str().unwrap();
+    let signed_digest = token
+        .rsplit_once('.')
+        .unwrap()
+        .0
+        .rsplit_once('~')
+        .unwrap()
+        .1;
+    let expected = binding
+        .decisive_digest()
+        .unwrap()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(signed_digest, expected);
+}
+
+#[test]
+fn unchanged_served_impact_round_trip_audits_both_digests() {
+    let (dispatcher, state) = dispatcher();
+    let (auditor, sink) = super::audit_wiring::auditor_with_sink();
+    let dispatcher = dispatcher.with_auditor(auditor);
+    let preview = dispatcher
+        .dispatch(
+            "oracle_preview_sql",
+            json!({"sql": UPDATE, "binds": ["Ada", 7], "commit": true}),
+        )
+        .unwrap();
+    let impact: oraclemcp_guard::ImpactBindingV1 =
+        serde_json::from_value(preview["impact"]["binding"].clone()).unwrap();
+    let decisive = format!(
+        "sha256:{}",
+        impact
+            .decisive_digest()
+            .unwrap()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let result = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({"sql": UPDATE, "binds": ["Ada", 7],
+        "commit": true, "confirm": preview["execute_confirmation"]["confirm"]}),
+        )
+        .unwrap();
+    assert_eq!(result["executed"], true);
+    assert_eq!(state.executed.lock().unwrap().len(), 1);
+    let records = sink
+        .records()
+        .into_iter()
+        .filter(|record| record.tool == "oracle_execute")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        records.len(),
+        2,
+        "one durable attempt and one terminal record"
+    );
+    assert_eq!(records[0].outcome, AuditOutcome::Pending);
+    assert_eq!(
+        records[0].revalidated_at,
+        Some(oraclemcp_audit::AuditRevalidationStage::BeforeConsume)
+    );
+    assert_eq!(records[1].outcome, AuditOutcome::Succeeded);
+    assert_eq!(
+        records[1].revalidated_at,
+        Some(oraclemcp_audit::AuditRevalidationStage::BeforeExecute)
+    );
+    for record in records {
+        assert_eq!(
+            record.statement_digest.as_deref(),
+            Some(oraclemcp_guard::sql_digest(UPDATE).as_str())
+        );
+        assert_eq!(record.decisive_digest.as_deref(), Some(decisive.as_str()));
+        assert!(record.hash_is_valid());
     }
 }

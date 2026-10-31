@@ -130,6 +130,12 @@ struct CountingExecutor {
 }
 
 impl StatementExecutor for CountingExecutor {
+    fn impact_binding(
+        &self,
+        _sql: &str,
+    ) -> Result<oraclemcp_guard::ImpactBindingV1, ErrorEnvelope> {
+        Ok(oraclemcp_guard::ImpactBindingV1::default())
+    }
     fn execute(&self, _sql: &str, _level: OperatingLevel) -> Result<u64, ErrorEnvelope> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(1)
@@ -181,7 +187,8 @@ fn switch_generation_invalidates_stale_grants_and_subject_mix() {
     let grants = ExecGrantStore::new();
     let binding = ExecGrantBinding::new("sid-a", "lane-a", "subject-a", 1);
     let token = grants.issue(
-        sql,
+        oraclemcp_guard::GrantMaterial::new(sql, &oraclemcp_guard::ImpactBindingV1::default())
+            .expect("binding version"),
         binding,
         OperatingLevel::ReadWrite,
         Duration::from_secs(60),

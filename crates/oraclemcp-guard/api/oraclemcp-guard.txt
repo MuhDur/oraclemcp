@@ -2317,6 +2317,7 @@ pub fn oraclemcp_guard::enforcement::read_only_setup_statements(oraclemcp_guard:
 pub fn oraclemcp_guard::enforcement::requires_change_request(&str, bool) -> bool
 pub mod oraclemcp_guard::exec_grant
 #[non_exhaustive] pub enum oraclemcp_guard::exec_grant::ExecGrantError
+pub oraclemcp_guard::exec_grant::ExecGrantError::DecisiveMismatch
 pub oraclemcp_guard::exec_grant::ExecGrantError::DigestMismatch
 pub oraclemcp_guard::exec_grant::ExecGrantError::Expired
 pub oraclemcp_guard::exec_grant::ExecGrantError::GenerationMismatch
@@ -2440,12 +2441,14 @@ pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::vzip(self) -> V
 pub struct oraclemcp_guard::exec_grant::ExecGrantStore
 impl oraclemcp_guard::exec_grant::ExecGrantStore
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::clear(&self)
-pub fn oraclemcp_guard::exec_grant::ExecGrantStore::consume(&self, &str, &str, &oraclemcp_guard::exec_grant::ExecGrantBinding, oraclemcp_guard::levels::OperatingLevel) -> core::result::Result<oraclemcp_guard::levels::OperatingLevel, oraclemcp_guard::exec_grant::ExecGrantError>
-pub fn oraclemcp_guard::exec_grant::ExecGrantStore::issue(&self, &str, oraclemcp_guard::exec_grant::ExecGrantBinding, oraclemcp_guard::levels::OperatingLevel, core::time::Duration) -> alloc::string::String
+pub fn oraclemcp_guard::exec_grant::ExecGrantStore::consume(&self, &str, &oraclemcp_guard::exec_grant::GrantMaterial, &oraclemcp_guard::exec_grant::ExecGrantBinding, oraclemcp_guard::levels::OperatingLevel) -> core::result::Result<oraclemcp_guard::levels::OperatingLevel, oraclemcp_guard::exec_grant::ExecGrantError>
+pub fn oraclemcp_guard::exec_grant::ExecGrantStore::issue(&self, oraclemcp_guard::exec_grant::GrantMaterial, oraclemcp_guard::exec_grant::ExecGrantBinding, oraclemcp_guard::levels::OperatingLevel, core::time::Duration) -> alloc::string::String
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::new() -> Self
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::purge_expired(&self) -> usize
 impl core::default::Default for oraclemcp_guard::exec_grant::ExecGrantStore
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::default() -> oraclemcp_guard::exec_grant::ExecGrantStore
+impl core::fmt::Debug for oraclemcp_guard::exec_grant::ExecGrantStore
+pub fn oraclemcp_guard::exec_grant::ExecGrantStore::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl !core::marker::Freeze for oraclemcp_guard::exec_grant::ExecGrantStore
 impl core::marker::Send for oraclemcp_guard::exec_grant::ExecGrantStore
 impl core::marker::Sync for oraclemcp_guard::exec_grant::ExecGrantStore
@@ -2480,6 +2483,62 @@ pub type oraclemcp_guard::exec_grant::ExecGrantStore::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::exec_grant::ExecGrantStore where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::exec_grant::ExecGrantStore where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::vzip(self) -> V
+pub struct oraclemcp_guard::exec_grant::GrantMaterial
+pub oraclemcp_guard::exec_grant::GrantMaterial::decisive_digest: [u8; 32]
+pub oraclemcp_guard::exec_grant::GrantMaterial::sql_digest: [u8; 32]
+impl oraclemcp_guard::exec_grant::GrantMaterial
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::digest(&self) -> [u8; 32]
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::new(&str, &oraclemcp_guard::impact_binding::ImpactBindingV1) -> core::result::Result<Self, oraclemcp_guard::impact_binding::ImpactVersionError>
+impl core::clone::Clone for oraclemcp_guard::exec_grant::GrantMaterial
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::clone(&self) -> oraclemcp_guard::exec_grant::GrantMaterial
+impl core::cmp::Eq for oraclemcp_guard::exec_grant::GrantMaterial
+impl core::cmp::PartialEq for oraclemcp_guard::exec_grant::GrantMaterial
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::eq(&self, &oraclemcp_guard::exec_grant::GrantMaterial) -> bool
+impl core::fmt::Debug for oraclemcp_guard::exec_grant::GrantMaterial
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::exec_grant::GrantMaterial
+impl core::marker::Freeze for oraclemcp_guard::exec_grant::GrantMaterial
+impl core::marker::Send for oraclemcp_guard::exec_grant::GrantMaterial
+impl core::marker::Sync for oraclemcp_guard::exec_grant::GrantMaterial
+impl core::marker::Unpin for oraclemcp_guard::exec_grant::GrantMaterial
+impl core::marker::UnsafeUnpin for oraclemcp_guard::exec_grant::GrantMaterial
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::exec_grant::GrantMaterial
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::exec_grant::GrantMaterial
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::exec_grant::GrantMaterial where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::exec_grant::GrantMaterial where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::exec_grant::GrantMaterial where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::exec_grant::GrantMaterial where U: core::convert::From<T>
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::exec_grant::GrantMaterial where U: core::convert::Into<T>
+pub type oraclemcp_guard::exec_grant::GrantMaterial::Error = core::convert::Infallible
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::exec_grant::GrantMaterial where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::exec_grant::GrantMaterial::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::exec_grant::GrantMaterial where T: core::clone::Clone
+pub type oraclemcp_guard::exec_grant::GrantMaterial::Owned = T
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::exec_grant::GrantMaterial
+impl<T> core::any::Any for oraclemcp_guard::exec_grant::GrantMaterial where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::exec_grant::GrantMaterial where T: ?core::marker::Sized
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::exec_grant::GrantMaterial where T: ?core::marker::Sized
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::exec_grant::GrantMaterial where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::exec_grant::GrantMaterial::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::exec_grant::GrantMaterial
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::exec_grant::GrantMaterial
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::exec_grant::GrantMaterial
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::exec_grant::GrantMaterial
+impl<T> typenum::type_operators::Same for oraclemcp_guard::exec_grant::GrantMaterial
+pub type oraclemcp_guard::exec_grant::GrantMaterial::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::exec_grant::GrantMaterial where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::exec_grant::GrantMaterial where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::vzip(self) -> V
 pub const oraclemcp_guard::exec_grant::MAX_LIVE_GRANTS: usize
 pub mod oraclemcp_guard::impact_binding
 pub enum oraclemcp_guard::impact_binding::FieldStatus<T>
@@ -14723,6 +14782,7 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::levels::EscalationError where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::levels::EscalationError::vzip(self) -> V
 #[non_exhaustive] pub enum oraclemcp_guard::ExecGrantError
+pub oraclemcp_guard::ExecGrantError::DecisiveMismatch
 pub oraclemcp_guard::ExecGrantError::DigestMismatch
 pub oraclemcp_guard::ExecGrantError::Expired
 pub oraclemcp_guard::ExecGrantError::GenerationMismatch
@@ -18371,12 +18431,14 @@ pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::vzip(self) -> V
 pub struct oraclemcp_guard::ExecGrantStore
 impl oraclemcp_guard::exec_grant::ExecGrantStore
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::clear(&self)
-pub fn oraclemcp_guard::exec_grant::ExecGrantStore::consume(&self, &str, &str, &oraclemcp_guard::exec_grant::ExecGrantBinding, oraclemcp_guard::levels::OperatingLevel) -> core::result::Result<oraclemcp_guard::levels::OperatingLevel, oraclemcp_guard::exec_grant::ExecGrantError>
-pub fn oraclemcp_guard::exec_grant::ExecGrantStore::issue(&self, &str, oraclemcp_guard::exec_grant::ExecGrantBinding, oraclemcp_guard::levels::OperatingLevel, core::time::Duration) -> alloc::string::String
+pub fn oraclemcp_guard::exec_grant::ExecGrantStore::consume(&self, &str, &oraclemcp_guard::exec_grant::GrantMaterial, &oraclemcp_guard::exec_grant::ExecGrantBinding, oraclemcp_guard::levels::OperatingLevel) -> core::result::Result<oraclemcp_guard::levels::OperatingLevel, oraclemcp_guard::exec_grant::ExecGrantError>
+pub fn oraclemcp_guard::exec_grant::ExecGrantStore::issue(&self, oraclemcp_guard::exec_grant::GrantMaterial, oraclemcp_guard::exec_grant::ExecGrantBinding, oraclemcp_guard::levels::OperatingLevel, core::time::Duration) -> alloc::string::String
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::new() -> Self
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::purge_expired(&self) -> usize
 impl core::default::Default for oraclemcp_guard::exec_grant::ExecGrantStore
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::default() -> oraclemcp_guard::exec_grant::ExecGrantStore
+impl core::fmt::Debug for oraclemcp_guard::exec_grant::ExecGrantStore
+pub fn oraclemcp_guard::exec_grant::ExecGrantStore::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl !core::marker::Freeze for oraclemcp_guard::exec_grant::ExecGrantStore
 impl core::marker::Send for oraclemcp_guard::exec_grant::ExecGrantStore
 impl core::marker::Sync for oraclemcp_guard::exec_grant::ExecGrantStore
@@ -18771,6 +18833,62 @@ pub type oraclemcp_guard::scoped_grant::GrantLimits::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::scoped_grant::GrantLimits where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::scoped_grant::GrantLimits where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::scoped_grant::GrantLimits::vzip(self) -> V
+pub struct oraclemcp_guard::GrantMaterial
+pub oraclemcp_guard::GrantMaterial::decisive_digest: [u8; 32]
+pub oraclemcp_guard::GrantMaterial::sql_digest: [u8; 32]
+impl oraclemcp_guard::exec_grant::GrantMaterial
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::digest(&self) -> [u8; 32]
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::new(&str, &oraclemcp_guard::impact_binding::ImpactBindingV1) -> core::result::Result<Self, oraclemcp_guard::impact_binding::ImpactVersionError>
+impl core::clone::Clone for oraclemcp_guard::exec_grant::GrantMaterial
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::clone(&self) -> oraclemcp_guard::exec_grant::GrantMaterial
+impl core::cmp::Eq for oraclemcp_guard::exec_grant::GrantMaterial
+impl core::cmp::PartialEq for oraclemcp_guard::exec_grant::GrantMaterial
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::eq(&self, &oraclemcp_guard::exec_grant::GrantMaterial) -> bool
+impl core::fmt::Debug for oraclemcp_guard::exec_grant::GrantMaterial
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::exec_grant::GrantMaterial
+impl core::marker::Freeze for oraclemcp_guard::exec_grant::GrantMaterial
+impl core::marker::Send for oraclemcp_guard::exec_grant::GrantMaterial
+impl core::marker::Sync for oraclemcp_guard::exec_grant::GrantMaterial
+impl core::marker::Unpin for oraclemcp_guard::exec_grant::GrantMaterial
+impl core::marker::UnsafeUnpin for oraclemcp_guard::exec_grant::GrantMaterial
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::exec_grant::GrantMaterial
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::exec_grant::GrantMaterial
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::exec_grant::GrantMaterial where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::exec_grant::GrantMaterial where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::exec_grant::GrantMaterial where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::exec_grant::GrantMaterial where U: core::convert::From<T>
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::exec_grant::GrantMaterial where U: core::convert::Into<T>
+pub type oraclemcp_guard::exec_grant::GrantMaterial::Error = core::convert::Infallible
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::exec_grant::GrantMaterial where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::exec_grant::GrantMaterial::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::exec_grant::GrantMaterial where T: core::clone::Clone
+pub type oraclemcp_guard::exec_grant::GrantMaterial::Owned = T
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::exec_grant::GrantMaterial
+impl<T> core::any::Any for oraclemcp_guard::exec_grant::GrantMaterial where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::exec_grant::GrantMaterial where T: ?core::marker::Sized
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::exec_grant::GrantMaterial where T: ?core::marker::Sized
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::exec_grant::GrantMaterial where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::exec_grant::GrantMaterial::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::exec_grant::GrantMaterial
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::exec_grant::GrantMaterial
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::exec_grant::GrantMaterial
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::exec_grant::GrantMaterial
+impl<T> typenum::type_operators::Same for oraclemcp_guard::exec_grant::GrantMaterial
+pub type oraclemcp_guard::exec_grant::GrantMaterial::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::exec_grant::GrantMaterial where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::exec_grant::GrantMaterial where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::vzip(self) -> V
 pub struct oraclemcp_guard::GrantPredicateV1(_)
 impl oraclemcp_guard::scoped_grant::GrantPredicateV1
 pub fn oraclemcp_guard::scoped_grant::GrantPredicateV1::columns(&self) -> alloc::collections::btree::set::BTreeSet<&oraclemcp_guard::scoped_grant::ColumnIdent>

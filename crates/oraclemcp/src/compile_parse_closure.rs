@@ -699,6 +699,14 @@ impl PreparedSqlProof {
         }
         material
     }
+
+    pub(super) fn compile_parse_digest(&self) -> Option<[u8; 32]> {
+        self.compile
+            .as_ref()
+            .ok()?
+            .as_ref()
+            .map(|proof| proof.digest())
+    }
     pub(super) async fn revalidate_compile_parse_closure(
         &self,
         cx: &Cx,

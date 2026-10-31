@@ -352,7 +352,7 @@ fn preview_dependency_root(response: &Value) -> Option<DependentObject> {
     })
 }
 
-fn dependency_target_prefix(sql: &str) -> Option<(Option<String>, String, String)> {
+pub(super) fn dependency_target_prefix(sql: &str) -> Option<(Option<String>, String, String)> {
     use sqlparser::{
         dialect::OracleDialect,
         tokenizer::{Token, Tokenizer},
@@ -818,7 +818,7 @@ fn hex_digest(digest: &[u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn quarantine_dependency_observation(
+pub(super) fn quarantine_dependency_observation(
     quarantine: &std::sync::Mutex<Option<super::ConnectionQuarantine>>,
     error: &DbError,
 ) {
@@ -1019,7 +1019,7 @@ fn parse_single_ddl_target(sql: &str) -> Result<RawName, UnavailableReason> {
     Ok(RawName::new(parts, SyntacticRole::FromFactor))
 }
 
-fn parse_single_local_dml_target(sql: &str) -> Result<RawName, UnavailableReason> {
+pub(super) fn parse_single_local_dml_target(sql: &str) -> Result<RawName, UnavailableReason> {
     if sql.is_empty() || sql.len() > MAX_IMPACT_SQL_BYTES || sql.contains(';') || sql.contains('@')
     {
         return Err(UnavailableReason::UnsupportedDmlShape);

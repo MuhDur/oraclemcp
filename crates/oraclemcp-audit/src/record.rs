@@ -23,6 +23,11 @@ const AUDIT_SCHEMA_V10: u16 = 10;
 const AUDIT_SCHEMA_V11: u16 = 11;
 const AUDIT_SCHEMA_V12: u16 = 12;
 const AUDIT_SCHEMA_V13: u16 = 13;
+const AUDIT_SCHEMA_V14: u16 = 14;
+
+#[path = "impact.rs"]
+mod impact;
+pub use impact::{AuditImpactBinding, AuditRevalidationStage};
 
 /// Application-domain label prefixing every v11+ entry-hash preimage.
 ///
@@ -57,7 +62,7 @@ const AUDIT_ENTRY_HASH_DOMAIN_V13: &[u8] = b"oraclemcp:audit-entry-hash:v13\n";
 pub const REDACTED_SQL_PREVIEW: &str = "<sql text redacted; see sql_sha256>";
 
 /// Current on-disk audit record schema.
-pub const AUDIT_SCHEMA_VERSION: u16 = AUDIT_SCHEMA_V13;
+pub const AUDIT_SCHEMA_VERSION: u16 = AUDIT_SCHEMA_V14;
 
 /// Redaction-safe cause attached to a failed tool operation. The values are
 /// constrained category names only; message text, SQL, binds, and identifiers
@@ -857,6 +862,15 @@ pub struct AuditRecord {
     /// schema-v10 chain hash and HMAC, never by an untrusted response field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict_certificate_core_hash: Option<String>,
+    /// Exact statement approved by the caller, independent of audit markers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statement_digest: Option<String>,
+    /// Decisive approval facts, authenticated by the v14 chain and HMAC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decisive_digest: Option<String>,
+    /// Checkpoint at which these facts were revalidated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revalidated_at: Option<AuditRevalidationStage>,
     /// The tool invoked.
     pub tool: String,
     /// `sha256:<hex>` of the exact SQL bytes (never the bind values).
@@ -916,6 +930,9 @@ impl std::fmt::Debug for AuditRecord {
                 &self.verdict_certificate_core_hash,
             )
             .field("tool", &self.tool)
+            .field("statement_digest", &self.statement_digest)
+            .field("decisive_digest", &self.decisive_digest)
+            .field("revalidated_at", &self.revalidated_at)
             .field("sql_sha256", &self.sql_sha256)
             .field("sql_normalized_sha256", &self.sql_normalized_sha256)
             .field("sql_preview", &"***redacted***")
@@ -1308,7 +1325,8 @@ impl AuditRecord {
             prev_hash,
             failure.as_ref(),
         );
-        let entry_hash = bind_view_proofs_v13(&content_hash, draft.db_evidence.as_ref());
+        let content_hash = bind_view_proofs_v13(&content_hash, draft.db_evidence.as_ref());
+        let entry_hash = impact::bind_impact_v14(&content_hash, None, None, None);
         AuditRecord {
             schema_version: AUDIT_SCHEMA_VERSION,
             seq,
@@ -1321,6 +1339,9 @@ impl AuditRecord {
             result_masking: draft.result_masking.clone(),
             observed_scn,
             verdict_certificate_core_hash,
+            statement_digest: None,
+            decisive_digest: None,
+            revalidated_at: None,
             tool: draft.tool.clone(),
             sql_sha256,
             sql_normalized_sha256,
@@ -1343,6 +1364,13 @@ impl AuditRecord {
     /// recompute-from-genesis. Pair it with [`Self::signature_is_valid`].
     #[must_use]
     pub fn hash_is_valid(&self) -> bool {
+        if self.schema_version < AUDIT_SCHEMA_V14
+            && (self.statement_digest.is_some()
+                || self.decisive_digest.is_some()
+                || self.revalidated_at.is_some())
+        {
+            return false;
+        }
         if self.schema_version < AUDIT_SCHEMA_V13
             && self
                 .db_evidence
@@ -1535,7 +1563,10 @@ impl AuditRecord {
                 self.outcome,
                 &self.prev_hash,
             )
-        } else if matches!(self.schema_version, AUDIT_SCHEMA_V12 | AUDIT_SCHEMA_V13) {
+        } else if matches!(
+            self.schema_version,
+            AUDIT_SCHEMA_V12 | AUDIT_SCHEMA_V13 | AUDIT_SCHEMA_V14
+        ) {
             let content_hash = compute_entry_hash_v12(
                 self.seq,
                 &self.timestamp,
@@ -1558,8 +1589,18 @@ impl AuditRecord {
                 &self.prev_hash,
                 self.failure.as_ref(),
             );
-            if self.schema_version == AUDIT_SCHEMA_V13 {
-                bind_view_proofs_v13(&content_hash, self.db_evidence.as_ref())
+            if self.schema_version >= AUDIT_SCHEMA_V13 {
+                let content_hash = bind_view_proofs_v13(&content_hash, self.db_evidence.as_ref());
+                if self.schema_version == AUDIT_SCHEMA_V14 {
+                    impact::bind_impact_v14(
+                        &content_hash,
+                        self.statement_digest.as_deref(),
+                        self.decisive_digest.as_deref(),
+                        self.revalidated_at,
+                    )
+                } else {
+                    content_hash
+                }
             } else {
                 content_hash
             }
@@ -2580,6 +2621,9 @@ mod kani_proofs {
             result_masking: None,
             observed_scn: None,
             verdict_certificate_core_hash: None,
+            statement_digest: None,
+            decisive_digest: None,
+            revalidated_at: None,
             tool: "oracle_execute".to_owned(),
             sql_sha256: "sha256:sql".to_owned(),
             sql_normalized_sha256: "sha256:sql".to_owned(),
@@ -2914,7 +2958,7 @@ mod tests {
                 d.outcome,
                 prev_hash,
             ),
-            AUDIT_SCHEMA_V12 | AUDIT_SCHEMA_V13 => compute_entry_hash_v12(
+            AUDIT_SCHEMA_V12 | AUDIT_SCHEMA_V13 | AUDIT_SCHEMA_V14 => compute_entry_hash_v12(
                 seq,
                 &timestamp,
                 &agent_identity,
@@ -2938,8 +2982,13 @@ mod tests {
             ),
             other => panic!("unsupported test schema {other}"),
         };
-        let entry_hash = if schema_version == AUDIT_SCHEMA_V13 {
+        let entry_hash = if schema_version >= AUDIT_SCHEMA_V13 {
             bind_view_proofs_v13(&entry_hash, d.db_evidence.as_ref())
+        } else {
+            entry_hash
+        };
+        let entry_hash = if schema_version == AUDIT_SCHEMA_V14 {
+            impact::bind_impact_v14(&entry_hash, None, None, None)
         } else {
             entry_hash
         };
@@ -2955,6 +3004,9 @@ mod tests {
             result_masking: None,
             observed_scn: None,
             verdict_certificate_core_hash: None,
+            statement_digest: None,
+            decisive_digest: None,
+            revalidated_at: None,
             tool: d.tool.clone(),
             sql_sha256,
             sql_normalized_sha256: if schema_version >= 4 {
@@ -3595,6 +3647,9 @@ mod tests {
             result_masking: None,
             observed_scn: None,
             verdict_certificate_core_hash: None,
+            statement_digest: None,
+            decisive_digest: None,
+            revalidated_at: None,
             tool: d.tool.clone(),
             sql_sha256,
             sql_normalized_sha256: String::new(),
@@ -4033,6 +4088,9 @@ mod tests {
             result_masking: None,
             observed_scn: None,
             verdict_certificate_core_hash: None,
+            statement_digest: None,
+            decisive_digest: None,
+            revalidated_at: None,
             tool: d.tool.clone(),
             sql_sha256,
             sql_normalized_sha256: String::new(),
@@ -5076,6 +5134,12 @@ mod tests {
             forged.failure.as_ref(),
         );
         forged.entry_hash = bind_view_proofs_v13(&forged.entry_hash, forged.db_evidence.as_ref());
+        forged.entry_hash = impact::bind_impact_v14(
+            &forged.entry_hash,
+            forged.statement_digest.as_deref(),
+            forged.decisive_digest.as_deref(),
+            forged.revalidated_at,
+        );
         assert!(
             forged.hash_is_valid(),
             "recompute-from-genesis defeats the bare hash chain"

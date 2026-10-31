@@ -639,6 +639,7 @@ pub(super) async fn append_view_proof_admission_audit(
     append_audit(
         AuditEntryCtx {
             db_evidence: Some(&evidence),
+            impact: None,
             ..ctx
         },
         tool,
@@ -1974,6 +1975,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     auditor: self.auditor.as_deref(),
                     subject: &audit_subject(context, &self.default_audit_subject),
                     db_evidence: None,
+                    impact: None,
                 },
                 "oracle_query",
                 &admitted.plan.executed_sql,
@@ -1986,6 +1988,7 @@ impl<'a> GuardedReadExecutor<'a> {
                         auditor: self.auditor.as_deref(),
                         subject: &audit_subject(context, &self.default_audit_subject),
                         db_evidence: None,
+                        impact: None,
                     },
                     "oracle_query",
                 )?;
@@ -1995,6 +1998,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     auditor: self.auditor.as_deref(),
                     subject: &audit_subject(context, &self.default_audit_subject),
                     db_evidence: None,
+                    impact: None,
                 },
                 "oracle_query",
                 &relation_security,
@@ -2166,7 +2170,7 @@ impl<'a> GuardedReadExecutor<'a> {
                 if a.export {
                     append_view_proof_admission_audit(
                         cx, &read_conn,
-                        AuditEntryCtx { auditor: self.auditor.as_deref(), subject: &request_subject, db_evidence: None },
+                        AuditEntryCtx { auditor: self.auditor.as_deref(), subject: &request_subject, db_evidence: None, impact: None },
                         &audit_tool, &executed_sql, &view_proofs,
                     ).await?;
                     let result_masking = self.result_masking_policy()?;
@@ -2215,6 +2219,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     auditor,
                     subject: &request_subject,
                     db_evidence: read_audit_evidence.as_ref(),
+                    impact: None,
                 };
                 if fga_evidence == FgaEvidence::Unavailable {
                     append_fga_evidence_unavailable_audit(read_audit, &audit_tool)?;
@@ -2777,6 +2782,7 @@ impl OracleDispatcher {
                 auditor: self.auditor.as_deref(),
                 subject,
                 db_evidence: None,
+                impact: None,
             },
             "oracle_diff",
             &executed_sql,
@@ -2789,6 +2795,7 @@ impl OracleDispatcher {
                     auditor: self.auditor.as_deref(),
                     subject,
                     db_evidence: None,
+                    impact: None,
                 },
                 "oracle_diff",
             )?;
@@ -2798,6 +2805,7 @@ impl OracleDispatcher {
                 auditor: self.auditor.as_deref(),
                 subject,
                 db_evidence: None,
+                impact: None,
             },
             "oracle_diff",
             &admitted.relation_security,
@@ -2988,6 +2996,7 @@ impl OracleDispatcher {
                     auditor: self.auditor.as_deref(),
                     subject,
                     db_evidence: None,
+                    impact: None,
                 },
                 "oracle_diff",
                 &executed_sql,
@@ -3000,6 +3009,7 @@ impl OracleDispatcher {
                         auditor: self.auditor.as_deref(),
                         subject,
                         db_evidence: None,
+                        impact: None,
                     },
                     "oracle_diff",
                 )?;
@@ -3009,6 +3019,7 @@ impl OracleDispatcher {
                     auditor: self.auditor.as_deref(),
                     subject,
                     db_evidence: None,
+                    impact: None,
                 },
                 "oracle_diff",
                 &admitted.relation_security,

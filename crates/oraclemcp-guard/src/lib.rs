@@ -67,7 +67,7 @@ pub use clock::MonotonicDeadline;
 /// Consumers must validate its schema and review marker before serving tools.
 pub const SYS_EFFECTS_TOML: &str = include_str!("sys_effects.toml");
 
-pub use exec_grant::{ExecGrantBinding, ExecGrantError, ExecGrantStore};
+pub use exec_grant::{ExecGrantBinding, ExecGrantError, ExecGrantStore, GrantMaterial};
 pub use impact_binding::{
     DbIdentity, DecisiveFacts, FieldBudget, FieldCaps, FieldMeasure, FieldStatus,
     IMPACT_BINDING_VERSION, ImpactBindingV1, ImpactV1, ImpactVersionError, NotApplicableReason,

@@ -43,12 +43,13 @@ pub use hmac::{
 pub use keyring::{AuditKeyring, AuditKeyringError};
 pub use record::{
     AUDIT_SCHEMA_VERSION, AuditCancel, AuditCorrelation, AuditDecision, AuditEntryDraft,
-    AuditFailureCause, AuditFailureCauseError, AuditOutcome, AuditRecord, AuditResultMaskingAction,
-    AuditResultMaskingCertificate, AuditResultMaskingColumnDecision, AuditResultMaskingSource,
-    AuditSubject, AuditVerdict, AuditVerdictCertificate, AuditVerdictCertificateError,
-    AuditVerdictConstruct, AuditVerdictDerivationStep, AuditVerdictOperatingLevel,
-    AuditVerdictRuleId, AuditViewProof, BoundAuditVerdictCertificate, DbEvidence, GENESIS_HASH,
-    REDACTED_SQL_PREVIEW, SigningKey, SigningKeyError, normalized_sql_sha256, sha256_hex,
+    AuditFailureCause, AuditFailureCauseError, AuditImpactBinding, AuditOutcome, AuditRecord,
+    AuditResultMaskingAction, AuditResultMaskingCertificate, AuditResultMaskingColumnDecision,
+    AuditResultMaskingSource, AuditRevalidationStage, AuditSubject, AuditVerdict,
+    AuditVerdictCertificate, AuditVerdictCertificateError, AuditVerdictConstruct,
+    AuditVerdictDerivationStep, AuditVerdictOperatingLevel, AuditVerdictRuleId, AuditViewProof,
+    BoundAuditVerdictCertificate, DbEvidence, GENESIS_HASH, REDACTED_SQL_PREVIEW, SigningKey,
+    SigningKeyError, normalized_sql_sha256, sha256_hex,
 };
 pub use rekor::{
     AsyncRekorAnchor, AuditChainHead, DEFAULT_REKOR_QUEUE_CAPACITY, DEFAULT_REKOR_SHUTDOWN_TIMEOUT,
