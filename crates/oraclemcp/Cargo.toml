@@ -124,7 +124,7 @@ toml = "0.8"
 # deny.toml's allow-list). `regex` is already in the graph; `insta` is test-only.
 regex = "1"
 insta = { version = "1", features = ["filters"] }
-serde_yaml = "0.9"
+serde-saphyr = { version = "2.0.0", default-features = false, features = ["deserialize"] }
 jsonschema = { version = "0.33.0", default-features = false }
 sqlparser = "0.63"
 

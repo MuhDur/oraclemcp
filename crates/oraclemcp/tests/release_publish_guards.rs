@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use serde_yaml::{Mapping, Value};
+use serde_json::{Map, Value};
 
 const DIRECT_RELEASE_PUBLISH_JOBS: &[&str] = &[
     "release",
@@ -30,40 +30,25 @@ fn load_workflow(path: &str) -> Value {
     let full_path = workspace_root().join(path);
     let text = std::fs::read_to_string(&full_path)
         .unwrap_or_else(|err| panic!("read {}: {err}", full_path.display()));
-    serde_yaml::from_str(&text).unwrap_or_else(|err| panic!("parse {}: {err}", full_path.display()))
+    serde_saphyr::from_str(&text)
+        .unwrap_or_else(|err| panic!("parse {}: {err}", full_path.display()))
 }
 
-fn as_mapping<'a>(value: &'a Value, label: &str) -> &'a Mapping {
+fn as_mapping<'a>(value: &'a Value, label: &str) -> &'a Map<String, Value> {
     value
-        .as_mapping()
+        .as_object()
         .unwrap_or_else(|| panic!("{label} must be a YAML mapping"))
 }
 
-fn mapping_get<'a>(mapping: &'a Mapping, key: &str) -> Option<&'a Value> {
-    let string_key = Value::String(key.to_owned());
-    let on_key = Value::Bool(true);
-    mapping
-        .get(&string_key)
-        .or_else(|| (key == "on").then(|| mapping.get(&on_key)).flatten())
+fn mapping_get<'a>(mapping: &'a Map<String, Value>, key: &str) -> Option<&'a Value> {
+    mapping.get(key)
 }
 
-fn mapping_get_mut<'a>(mapping: &'a mut Mapping, key: &str) -> Option<&'a mut Value> {
-    let string_key = Value::String(key.to_owned());
-    if mapping.contains_key(&string_key) {
-        mapping.get_mut(&string_key)
-    } else if key == "on" {
-        let on_key = Value::Bool(true);
-        if mapping.contains_key(&on_key) {
-            mapping.get_mut(&on_key)
-        } else {
-            None
-        }
-    } else {
-        None
-    }
+fn mapping_get_mut<'a>(mapping: &'a mut Map<String, Value>, key: &str) -> Option<&'a mut Value> {
+    mapping.get_mut(key)
 }
 
-fn workflow_jobs(workflow: &Value) -> &Mapping {
+fn workflow_jobs(workflow: &Value) -> &Map<String, Value> {
     let root = as_mapping(workflow, "workflow");
     as_mapping(
         mapping_get(root, "jobs").expect("workflow must define jobs"),
@@ -71,13 +56,16 @@ fn workflow_jobs(workflow: &Value) -> &Mapping {
     )
 }
 
-fn job_mapping<'a>(jobs: &'a Mapping, job_id: &str) -> Option<&'a Mapping> {
+fn job_mapping<'a>(jobs: &'a Map<String, Value>, job_id: &str) -> Option<&'a Map<String, Value>> {
     mapping_get(jobs, job_id).map(|job| as_mapping(job, job_id))
 }
 
-fn job_mapping_mut<'a>(jobs: &'a mut Mapping, job_id: &str) -> &'a mut Mapping {
+fn job_mapping_mut<'a>(
+    jobs: &'a mut Map<String, Value>,
+    job_id: &str,
+) -> &'a mut Map<String, Value> {
     mapping_get_mut(jobs, job_id)
-        .and_then(Value::as_mapping_mut)
+        .and_then(Value::as_object_mut)
         .unwrap_or_else(|| panic!("workflow job {job_id} must be a mapping"))
 }
 
@@ -86,7 +74,7 @@ fn workflow_event_names(workflow: &Value) -> BTreeSet<String> {
     let on = mapping_get(root, "on").expect("workflow must define `on` triggers");
     match on {
         Value::String(name) => BTreeSet::from([name.clone()]),
-        Value::Sequence(names) => names
+        Value::Array(names) => names
             .iter()
             .map(|name| {
                 name.as_str()
@@ -94,23 +82,16 @@ fn workflow_event_names(workflow: &Value) -> BTreeSet<String> {
                     .to_owned()
             })
             .collect(),
-        Value::Mapping(events) => events
-            .keys()
-            .map(|name| {
-                name.as_str()
-                    .unwrap_or_else(|| panic!("workflow event name must be a string: {name:?}"))
-                    .to_owned()
-            })
-            .collect(),
+        Value::Object(events) => events.keys().cloned().collect(),
         other => panic!("workflow `on` must be a string, sequence, or mapping: {other:?}"),
     }
 }
 
-fn push_trigger_mapping(workflow: &Value) -> Option<&Mapping> {
+fn push_trigger_mapping(workflow: &Value) -> Option<&Map<String, Value>> {
     let root = as_mapping(workflow, "workflow");
     let on = mapping_get(root, "on")?;
     match on {
-        Value::Mapping(events) => mapping_get(events, "push").and_then(Value::as_mapping),
+        Value::Object(events) => mapping_get(events, "push").and_then(Value::as_object),
         _ => None,
     }
 }
@@ -122,9 +103,9 @@ fn trigger_allows_branch_push(workflow: &Value) -> bool {
     let Some(push) = push_trigger_mapping(workflow) else {
         return true;
     };
-    !push.contains_key(Value::String("tags".to_owned()))
-        || push.contains_key(Value::String("branches".to_owned()))
-        || push.contains_key(Value::String("branches-ignore".to_owned()))
+    !push.contains_key("tags")
+        || push.contains_key("branches")
+        || push.contains_key("branches-ignore")
 }
 
 fn non_tag_events(workflow: &Value) -> BTreeSet<String> {
@@ -141,17 +122,17 @@ fn non_tag_events(workflow: &Value) -> BTreeSet<String> {
     non_tag
 }
 
-fn job_if(job: &Mapping) -> Option<&str> {
+fn job_if(job: &Map<String, Value>) -> Option<&str> {
     mapping_get(job, "if").and_then(Value::as_str)
 }
 
-fn job_needs(job: &Mapping) -> Vec<String> {
+fn job_needs(job: &Map<String, Value>) -> Vec<String> {
     let Some(needs) = mapping_get(job, "needs") else {
         return Vec::new();
     };
     match needs {
         Value::String(need) => vec![need.clone()],
-        Value::Sequence(needs) => needs
+        Value::Array(needs) => needs
             .iter()
             .map(|need| {
                 need.as_str()
@@ -193,7 +174,7 @@ fn has_positive_tag_ref_guard(condition: Option<&str>) -> bool {
 }
 
 fn job_reachable_on_non_tag_ref(
-    jobs: &Mapping,
+    jobs: &Map<String, Value>,
     job_id: &str,
     memo: &mut HashMap<String, bool>,
     stack: &mut HashSet<String>,
@@ -241,9 +222,7 @@ fn check_release_publish_tag_gates(workflow: &Value) -> Vec<String> {
             "release.yml must keep workflow_dispatch as a non-publishing rehearsal".to_owned(),
         );
     }
-    if !push_trigger_mapping(workflow)
-        .is_some_and(|push| push.contains_key(Value::String("tags".to_owned())))
-    {
+    if !push_trigger_mapping(workflow).is_some_and(|push| push.contains_key("tags")) {
         errors.push("release.yml push trigger must be constrained by tags".to_owned());
     }
     if !non_tag_events.contains("workflow_dispatch") {
@@ -251,7 +230,7 @@ fn check_release_publish_tag_gates(workflow: &Value) -> Vec<String> {
     }
 
     for job_id in RELEASE_PUBLISH_JOBS {
-        if !jobs.contains_key(Value::String((*job_id).to_owned())) {
+        if !jobs.contains_key(*job_id) {
             errors.push(format!("release.yml must define publishing job {job_id}"));
         }
     }
@@ -316,31 +295,50 @@ fn check_auxiliary_publish_workflow_is_manual_only(path: &str) -> Vec<String> {
 
 fn set_job_if(workflow: &mut Value, job_id: &str, condition: &str) {
     let root = workflow
-        .as_mapping_mut()
+        .as_object_mut()
         .expect("workflow must be a YAML mapping");
     let jobs = mapping_get_mut(root, "jobs")
-        .and_then(Value::as_mapping_mut)
+        .and_then(Value::as_object_mut)
         .expect("workflow must define jobs");
     let job = job_mapping_mut(jobs, job_id);
-    job.insert(
-        Value::String("if".to_owned()),
-        Value::String(condition.to_owned()),
-    );
+    job.insert("if".to_owned(), Value::String(condition.to_owned()));
 }
 
 fn set_job_needs(workflow: &mut Value, job_id: &str, needs: &[&str]) {
     let root = workflow
-        .as_mapping_mut()
+        .as_object_mut()
         .expect("workflow must be a YAML mapping");
     let jobs = mapping_get_mut(root, "jobs")
-        .and_then(Value::as_mapping_mut)
+        .and_then(Value::as_object_mut)
         .expect("workflow must define jobs");
     let job = job_mapping_mut(jobs, job_id);
     let needs = needs
         .iter()
         .map(|need| Value::String((*need).to_owned()))
         .collect();
-    job.insert(Value::String("needs".to_owned()), Value::Sequence(needs));
+    job.insert("needs".to_owned(), Value::Array(needs));
+}
+
+#[test]
+fn workflow_yaml_preserves_on_and_rejects_duplicate_publish_conditions() {
+    let workflow: Value = serde_saphyr::from_str(
+        "on: [push, workflow_dispatch]\njobs:\n  release:\n    if: >-\n      startsWith(github.ref, 'refs/tags/')\n",
+    )
+    .expect("parse workflow YAML without treating on as a boolean");
+    assert_eq!(
+        workflow_event_names(&workflow),
+        BTreeSet::from(["push".to_owned(), "workflow_dispatch".to_owned()])
+    );
+    assert!(has_positive_tag_ref_guard(job_if(
+        job_mapping(workflow_jobs(&workflow), "release").unwrap()
+    )));
+    assert!(
+        serde_saphyr::from_str::<Value>(
+            "jobs:\n  release:\n    if: startsWith(github.ref, 'refs/tags/')\n    if: always()\n"
+        )
+        .is_err(),
+        "a duplicate condition must not silently replace the publishing guard"
+    );
 }
 
 #[test]
