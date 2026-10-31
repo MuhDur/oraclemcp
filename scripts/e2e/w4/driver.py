@@ -3427,15 +3427,19 @@ def case_families():
     return families
 
 
-def ci_verdict(results_path, lane, summary_path, output_path):
+def ci_verdict(results_path, lane, summary_path, output_path, transport=None):
     """The CI verdict step: pass only when every check over this run's own results passes.
 
     A missing or unparsable results.json, a cases.jsonl that differs from it, results
     from another checkout, a recorded run failure (including a run killed by a timeout,
     which leaves the primed "did not complete" failure), any red case, or a required
-    manifest case missing on either transport is red."""
+    manifest case missing on the checked transport(s) is red. A run of one transport is
+    accepted only by the verdict for exactly that transport."""
+    transports = (transport,) if transport else ("stdio", "http")
     results = json.loads(results_path.read_text())
     require(results.get("lane") == lane, f"W4 results are for lane {results.get('lane')!r}, not {lane}")
+    require(results.get("transports") == list(transports),
+            f"W4 results cover {results.get('transports')!r}, not {list(transports)}")
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     require(results.get("checkout_sha") == head, "W4 results were not produced by this checkout")
     jsonl = results_path.with_name("cases.jsonl").read_text()
@@ -3448,12 +3452,12 @@ def ci_verdict(results_path, lane, summary_path, output_path):
                "--cargo-test-log", str(cargo_log)]
     for capability in results.get("capabilities", []):
         command += ["--capability", capability]
-    for transport in ("stdio", "http"):
-        checked = subprocess.run([*command, "--transport", transport], cwd=ROOT, text=True,
+    for checked_transport in transports:
+        checked = subprocess.run([*command, "--transport", checked_transport], cwd=ROOT, text=True,
                                  capture_output=True, check=False)
         print(checked.stdout, end="")
         print(checked.stderr, end="", file=sys.stderr)
-        require(checked.returncode == 0, f"W4 release manifest check failed on {lane}/{transport}")
+        require(checked.returncode == 0, f"W4 release manifest check failed on {lane}/{checked_transport}")
     ci_summary(results_path, summary_path, output_path)
 
 
@@ -3467,11 +3471,12 @@ def ci_verdict_selftest():
     require(required, "release manifest has no required FREE 23ai cases")
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
 
-    def green():
+    def green(transports=("stdio", "http")):
         return {"lane": lane, "verdict": "pass", "checkout_sha": head, "capabilities": ["version:23"],
+                "transports": list(transports),
                 "cases": [{"case_id": case_id, "lane": lane, "transport": transport, "verdict": "pass",
                            "test_id": release[case_id]["test_id"], "tool": "oracle_query", "duration_ms": 1}
-                          for transport in ("stdio", "http") for case_id in required],
+                          for transport in transports for case_id in required],
                 "cargo_test_output": "".join(
                     f"test {case['test_id'].split('::', 1)[-1]} ... ok\n"
                     for case in release.values() if case["reproducible"] == "unit")}
@@ -3494,8 +3499,8 @@ def ci_verdict_selftest():
     results_path = directory / "results.json"
     summary_path, output_path = directory / "summary.md", directory / "output.txt"
 
-    def run(mutate=None, after_write=None):
-        results = green()
+    def run(mutate=None, after_write=None, transports=("stdio", "http"), check=None):
+        results = green(transports)
         if mutate:
             mutate(results)
         results_path.write_text(json.dumps(results))
@@ -3507,11 +3512,23 @@ def ci_verdict_selftest():
         output_path.write_text("")
         with contextlib.redirect_stdout(open(os.devnull, "w")), \
                 contextlib.redirect_stderr(open(os.devnull, "w")):
-            ci_verdict(results_path, lane, summary_path, output_path)
+            ci_verdict(results_path, lane, summary_path, output_path, check)
 
     run()
     require(output_path.read_text() == "verdict=pass\n", "green W4 results did not pass the CI verdict")
     require("| Family | Transport |" in summary_path.read_text(), "CI summary has no per-family durations")
+    for transport in ("stdio", "http"):
+        run(transports=(transport,), check=transport)
+        require(output_path.read_text() == "verdict=pass\n", f"green {transport}-only results did not pass")
+    for label, transports, check in (("stdio_run_as_http", ("stdio",), "http"),
+                                     ("stdio_run_as_both", ("stdio",), None),
+                                     ("both_run_as_stdio", ("stdio", "http"), "stdio")):
+        try:
+            run(transports=transports, check=check)
+        except (DriverError, OSError, ValueError):
+            pass
+        else:
+            raise DriverError(f"CI verdict accepted {label}")
 
     def truncate_jsonl():
         jsonl = results_path.with_name("cases.jsonl")
@@ -3772,6 +3789,30 @@ def persist_run_results(base, output):
     (base / "cases.jsonl").write_text("".join(compact(row) + "\n" for row in output["cases"]))
 
 
+def selected_transports(args):
+    return (args.transport,) if getattr(args, "transport", None) else ("stdio", "http")
+
+
+def manifest_unit_evidence(paths):
+    """Unmodified logs of an earlier manifest-unit run (the CI build job), never empty."""
+    text = ""
+    for path in paths:
+        raw = path.read_text()
+        require(raw.strip() and "test result: ok." in raw, f"manifest unit log is empty or not green: {path}")
+        text += raw
+    return text
+
+
+def manifest_units_only(log_path):
+    """Run the governed Rust manifest units once and write their unmodified combined output."""
+    env = {name: value for name, value in os.environ.items() if not name.startswith("ORACLEMCP_")}
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    output = {}
+    run_manifest_units(log_path.parent, env, output)
+    log_path.write_text(output["cargo_test_output"])
+    print(compact({"manifest_units": str(log_path), "verdict": "pass"}))
+
+
 def run_lane(args):
     base = ROOT / "target/e2e/w4" / args.lane
     output = {"lane": args.lane, "verdict": "fail", "checkout_sha": subprocess.check_output(
@@ -3779,6 +3820,7 @@ def run_lane(args):
         "binary_source_sha": args.binary_source_sha, "binary_sha256": None,
         "fixture_runs": {}, "capabilities": [], "registry": [], "cases": [], "summary": {},
         "cargo_test_logs": [str(path) for path in args.cargo_test_log],
+        "transports": list(selected_transports(args)),
         "run_failure": {"class": "DriverError", "detail": "W4 run did not complete"}}
     persist_run_results(base, output)
     try:
@@ -3843,11 +3885,14 @@ def _run_lane(args, output):
     try:
         if not args.case and not args.contract_only and not args.alias_contracts_only:
             release_cases = json.loads(RELEASE_MANIFEST.read_text())
-            run_manifest_units(work, {**env, "CARGO_TARGET_DIR": str(target_dir)}, output)
-            for transport in ("stdio", "http"):
+            if args.cargo_test_log:
+                output["cargo_test_output"] = manifest_unit_evidence(args.cargo_test_log)
+            else:
+                run_manifest_units(work, {**env, "CARGO_TARGET_DIR": str(target_dir)}, output)
+            for transport in selected_transports(args):
                 verify_manifest_schedule(family_cases, release_cases,
                                          manifest_required(args.lane, transport, capabilities), transport)
-        for transport in ("stdio", "http"):
+        for transport in selected_transports(args):
             state = work / transport / "state"
             state.mkdir(parents=True, exist_ok=True)
             audit_path = state / "oraclemcp/audit/audit.jsonl"
@@ -4064,7 +4109,7 @@ def _run_lane(args, output):
             require(not missing, f"unknown scoped W4 case(s): {', '.join(sorted(missing))}")
         if not args.case and not args.contract_only and not args.alias_contracts_only:
             required = set().union(*(manifest_required(args.lane, transport, capabilities)
-                                     for transport in ("stdio", "http")))
+                                     for transport in selected_transports(args)))
             map_live_manifest_case_ids(output, json.loads(RELEASE_MANIFEST.read_text()), required)
         verdict = run_verdict(rows)
         output.update({"verdict": verdict, "registry": sorted(descriptors),
@@ -4078,7 +4123,7 @@ def _run_lane(args, output):
             (base / "coverage.json").write_text(json.dumps(
                 coverage_status(descriptors, family_cases), indent=2, sort_keys=True) + "\n")
         if not args.contract_only and not args.case and not args.alias_contracts_only:
-            for transport in ("stdio", "http"):
+            for transport in selected_transports(args):
                 enforce_manifest(results_path, args.lane, transport, capabilities)
         if (not args.contract_only and not args.case and not args.alias_contracts_only) or args.coverage_report:
             verify_coverage(descriptors, family_cases)
@@ -5727,6 +5772,10 @@ def main():
                         help="CI verdict step: check results, JSONL, release manifest (both transports) and summarize")
     parser.add_argument("--manifest-enforcement-integration", action="store_true")
     parser.add_argument("--lane", choices=("free23", "xe18", "xe21"))
+    parser.add_argument("--transport", choices=("stdio", "http"),
+                        help="run (or, with --ci-verdict, check) one transport only; default both")
+    parser.add_argument("--manifest-units-only", type=Path, metavar="LOG",
+                        help="run the release-manifest Rust units once and write their combined log")
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--binary-source-sha", help="verified source revision of an external binary")
     parser.add_argument("--diagnostics-pack-licensed", action="store_true",
@@ -5755,7 +5804,9 @@ def main():
         if args.ci_verdict:
             require(args.lane, "--ci-verdict needs --lane")
             ci_verdict(args.ci_verdict, args.lane, Path(os.environ["GITHUB_STEP_SUMMARY"]),
-                       Path(os.environ["GITHUB_OUTPUT"]))
+                       Path(os.environ["GITHUB_OUTPUT"]), args.transport)
+        elif args.manifest_units_only:
+            manifest_units_only(args.manifest_units_only)
         elif args.ci_summary:
             ci_summary(args.ci_summary, Path(os.environ["GITHUB_STEP_SUMMARY"]),
                        Path(os.environ["GITHUB_OUTPUT"]))

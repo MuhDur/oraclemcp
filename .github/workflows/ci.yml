@@ -940,14 +940,60 @@ jobs:
       - run: bash tests/container_supply_chain_contract_test.sh --context
 
 
-  oracle-free23-w4:
-    name: Oracle FREE 23ai W4
-    # Real failures remain red; a declared fixture limitation is reported as SKIP.
-    outputs:
-      w4-verdict: ${{ steps.w4-summary.outputs.verdict }}
+  # W4 is split by transport (stdio, HTTP) because the combined run measured
+  # over the 25-minute budget; the cost is per transport, not per family. The
+  # build job compiles once and runs the release-manifest Rust units once (no
+  # Oracle needed); each transport job consumes that binary and unit log.
+  oracle-free23-w4-build:
+    name: Oracle FREE 23ai W4 build + manifest units
     needs: web-build
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # PRs restore the main cache but never save (their short-lived
+          # merge-ref caches would evict the useful main population).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # CI supplies a prebuilt binary to the harness. Local execution keeps the
+      # harness on omcpb, which owns target isolation, memory caps, and the pin.
+      - run: cargo build -p oraclemcp --bin oraclemcp --features dashboard-bundle
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Release-manifest Rust units (unmodified log)
+        run: python3 scripts/e2e/w4/driver.py --manifest-units-only target/e2e/w4/manifest-units.log
+      - uses: actions/upload-artifact@v7
+        with:
+          name: oracle-free23-w4-build-${{ github.run_number }}
+          path: |
+            target/debug/oraclemcp
+            target/e2e/w4/manifest-units.log
+          if-no-files-found: error
+          retention-days: 3
+
+  oracle-free23-w4:
+    name: Oracle FREE 23ai W4 (${{ matrix.transport }})
+    # Real failures remain red; a declared fixture limitation is reported as SKIP.
+    needs: oracle-free23-w4-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - transport: stdio
+          - transport: http
     services:
       free23:
         image: gvenzl/oracle-free:23-slim@sha256:fbbd3023d5abc33e36d3814816e6fd740e8efabeaa70cf470ddeab5874a3f6f8
@@ -968,19 +1014,10 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v8
         with:
-          name: oraclemcp-dashboard-dist
-          path: web/dist
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          # PRs restore the main cache but never save (their short-lived
-          # merge-ref caches would evict the useful main population).
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      # CI supplies a prebuilt binary to the harness. Local execution keeps the
-      # harness on omcpb, which owns target isolation, memory caps, and the pin.
-      - run: cargo build -p oraclemcp --bin oraclemcp --features dashboard-bundle
+          name: oracle-free23-w4-build-${{ github.run_number }}
+          path: target
+      - name: Restore the prebuilt binary
+        run: chmod +x target/debug/oraclemcp
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
@@ -1006,25 +1043,28 @@ jobs:
           PY
       - name: W4 driver and CI verdict selftest
         run: python3 scripts/e2e/w4/driver.py --selftest
-      - name: FREE 23ai W4 (stdio and HTTP)
+      - name: FREE 23ai W4 (${{ matrix.transport }})
         env:
           ORACLEMCP_LIVE_XE: "1"
           ORACLEMCP_RIG_L1_FREE23_ADMIN_PASSWORD: E2EOracle23
+          W4_TRANSPORT: ${{ matrix.transport }}
         run: |
           set -euo pipefail
-          bash scripts/e2e/w4.sh --log --lane free23 --binary target/debug/oraclemcp
+          bash scripts/e2e/w4.sh --log --lane free23 --transport "$W4_TRANSPORT" \
+            --binary target/debug/oraclemcp --cargo-test-log target/e2e/w4/manifest-units.log
       - name: Validate FREE 23ai W4 verdict and summarize duration
-        id: w4-summary
         if: always()
         # Fail-closed: red on a missing or truncated result, another checkout's
-        # results, a run that did not complete (job timeout included), any red
-        # case, or a required release-manifest case missing on stdio or HTTP.
-        # The selftest step above proves each of these turns the verdict red.
-        run: python3 scripts/e2e/w4/driver.py --ci-verdict target/e2e/w4/free23/results.json --lane free23
+        # results, results for another transport, a run that did not complete
+        # (job timeout included), any red case, or a required release-manifest
+        # case missing. The selftest step above proves each turns the verdict red.
+        env:
+          W4_TRANSPORT: ${{ matrix.transport }}
+        run: python3 scripts/e2e/w4/driver.py --ci-verdict target/e2e/w4/free23/results.json --lane free23 --transport "$W4_TRANSPORT"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: e2e-oracle-free23-w4-${{ github.run_number }}
+          name: e2e-oracle-free23-w4-${{ matrix.transport }}-${{ github.run_number }}
           path: |
             target/e2e/w4/free23/results.json
             target/e2e/w4/free23/cargo-tests.log

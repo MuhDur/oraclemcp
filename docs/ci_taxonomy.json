@@ -16,11 +16,37 @@
       "path_filtered": false
     },
     {
-      "check_name": "Oracle FREE 23ai W4",
+      "check_name": "Oracle FREE 23ai W4 (http)",
       "tier": "required",
       "workflow": "CI",
       "workflow_file": "ci.yml",
       "job_id": "oracle-free23-w4",
+      "triggers": [
+        "pull_request",
+        "push",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "Oracle FREE 23ai W4 (stdio)",
+      "tier": "required",
+      "workflow": "CI",
+      "workflow_file": "ci.yml",
+      "job_id": "oracle-free23-w4",
+      "triggers": [
+        "pull_request",
+        "push",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "Oracle FREE 23ai W4 build + manifest units",
+      "tier": "required",
+      "workflow": "CI",
+      "workflow_file": "ci.yml",
+      "job_id": "oracle-free23-w4-build",
       "triggers": [
         "pull_request",
         "push",
@@ -887,7 +913,9 @@
         "workflow_dispatch"
       ],
       "jobs": [
-        "Oracle FREE 23ai W4",
+        "Oracle FREE 23ai W4 (http)",
+        "Oracle FREE 23ai W4 (stdio)",
+        "Oracle FREE 23ai W4 build + manifest units",
         "Oracle FREE 23ai matrix + VECTOR smoke",
         "PL/SQL intelligence feature matrix",
         "Rust workspace (Windows)",
@@ -1070,7 +1098,9 @@
       "web bundle (npm ci + vite build)"
     ],
     "required": [
-      "Oracle FREE 23ai W4",
+      "Oracle FREE 23ai W4 (http)",
+      "Oracle FREE 23ai W4 (stdio)",
+      "Oracle FREE 23ai W4 build + manifest units",
       "Oracle FREE 23ai matrix + VECTOR smoke",
       "PL/SQL intelligence feature matrix",
       "Windows installer PSSA and dry-run",
