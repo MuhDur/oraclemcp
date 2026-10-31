@@ -905,23 +905,37 @@ const OFFICIAL_SERVER_VERSION_FULL_SQL: &str =
 /// faithfully (python-oracledb reports the same), while driver-cx reports the
 /// server's version string ("18.4.0.0.0") and 21c and later encode the full
 /// version. Report the catalog's `VERSION_FULL` (18c and later) so both
-/// backends describe the same server; a server without that column (ORA-00904)
-/// keeps the decoded value.
+/// backends describe the same server; see [`server_version_or_decoded`] for
+/// when the decoded value is kept.
 fn official_server_version(connection: &oracledb::Connection) -> Result<String, DbError> {
     let decoded = connection
         .version()
         .map_err(|error| official_error(error, OfficialOperation::Query))?
         .to_string();
-    match connection.query_row(OFFICIAL_SERVER_VERSION_FULL_SQL, &[]) {
-        Ok(row) => Ok(row
-            .get::<Option<String>>(0)
-            .map_err(|error| official_error(error, OfficialOperation::Query))?
-            .filter(|full| !full.is_empty())
-            .unwrap_or(decoded)),
-        Err(error) if oraclemcp_error::parse_ora_code(&error.to_string()) == Some(904) => {
-            Ok(decoded)
-        }
-        Err(error) => Err(official_error(error, OfficialOperation::Query)),
+    let full = connection
+        .query_row(OFFICIAL_SERVER_VERSION_FULL_SQL, &[])
+        .map_err(|error| official_error(error, OfficialOperation::Query))
+        .and_then(|row| {
+            row.get::<Option<String>>(0)
+                .map_err(|error| official_error(error, OfficialOperation::Query))
+        });
+    server_version_or_decoded(decoded, full)
+}
+
+/// Prefer the catalog's full version, but an informational query must not fail
+/// describe: an account without access to the view (ORA-00942, ORA-01031), a
+/// pre-18 server without the column (ORA-00904), an empty value or any other
+/// server-side refusal keeps the decoded version. Only an error that leaves the
+/// session state uncertain (cancellation, lost connection) propagates, so a
+/// broken session is never described as healthy.
+fn server_version_or_decoded(
+    decoded: String,
+    full: Result<Option<String>, DbError>,
+) -> Result<String, DbError> {
+    match full {
+        Ok(full) => Ok(full.filter(|full| !full.is_empty()).unwrap_or(decoded)),
+        Err(error) if error.is_uncertain_session_state() => Err(error),
+        Err(_) => Ok(decoded),
     }
 }
 
@@ -1889,6 +1903,37 @@ mod tests {
         assert!(
             rustls::crypto::CryptoProvider::get_default().is_some(),
             "a process-level rustls provider is installed for the official driver"
+        );
+    }
+
+    #[test]
+    fn official_server_version_keeps_the_decoded_version_on_server_refusals() {
+        let decoded = || "18.0.0.0.0".to_owned();
+        for code in [942, 1031, 904] {
+            let refused = DbError::Query(format!(
+                "ORA-{code:05}: official Oracle driver operation failed"
+            ));
+            assert_eq!(
+                server_version_or_decoded(decoded(), Err(refused)).expect("decoded version"),
+                "18.0.0.0.0",
+                "ORA-{code:05} must not fail describe"
+            );
+        }
+        assert_eq!(
+            server_version_or_decoded(decoded(), Ok(Some("18.4.0.0.0".into()))).unwrap(),
+            "18.4.0.0.0"
+        );
+        for absent in [None, Some(String::new())] {
+            assert_eq!(
+                server_version_or_decoded(decoded(), Ok(absent)).unwrap(),
+                "18.0.0.0.0"
+            );
+        }
+        let lost =
+            DbError::ConnectionLost("ORA-03113: official Oracle driver operation failed".into());
+        assert!(
+            server_version_or_decoded(decoded(), Err(lost)).is_err(),
+            "a lost session must not be described as healthy"
         );
     }
 
