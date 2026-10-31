@@ -314,6 +314,18 @@ fn impact_attached_to_every_minting_preview() {
                 canonical_tool_name(&tool.name),
                 "oracle_compile_object" | "oracle_create_or_replace" | "oracle_patch_source"
             ) || tool.name == "deploy_ddl";
+            if matches!(field, "effects" | "sast")
+                && matches!(canonical_tool_name(&tool.name), "oracle_preview_sql")
+            {
+                // The UPDATE fixture calls no routine and changes no source.
+                assert_eq!(
+                    result["impact"][field],
+                    json!({"status":"not_applicable","reason":"no_source"}),
+                    "{} {field}",
+                    tool.name
+                );
+                continue;
+            }
             if matches!(field, "effects" | "sast") && source_tool {
                 let status = &result["impact"][field];
                 if cfg!(feature = "plsql-intelligence") {
@@ -16634,6 +16646,38 @@ mod source_impact_preview {
             }
             assert_eq!(impact["effects"]["status"], "computed", "{tool}: {impact}");
         }
+    }
+
+    #[test]
+    fn routine_call_previews_report_served_call_effects() {
+        // An anonymous block may call anything the parser cannot see.
+        let block = preview("oracle_preview_sql", json!({"sql":"BEGIN APP.P; END;"}))
+            .expect("block preview");
+        let effects = &block["impact"]["effects"];
+        assert_eq!(effects["status"], "computed", "{effects}");
+        assert_eq!(effects["value"]["kind"], "routine_calls");
+        assert_eq!(
+            effect_names(&effects["value"]["after"]),
+            ["Unknown"],
+            "{effects}"
+        );
+        assert!(
+            !effects["value"]["unknown_reasons"]["after"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(block["impact"]["sast"]["reason"], "no_source");
+        // A statement that calls no routine has no effect field.
+        let update = preview(
+            "oracle_preview_sql",
+            json!({"sql":"UPDATE APP.T SET ID = 2 WHERE ID = 1","commit":true}),
+        )
+        .expect("update preview");
+        assert_eq!(
+            update["impact"]["effects"],
+            json!({"status":"not_applicable","reason":"no_source"})
+        );
     }
 
     #[test]

@@ -117,6 +117,7 @@ impl ProfileClassifier {
                     .with_oracle(Arc::clone(&prepared.oracle));
             }
             Err(reason) => {
+                prepared.reason = Some(reason);
                 if let Ok(mut finding) = self.finding.lock() {
                     *finding = Some(reason);
                 }
@@ -130,6 +131,7 @@ impl ProfileClassifier {
         #[cfg(not(feature = "plsql-intelligence"))]
         {
             let _ = (cx, conn, cache, calls);
+            prepared.reason = Some("engine_not_built");
             if let Ok(mut finding) = self.finding.lock() {
                 *finding = Some("engine_not_built");
             }
@@ -181,9 +183,71 @@ pub(super) struct PreparedClassifier {
     drain: Option<ProfileDrainState>,
     bindings: Vec<ClosureBinding>,
     read_policy: RoutineReadPolicy,
+    /// Why the engine could not prove this statement's routine closures.
+    reason: Option<&'static str>,
+}
+
+/// The served effect sets of the routines one statement calls.
+pub(super) struct CallEffects {
+    /// Each called routine with its effects; Unknown when its closure is unproven.
+    pub(super) calls: Vec<(String, oraclemcp_guard::RoutineEffectsV1)>,
+    pub(super) unknown_reasons: Vec<String>,
 }
 
 impl PreparedClassifier {
+    /// The effects of every routine `sql` calls, exactly as this profile
+    /// generation's served engine proved them; None when it calls none. A
+    /// statement that cannot be parsed, or a CALL statement, may call anything
+    /// and reports no proven call.
+    pub(super) fn call_effects(&self, sql: &str) -> Option<CallEffects> {
+        use sqlparser::ast::Statement;
+        let unknown = |reason: &str| CallEffects {
+            calls: Vec::new(),
+            unknown_reasons: vec![reason.to_owned()],
+        };
+        let Ok(statements) =
+            sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::OracleDialect {}, sql)
+        else {
+            return Some(unknown(
+                "statement could not be parsed; its routine calls are unknown",
+            ));
+        };
+        if statements
+            .iter()
+            .any(|statement| matches!(statement, Statement::Call(_)))
+        {
+            return Some(unknown("a CALL statement's routine closure is not proven"));
+        }
+        let Ok(found) = sql_routine_calls(sql) else {
+            return Some(unknown("routine call shape could not be proven"));
+        };
+        if found.is_empty() {
+            return None;
+        }
+        let mut calls = Vec::new();
+        let mut unknown_reasons = Vec::new();
+        for call in &found {
+            let effects = self.oracle.routine_call_effects(call).unwrap_or_else(|| {
+                oraclemcp_guard::RoutineEffectsV1::new([oraclemcp_guard::RoutineEffect::Unknown])
+            });
+            let routine = routine_call_key(call);
+            if effects
+                .iter()
+                .any(|effect| effect == oraclemcp_guard::RoutineEffect::Unknown)
+            {
+                unknown_reasons.push(format!(
+                    "{routine}: {}",
+                    self.reason.unwrap_or("routine closure not proven")
+                ));
+            }
+            calls.push((routine, effects));
+        }
+        Some(CallEffects {
+            calls,
+            unknown_reasons,
+        })
+    }
+
     pub(super) fn active_profile(&self) -> Option<&str> {
         self.profile.as_deref()
     }
@@ -244,6 +308,7 @@ impl PreparedClassifier {
             drain: None,
             bindings: Vec::new(),
             read_policy: RoutineReadPolicy::default(),
+            reason: None,
         }
     }
 
@@ -1073,6 +1138,88 @@ mod engine {
                 },
             );
             Classifier::engine_free_baseline(ClassifierConfig::new()).with_oracle(oracle)
+        }
+
+        /// A prepared statement whose APP.FX closure the real engine analyzed.
+        fn prepared_for(source: &str) -> PreparedClassifier {
+            let member = member();
+            let mut effects = BTreeMap::new();
+            if let Ok(proven) = analyze(
+                &facts(&member),
+                &[(member.clone(), source.into())],
+                &member.routine,
+            ) {
+                effects.insert("APP.FX".into(), proven);
+            }
+            let mut prepared = PreparedClassifier::unknown(Some("dev".into()), 1);
+            prepared.oracle = Arc::new(Oracle { effects });
+            prepared
+        }
+
+        fn names(effects: &oraclemcp_guard::RoutineEffectsV1) -> Vec<RoutineEffect> {
+            effects.iter().collect()
+        }
+
+        #[test]
+        fn impact_effects_routine_call_reports_the_served_closure() {
+            let read =
+                prepared_for("FUNCTION FX(n NUMBER) RETURN NUMBER IS BEGIN RETURN n+1; END;");
+            let calls = read
+                .call_effects("SELECT APP.FX(1) FROM DUAL")
+                .expect("a routine call has effects");
+            assert_eq!(calls.calls.len(), 1);
+            assert_eq!(calls.calls[0].0, "APP.FX");
+            // A pure closure is proven to have no effect at all: an empty
+            // set, distinct from Unknown.
+            assert!(names(&calls.calls[0].1).is_empty());
+            assert!(calls.unknown_reasons.is_empty());
+            // The served proof refuses a closure it cannot fully prove (here a
+            // COMMIT under an autonomous transaction): Unknown, never a guess.
+            let mut writes = prepared_for(
+                "FUNCTION FX(n NUMBER) RETURN NUMBER IS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN COMMIT; RETURN n; END;",
+            );
+            writes.reason = Some("engine_closure_unknown");
+            let calls = writes.call_effects("SELECT APP.FX(1) FROM DUAL").unwrap();
+            assert_eq!(names(&calls.calls[0].1), [RoutineEffect::Unknown]);
+            assert_eq!(calls.unknown_reasons, ["APP.FX: engine_closure_unknown"]);
+        }
+
+        #[test]
+        fn impact_effects_unproven_routine_call_is_unknown() {
+            let mut prepared =
+                prepared_for("FUNCTION FX(n NUMBER) RETURN NUMBER IS BEGIN RETURN n+1; END;");
+            prepared.reason = Some("routine_identity_unresolved");
+            let calls = prepared
+                .call_effects("SELECT OTHER.FX(1) FROM DUAL")
+                .unwrap();
+            assert_eq!(names(&calls.calls[0].1), [RoutineEffect::Unknown]);
+            assert_eq!(
+                calls.unknown_reasons,
+                ["OTHER.FX: routine_identity_unresolved"]
+            );
+            // Text the parser cannot read, or a CALL, may call anything.
+            for sql in ["BEGIN APP.P; END;", "CALL APP.P()"] {
+                let calls = prepared.call_effects(sql).expect(sql);
+                assert!(
+                    calls.calls.is_empty() && !calls.unknown_reasons.is_empty(),
+                    "{sql}"
+                );
+            }
+            // With no engine proof at all (the Unknown oracle answers nothing),
+            // a call is Unknown, never an empty effect set.
+            let unproven = PreparedClassifier::unknown(None, 0);
+            let calls = unproven.call_effects("SELECT APP.FX(1) FROM DUAL").unwrap();
+            assert_eq!(names(&calls.calls[0].1), [RoutineEffect::Unknown]);
+            assert_eq!(
+                calls.unknown_reasons,
+                ["APP.FX: routine closure not proven"]
+            );
+            // A statement that calls no routine has no effect field to compute.
+            assert!(
+                prepared
+                    .call_effects("UPDATE APP.T SET N = 1 WHERE ID = 1")
+                    .is_none()
+            );
         }
 
         #[test]

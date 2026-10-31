@@ -2494,5 +2494,67 @@
     "on_unsupported": {
       "error_class": "INVALID_ARGUMENTS"
     }
+  },
+  {
+    "case_id": "w4_impact_routine_call_effects",
+    "tool": "oracle_preview_sql",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE FUNCTION ${owner}.F_CALLFX_${run_id}(n NUMBER) RETURN NUMBER IS\nBEGIN\n  RETURN n + 1;\nEND;"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "sql": "SELECT ${owner}.F_CALLFX_${run_id}(1) AS V FROM DUAL"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "impact": {
+          "effects": {
+            "status": "computed",
+            "value": {
+              "kind": "routine_calls",
+              "calls": [
+                {
+                  "routine": "${owner}.F_CALLFX_${run_id}",
+                  "effects": []
+                }
+              ],
+              "after": [],
+              "unknown_reasons": {
+                "before": [],
+                "after": []
+              },
+              "engine_version": "0.7.0"
+            }
+          },
+          "sast": {
+            "status": "not_applicable",
+            "reason": "no_source"
+          }
+        }
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'F_CALLFX_${run_id}' AND OBJECT_TYPE = 'FUNCTION'",
+        "rows": [
+          [
+            "VALID"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
   }
 ]

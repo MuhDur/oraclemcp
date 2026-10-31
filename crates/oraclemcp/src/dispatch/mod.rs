@@ -12451,7 +12451,95 @@ fn preview_sql(
     if let Some(tightening) = policy_attachment {
         preview["policy"] = tightening;
     }
+    attach_routine_call_impact(&mut preview, proof, sql);
     Ok(preview)
+}
+
+/// Effects of the routines a previewed statement calls (custom tools, routine
+/// calls) come from the closures the served engine proved for this profile
+/// generation; nothing is analyzed twice. A statement that calls no routine
+/// and changes no source has no effect or SAST field. A CREATE OR REPLACE
+/// preview replaces both with its source change afterwards.
+fn attach_routine_call_impact(
+    preview: &mut Value,
+    proof: &served_classifier::PreparedClassifier,
+    sql: &str,
+) {
+    let Some(fields) = preview.as_object_mut() else {
+        return;
+    };
+    let mut impact = fields
+        .get("impact")
+        .and_then(|value| serde_json::from_value::<ImpactV1>(value.clone()).ok())
+        .unwrap_or_default();
+    impact.sast = oraclemcp_guard::FieldStatus::NotApplicable {
+        reason: oraclemcp_guard::NotApplicableReason::NoSource,
+    };
+    impact.effects = match proof.call_effects(sql) {
+        None => oraclemcp_guard::FieldStatus::NotApplicable {
+            reason: oraclemcp_guard::NotApplicableReason::NoSource,
+        },
+        Some(calls) => routine_call_effects_status(&calls),
+    };
+    if let Ok(value) = serde_json::to_value(impact) {
+        fields.insert("impact".to_owned(), value);
+    }
+}
+
+#[cfg(feature = "plsql-intelligence")]
+fn routine_call_effects_status(
+    calls: &served_classifier::CallEffects,
+) -> oraclemcp_guard::FieldStatus<Value> {
+    use std::fmt::Write;
+    let mut after = oraclemcp_guard::RoutineEffectsV1::default();
+    for (_, effects) in &calls.calls {
+        after = after.union(effects);
+    }
+    if !calls.unknown_reasons.is_empty() {
+        after = after.union(&oraclemcp_guard::RoutineEffectsV1::new([
+            oraclemcp_guard::RoutineEffect::Unknown,
+        ]));
+    }
+    let names = |effects: &oraclemcp_guard::RoutineEffectsV1| {
+        Value::Array(
+            effects
+                .iter()
+                .filter_map(|effect| serde_json::to_value(effect).ok())
+                .collect(),
+        )
+    };
+    let mut digest = String::new();
+    for byte in crate::plsql_tools::sast_ruleset_digest() {
+        let _ = write!(digest, "{byte:02x}");
+    }
+    oraclemcp_guard::FieldStatus::Computed {
+        value: json!({
+            "contract": "RoutineEffectsV1",
+            "kind": "routine_calls",
+            "calls": calls.calls.iter().map(|(routine, effects)| {
+                json!({"routine": routine, "effects": names(effects)})
+            }).collect::<Vec<_>>(),
+            // A call changes no source: there is no stored side to diff.
+            "before": Value::Null,
+            "before_status": "not_applicable",
+            "after": names(&after),
+            "added": Value::Null,
+            "removed": Value::Null,
+            "unknown_reasons": {"before": [], "after": calls.unknown_reasons},
+            "engine_version": crate::plsql_tools::ENGINE_VERSION,
+            "ruleset_digest": digest,
+        }),
+    }
+}
+
+#[cfg(not(feature = "plsql-intelligence"))]
+fn routine_call_effects_status(
+    calls: &served_classifier::CallEffects,
+) -> oraclemcp_guard::FieldStatus<Value> {
+    let _ = (&calls.calls, &calls.unknown_reasons);
+    oraclemcp_guard::FieldStatus::Unavailable {
+        reason: oraclemcp_guard::UnavailableReason::EngineNotWired,
+    }
 }
 
 fn connection_info_json(
