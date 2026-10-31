@@ -1,3 +1,7 @@
+use oraclemcp_guard::action_envelope::{
+    ActionEnvelopeV1, ActionKind, BindEnvelope, ExecLimits, OutputCapture,
+};
+use oraclemcp_guard::effective_dml_plan::{DmlCallerStatementV1, DmlPlanError, EffectiveDmlPlanV1};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -95,12 +99,50 @@ fn resolved() -> ResolvedDmlTarget {
         ),
         identity: identity(),
         object_kind: CatalogObjectKind::Table,
+        columns: ["ID", "STATUS", "TENANT_ID"]
+            .into_iter()
+            .map(|name| ColumnIdent::new(name).unwrap())
+            .collect(),
         bind_types: BTreeMap::new(),
     }
 }
 
-fn matched(sql: &str, verb: &str) -> oraclemcp_guard::scoped_grant::GrantMatch {
-    match_sql(&grant(verb), sql, &resolved()).unwrap()
+fn plan(
+    sql: &str,
+    grant: &ScopedGrant,
+    policy: Option<Expr>,
+    cap: u64,
+) -> Result<EffectiveDmlPlanV1, DmlPlanError> {
+    let binds = BindEnvelope::from_binds(&[7; 32], &[]);
+    let caller = DmlCallerStatementV1::parse(sql, identity(), "APP", &resolved().columns, &binds)?;
+    let envelope = ActionEnvelopeV1 {
+        version: 1,
+        action_kind: ActionKind::ExecuteDml,
+        statement_digest: ActionEnvelopeV1::statement_digest(sql),
+        binds,
+        commit: false,
+        hold: false,
+        output: OutputCapture {
+            capture_dbms_output: false,
+            max_lines: 0,
+            max_chars: 0,
+        },
+        limits: ExecLimits {
+            timeout_seconds: Some(5),
+        },
+        scoped_grant_ref: Some([4; 32]),
+    };
+    EffectiveDmlPlanV1::from_verified_rewrite(
+        caller,
+        &envelope,
+        [1; 32],
+        [2; 32],
+        vec!["tenant".into()],
+        [3; 32],
+        policy,
+        grant,
+        cap,
+    )
 }
 
 fn parse_one(sql: &str) -> Statement {
@@ -167,17 +209,19 @@ fn sqlparser_rejects_update_inline_view_check_option() {
 
 #[test]
 fn grant_rewrite_update_template_parts_round_trip_and_reclassify() {
-    let matched = matched(
-        "UPDATE APP.ORDERS SET STATUS = 'ready' WHERE TENANT_ID = 7",
-        "UPDATE",
-    );
     let policy_q = Expr::BinaryOp {
         left: Box::new(Expr::Identifier(sqlparser::ast::Ident::new("TENANT_ID"))),
         op: BinaryOperator::Eq,
         right: Box::new(Expr::Value(Value::Number("7".into(), false).into())),
     };
-    let rewrite = render_grant_update(&matched, &predicate("ID", "11"), Some(&policy_q), 5)
-        .expect("validated server template");
+    let plan = plan(
+        "UPDATE APP.ORDERS SET STATUS = 'ready' WHERE TENANT_ID = 7",
+        &grant("UPDATE"),
+        Some(policy_q),
+        5,
+    )
+    .unwrap();
+    let rewrite = render_grant_update(&plan).expect("validated server template");
     assert_eq!(
         rewrite.executable_sql(),
         "UPDATE (SELECT * FROM \"APP\".\"ORDERS\" WHERE \"ID\" = :omcp_g1 WITH CHECK OPTION) SET \"STATUS\" = 'ready' WHERE ((TENANT_ID = 7) AND (TENANT_ID = 7)) AND (ROWNUM <= 5)"
@@ -191,13 +235,19 @@ fn grant_rewrite_update_template_parts_round_trip_and_reclassify() {
 
 #[test]
 fn grant_rewrite_delete_conjunct_is_parenthesized_and_reclassifies() {
-    let matched = matched("DELETE FROM APP.ORDERS WHERE ID >= 1", "DELETE");
     let q = Expr::BinaryOp {
         left: Box::new(Expr::Identifier(sqlparser::ast::Ident::new("TENANT_ID"))),
         op: BinaryOperator::Eq,
         right: Box::new(Expr::Value(Value::Number("7".into(), false).into())),
     };
-    let rewrite = render_grant_delete(&matched, &predicate("ID", "11"), Some(&q), 5).unwrap();
+    let plan = plan(
+        "DELETE FROM APP.ORDERS WHERE ID >= 1",
+        &grant("DELETE"),
+        Some(q),
+        5,
+    )
+    .unwrap();
+    let rewrite = render_grant_delete(&plan).unwrap();
     assert!(
         rewrite
             .executable_sql()
@@ -218,11 +268,14 @@ fn grant_rewrite_delete_conjunct_is_parenthesized_and_reclassifies() {
 
 #[test]
 fn grant_rewrite_no_caller_text_concatenation() {
-    let injection = matched(
+    let injection = plan(
         "DELETE FROM APP.ORDERS WHERE STATUS = ') OR (1=1'",
-        "DELETE",
-    );
-    let safe = render_grant_delete(&injection, &predicate("ID", "11"), None, 5).unwrap();
+        &grant("DELETE"),
+        None,
+        5,
+    )
+    .unwrap();
+    let safe = render_grant_delete(&injection).unwrap();
     assert!(safe.executable_sql().contains("STATUS = ') OR (1=1'"));
     assert!(safe.executable_sql().contains("AND (\"ID\" = :omcp_g1)"));
     assert_eq!(
@@ -232,28 +285,43 @@ fn grant_rewrite_no_caller_text_concatenation() {
         1
     );
 
-    let boolean_injection = matched("DELETE FROM APP.ORDERS WHERE ID = 1 OR (1 = 1)", "DELETE");
     assert_eq!(
-        render_grant_delete(&boolean_injection, &predicate("ID", "11"), None, 5).unwrap_err(),
-        GrantRewriteError::UnsupportedExpression
+        plan(
+            "DELETE FROM APP.ORDERS WHERE ID = 1 OR (1 = 1)",
+            &grant("DELETE"),
+            None,
+            5
+        )
+        .unwrap_err(),
+        DmlPlanError::UnsupportedPredicate
     );
 }
 
 #[test]
 fn grant_rewrite_requires_caller_where_and_validates_positive_integer_cap() {
-    let no_where = matched("DELETE FROM APP.ORDERS", "DELETE");
     assert_eq!(
-        render_grant_delete(&no_where, &predicate("ID", "11"), None, 5).unwrap_err(),
-        GrantRewriteError::MissingCallerWhere
-    );
-    let update = matched("UPDATE APP.ORDERS SET STATUS = 'x' WHERE ID = 11", "UPDATE");
-    assert_eq!(
-        render_grant_update(&update, &predicate("ID", "11"), None, 0).unwrap_err(),
-        GrantRewriteError::InvalidCap
+        plan("DELETE FROM APP.ORDERS", &grant("DELETE"), None, 5).unwrap_err(),
+        DmlPlanError::UnsupportedPredicate
     );
     assert_eq!(
-        render_grant_update(&update, &predicate("ID", "11"), None, 6).unwrap_err(),
-        GrantRewriteError::InvalidCap
+        plan(
+            "UPDATE APP.ORDERS SET STATUS = 'x' WHERE ID = 11",
+            &grant("UPDATE"),
+            None,
+            0
+        )
+        .unwrap_err(),
+        DmlPlanError::InvalidEffectivePlan
+    );
+    assert_eq!(
+        plan(
+            "UPDATE APP.ORDERS SET STATUS = 'x' WHERE ID = 11",
+            &grant("UPDATE"),
+            None,
+            6
+        )
+        .unwrap_err(),
+        DmlPlanError::GrantMismatch
     );
 }
 
@@ -273,11 +341,55 @@ fn grant_rewrite_refuses_set_predicate_column_before_rendering() {
 }
 
 #[test]
-fn grant_rewrite_refuses_a_predicate_that_differs_from_the_matched_grant() {
-    let update = matched("UPDATE APP.ORDERS SET STATUS = 'x' WHERE ID = 11", "UPDATE");
+fn grant_renderer_uses_only_the_predicate_bound_into_the_immutable_plan() {
+    let sql = "UPDATE APP.ORDERS SET STATUS = 'x' WHERE ID = 11";
+    let first = plan(sql, &grant("UPDATE"), None, 5).unwrap();
+    let changed = plan(sql, &grant_for("UPDATE", predicate("ID", "10")), None, 5).unwrap();
+    assert!(std::ptr::eq(
+        render_grant_update(&first).unwrap(),
+        first.rewrite()
+    ));
+    assert_eq!(first.grant_binds()[0].value().expose_canonical(), "11");
+    assert_eq!(changed.grant_binds()[0].value().expose_canonical(), "10");
+    assert_ne!(first.digest(), changed.digest());
     assert_eq!(
-        render_grant_update(&update, &predicate("ID", "10"), None, 5).unwrap_err(),
-        GrantRewriteError::GrantPredicateMismatch
+        render_grant_delete(&first).unwrap_err(),
+        GrantRewriteError::UnsupportedVerb
+    );
+}
+
+#[test]
+fn policy_q_uses_the_same_bounded_resolved_predicate_grammar() {
+    let sql = "UPDATE APP.ORDERS SET STATUS='x' WHERE ID=11";
+    for expression in [
+        "ID=TRUE",
+        "ID=X'AA'",
+        "UNKNOWN_COLUMN=1",
+        "ID=USER_FUNC(1)",
+        "ID=APP.SEQ.NEXTVAL",
+        "EXISTS (SELECT 1 FROM APP.OTHER)",
+        "ID=TENANT_ID",
+        "ID=1 OR ID=2",
+        "ID=:1",
+    ] {
+        let mut parser = Parser::new(&OracleDialect {})
+            .try_with_sql(expression)
+            .unwrap();
+        let policy = parser.parse_expr().unwrap();
+        assert_eq!(
+            plan(sql, &grant("UPDATE"), Some(policy), 5).unwrap_err(),
+            DmlPlanError::PolicyPredicateInvalid,
+            "unchecked Q: {expression}"
+        );
+    }
+    let values = std::iter::repeat_n("1", 1001).collect::<Vec<_>>().join(",");
+    let expression = format!("ID IN ({values})");
+    let mut parser = Parser::new(&OracleDialect {})
+        .try_with_sql(&expression)
+        .unwrap();
+    assert_eq!(
+        plan(sql, &grant("UPDATE"), Some(parser.parse_expr().unwrap()), 5).unwrap_err(),
+        DmlPlanError::PolicyPredicateInvalid
     );
 }
 
@@ -288,13 +400,13 @@ proptest! {
     fn prop_rewrite_never_widens_row_set(caller_floor in 0i64..12, p_id in 0i64..12, tenant in 0i64..9) {
         let sql = format!("DELETE FROM APP.ORDERS WHERE ID >= {caller_floor}");
         let p = predicate("ID", &p_id.to_string());
-        let matched = match_sql(&grant_for("DELETE", p.clone()), &sql, &resolved()).unwrap();
         let q = Expr::BinaryOp {
             left: Box::new(Expr::Identifier(sqlparser::ast::Ident::new("TENANT_ID"))),
             op: BinaryOperator::Eq,
             right: Box::new(Expr::Value(Value::Number(tenant.to_string(), false).into())),
         };
-        let rewrite = render_grant_delete(&matched, &p, Some(&q), 5).unwrap();
+        let plan = plan(&sql, &grant_for("DELETE", p.clone()), Some(q), 5).unwrap();
+        let rewrite = render_grant_delete(&plan).unwrap();
         let binds = BTreeMap::from([(
             rewrite.binds()[0].name().to_owned(),
             rewrite.binds()[0]

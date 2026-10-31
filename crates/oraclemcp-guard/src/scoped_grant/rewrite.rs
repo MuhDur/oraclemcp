@@ -14,6 +14,7 @@ use sqlparser::dialect::OracleDialect;
 use sqlparser::parser::Parser;
 
 use crate::classifier::Classifier;
+use crate::effective_dml_plan::{EffectiveDmlPlanV1, validate_policy_filter};
 use crate::levels::DangerLevel;
 
 use super::matcher::GrantMatch;
@@ -146,6 +147,7 @@ pub struct GrantRewriteV1 {
     parts: GrantRewriteParts,
     binds: Vec<GrantBind>,
     reclass_form: String,
+    effective_selection: Expr,
 }
 
 impl GrantRewriteV1 {
@@ -168,6 +170,10 @@ impl GrantRewriteV1 {
     pub fn reclass_form(&self) -> &str {
         &self.reclass_form
     }
+
+    pub(crate) fn effective_selection(&self) -> &Expr {
+        &self.effective_selection
+    }
 }
 
 impl fmt::Debug for GrantRewriteV1 {
@@ -180,37 +186,34 @@ impl fmt::Debug for GrantRewriteV1 {
     }
 }
 
-/// Build the CHECK OPTION UPDATE envelope from the matched target and ASTs.
+/// Read the CHECK OPTION UPDATE template owned by the verified plan.
 pub fn render_grant_update(
-    matched: &GrantMatch,
-    p: &GrantPredicateV1,
-    q: Option<&Expr>,
-    cap: u32,
-) -> Result<GrantRewriteV1, GrantRewriteError> {
-    render(matched, p, q, cap, GrantVerb::Update)
+    plan: &EffectiveDmlPlanV1,
+) -> Result<&GrantRewriteV1, GrantRewriteError> {
+    if plan.caller().verb() != GrantVerb::Update {
+        return Err(GrantRewriteError::UnsupportedVerb);
+    }
+    Ok(plan.rewrite())
 }
 
-/// Build a DELETE whose selection is the caller WHERE, policy Q, grant P and
-/// the server-validated row-cap conjunct.
+/// Read the DELETE template owned by the verified plan. Its selection and
+/// capped impact query were built together, before this immutable view.
 pub fn render_grant_delete(
-    matched: &GrantMatch,
-    p: &GrantPredicateV1,
-    q: Option<&Expr>,
-    cap: u32,
-) -> Result<GrantRewriteV1, GrantRewriteError> {
-    render(matched, p, q, cap, GrantVerb::Delete)
+    plan: &EffectiveDmlPlanV1,
+) -> Result<&GrantRewriteV1, GrantRewriteError> {
+    if plan.caller().verb() != GrantVerb::Delete {
+        return Err(GrantRewriteError::UnsupportedVerb);
+    }
+    Ok(plan.rewrite())
 }
 
-fn render(
+pub(crate) fn build_rewrite(
     matched: &GrantMatch,
     grant_predicate: &GrantPredicateV1,
     policy_q: Option<&Expr>,
     cap: u32,
-    expected: GrantVerb,
 ) -> Result<GrantRewriteV1, GrantRewriteError> {
-    if matched.verb() != expected {
-        return Err(GrantRewriteError::UnsupportedVerb);
-    }
+    let expected = matched.verb();
     if matched.cte().is_some() {
         return Err(GrantRewriteError::CteUnsupported);
     }
@@ -224,12 +227,9 @@ fn render(
         .caller_where()
         .cloned()
         .ok_or(GrantRewriteError::MissingCallerWhere)?;
-    validate_filter(&caller_where)?;
     if let Some(q) = policy_q {
-        validate_filter(q)?;
-        if has_placeholder(q) {
-            return Err(GrantRewriteError::UnsupportedExpression);
-        }
+        validate_policy_filter(q, matched.resolved_columns())
+            .map_err(|_| GrantRewriteError::UnsupportedExpression)?;
     }
 
     if matched
@@ -240,7 +240,6 @@ fn render(
         return Err(GrantRewriteError::SetPredicateColumn);
     }
     let (p_ast, binds) = render_ast(grant_predicate);
-    validate_filter(&p_ast)?;
     let p_columns: BTreeSet<String> = grant_predicate
         .columns()
         .into_iter()
@@ -271,9 +270,6 @@ fn render(
     }
     if expected == GrantVerb::Delete && !set.is_empty() {
         return Err(GrantRewriteError::UnsupportedExpression);
-    }
-    for assignment in &set {
-        validate_value(&assignment.value)?;
     }
 
     let target = QuotedIdent::from_match(matched)?;
@@ -322,6 +318,7 @@ fn render(
         },
         binds,
         reclass_form,
+        effective_selection: reclass_selection,
     })
 }
 
@@ -425,94 +422,6 @@ fn parse_expr(sql: &str) -> Result<Expr, GrantRewriteError> {
         .expect_token(&sqlparser::tokenizer::Token::EOF)
         .map_err(|_| GrantRewriteError::RoundTrip)?;
     Ok(expr)
-}
-
-fn validate_filter(expr: &Expr) -> Result<(), GrantRewriteError> {
-    match expr {
-        Expr::Nested(inner) => validate_filter(inner),
-        Expr::BinaryOp { left, op, right } if *op == BinaryOperator::And => {
-            validate_filter(left)?;
-            validate_filter(right)
-        }
-        Expr::BinaryOp {
-            left,
-            op:
-                BinaryOperator::Eq
-                | BinaryOperator::NotEq
-                | BinaryOperator::Lt
-                | BinaryOperator::LtEq
-                | BinaryOperator::Gt
-                | BinaryOperator::GtEq,
-            right,
-        } => {
-            if !matches!(left.as_ref(), Expr::Identifier(_)) {
-                return Err(GrantRewriteError::UnsupportedExpression);
-            }
-            validate_value(right)
-        }
-        Expr::InList {
-            expr,
-            list,
-            negated: false,
-        } if matches!(expr.as_ref(), Expr::Identifier(_)) && !list.is_empty() => {
-            list.iter().try_for_each(validate_value)
-        }
-        Expr::Between {
-            expr,
-            negated: false,
-            low,
-            high,
-        } if matches!(expr.as_ref(), Expr::Identifier(_)) => {
-            validate_value(low)?;
-            validate_value(high)
-        }
-        Expr::IsNull(expr) | Expr::IsNotNull(expr)
-            if matches!(expr.as_ref(), Expr::Identifier(_)) =>
-        {
-            Ok(())
-        }
-        _ => Err(GrantRewriteError::UnsupportedExpression),
-    }
-}
-
-fn validate_value(expr: &Expr) -> Result<(), GrantRewriteError> {
-    match expr {
-        Expr::Nested(inner) => validate_value(inner),
-        Expr::Value(_) => Ok(()),
-        Expr::UnaryOp {
-            op: sqlparser::ast::UnaryOperator::Minus,
-            expr,
-        } if matches!(expr.as_ref(), Expr::Value(value) if matches!(value.value, Value::Number(..))) => {
-            Ok(())
-        }
-        Expr::TypedString(typed)
-            if typed.data_type == sqlparser::ast::DataType::Date
-                && matches!(typed.value.value, Value::SingleQuotedString(_)) =>
-        {
-            Ok(())
-        }
-        _ => Err(GrantRewriteError::UnsupportedExpression),
-    }
-}
-
-fn has_placeholder(expr: &Expr) -> bool {
-    use sqlparser::ast::Visit;
-    use sqlparser::ast::Visitor;
-    struct PlaceholderFinder(bool);
-    impl Visitor for PlaceholderFinder {
-        type Break = ();
-        fn pre_visit_expr(&mut self, expr: &Expr) -> std::ops::ControlFlow<Self::Break> {
-            if matches!(expr, Expr::Value(value) if matches!(value.value, Value::Placeholder(_))) {
-                self.0 = true;
-                std::ops::ControlFlow::Break(())
-            } else {
-                std::ops::ControlFlow::Continue(())
-            }
-        }
-    }
-    let mut finder = PlaceholderFinder(false);
-    let _ = expr.visit(&mut finder);
-    finder.0
 }
 
 #[cfg(test)]

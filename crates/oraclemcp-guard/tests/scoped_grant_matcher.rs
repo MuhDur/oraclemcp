@@ -95,6 +95,7 @@ fn resolved() -> ResolvedDmlTarget {
         ),
         identity: identity(),
         object_kind: CatalogObjectKind::Table,
+        columns: ["ID", "STATUS", "TENANT_ID"].into_iter().map(col).collect(),
         bind_types: BTreeMap::from([
             ("S".into(), OracleBindType::String),
             ("ID".into(), OracleBindType::I64),
@@ -116,6 +117,105 @@ fn check(
 }
 
 const VALID: &str = "UPDATE APP.ORDERS SET STATUS = :s WHERE ID = :id";
+
+#[test]
+fn caller_where_uses_the_closed_resolved_column_grammar_before_rendering() {
+    let mut target = resolved();
+    target.bind_types.clear();
+    for predicate in [
+        "USER_FUNC(ID) = 1",
+        "ID = USER_FUNC(1)",
+        "ID = APP.SEQ.NEXTVAL",
+        "EXISTS (SELECT 1 FROM APP.OTHER)",
+        "ID IN (SELECT ID FROM APP.OTHER)",
+        "APP.OTHER.ID = 1",
+        "ID = TENANT_ID",
+        "ID = 1 OR TENANT_ID = 2",
+        "NOT (ID = 1)",
+        "1 = 1",
+        "UNKNOWN_COLUMN = 1",
+        "\"id\" = 1",
+        "ID = TRUE",
+        "ID = X'AA'",
+    ] {
+        let sql = format!("UPDATE APP.ORDERS SET STATUS = 'x' WHERE {predicate}");
+        assert!(
+            match_sql(&grant(), &sql, &target).is_err(),
+            "unchecked predicate: {predicate}"
+        );
+    }
+    for predicate in [
+        "ID IN (1, 2) AND TENANT_ID BETWEEN 2 AND 8",
+        "\"ID\" = 1 AND STATUS IS NOT NULL",
+    ] {
+        let sql = format!("UPDATE APP.ORDERS SET STATUS = 'x' WHERE {predicate}");
+        match_sql(&grant(), &sql, &target).expect("resolved bounded predicate");
+    }
+    target.columns.insert(col("lineId"));
+    match_sql(
+        &grant(),
+        "UPDATE APP.ORDERS SET STATUS='x' WHERE \"lineId\"=1",
+        &target,
+    )
+    .expect("quoted catalog column retains its exact case");
+    for predicate in ["lineId=1", "\"LINEID\"=1"] {
+        let sql = format!("UPDATE APP.ORDERS SET STATUS='x' WHERE {predicate}");
+        assert!(match_sql(&grant(), &sql, &target).is_err());
+    }
+}
+
+#[test]
+fn named_where_bind_types_are_checked_without_inventing_positional_order() {
+    let mut target = resolved();
+    target.bind_types = BTreeMap::from([
+        ("S".into(), OracleBindType::String),
+        ("Z".into(), OracleBindType::I64),
+        ("A".into(), OracleBindType::I64),
+    ]);
+    match_sql(
+        &grant(),
+        "UPDATE APP.ORDERS SET STATUS=:s WHERE ID=:z AND TENANT_ID=:a",
+        &target,
+    )
+    .unwrap();
+    for unsupported in [OracleBindType::Bool, OracleBindType::Null] {
+        target.bind_types.insert("Z".into(), unsupported);
+        assert!(
+            match_sql(
+                &grant(),
+                "UPDATE APP.ORDERS SET STATUS=:s WHERE ID=:z AND TENANT_ID=:a",
+                &target
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn production_matcher_refuses_oversized_in_list_and_boolean_depth() {
+    let mut target = resolved();
+    target.bind_types.clear();
+    let values = std::iter::repeat_n("1", 1001).collect::<Vec<_>>().join(",");
+    assert!(
+        match_sql(
+            &grant(),
+            &format!("UPDATE APP.ORDERS SET STATUS='x' WHERE ID IN ({values})"),
+            &target
+        )
+        .is_err()
+    );
+    let clauses = std::iter::repeat_n("ID=1", 65)
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    assert!(
+        match_sql(
+            &grant(),
+            &format!("UPDATE APP.ORDERS SET STATUS='x' WHERE {clauses}"),
+            &target
+        )
+        .is_err()
+    );
+}
 
 #[test]
 fn scope_match_exact_update_admitted() {

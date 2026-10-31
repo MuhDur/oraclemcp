@@ -1,6 +1,10 @@
 #![cfg(feature = "live-xe")]
 #![forbid(unsafe_code)]
 
+use oraclemcp_guard::action_envelope::{
+    ActionEnvelopeV1, ActionKind, BindEnvelope, CanonicalBind, ExecLimits, OutputCapture,
+};
+use oraclemcp_guard::effective_dml_plan::{DmlCallerStatementV1, EffectiveDmlPlanV1};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -99,7 +103,7 @@ fn target(owner: &str, table: &str) -> GrantTargetIdentity {
     }
 }
 
-fn grant(
+fn make_grant(
     target: GrantTargetIdentity,
     verb: &str,
     predicate_column: &str,
@@ -142,7 +146,16 @@ fn grant(
     .unwrap()
 }
 
-fn resolved(identity: GrantTargetIdentity) -> ResolvedDmlTarget {
+async fn resolved(
+    cx: &Cx,
+    conn: &RustOracleConnection,
+    identity: GrantTargetIdentity,
+) -> ResolvedDmlTarget {
+    let columns = conn.query_rows(cx,
+        "SELECT column_name FROM SYS.all_tab_columns WHERE owner=:1 AND table_name=:2 ORDER BY column_id",
+        &[OracleBind::from(identity.owner.clone()), OracleBind::from(identity.object_name.clone())])
+        .await.expect("actual target columns").iter().map(|row|
+            ColumnIdent::new(row.text("COLUMN_NAME").expect("native column name")).unwrap()).collect();
     ResolvedDmlTarget {
         raw_name: RawName::new(
             [
@@ -153,8 +166,57 @@ fn resolved(identity: GrantTargetIdentity) -> ResolvedDmlTarget {
         ),
         identity,
         object_kind: CatalogObjectKind::Table,
+        columns,
         bind_types: BTreeMap::new(),
     }
+}
+
+fn build_plan(
+    sql: &str,
+    grant: &ScopedGrant,
+    columns: &BTreeSet<ColumnIdent>,
+    policy: sqlparser::ast::Expr,
+    cap: u64,
+    values: &[CanonicalBind<'_>],
+) -> EffectiveDmlPlanV1 {
+    let binds = BindEnvelope::from_binds(&[7; 32], values);
+    let caller = DmlCallerStatementV1::parse(
+        sql,
+        grant.target().clone(),
+        &grant.target().owner,
+        columns,
+        &binds,
+    )
+    .unwrap();
+    let envelope = ActionEnvelopeV1 {
+        version: 1,
+        action_kind: ActionKind::ExecuteDml,
+        statement_digest: ActionEnvelopeV1::statement_digest(sql),
+        binds,
+        commit: false,
+        hold: false,
+        output: OutputCapture {
+            capture_dbms_output: false,
+            max_lines: 0,
+            max_chars: 0,
+        },
+        limits: ExecLimits {
+            timeout_seconds: Some(5),
+        },
+        scoped_grant_ref: Some([4; 32]),
+    };
+    EffectiveDmlPlanV1::from_verified_rewrite(
+        caller,
+        &envelope,
+        [1; 32],
+        [2; 32],
+        vec!["synthetic-tenant".into()],
+        [3; 32],
+        Some(policy),
+        grant,
+        cap,
+    )
+    .unwrap()
 }
 
 fn bind_values(rewrite: &oraclemcp_guard::scoped_grant::GrantRewriteV1) -> Vec<OracleBind> {
@@ -163,6 +225,47 @@ fn bind_values(rewrite: &oraclemcp_guard::scoped_grant::GrantRewriteV1) -> Vec<O
         .iter()
         .map(|bind| OracleBind::I64(bind.value().expose_canonical().parse().unwrap()))
         .collect()
+}
+
+fn plan_bind_values(
+    plan: &EffectiveDmlPlanV1,
+    callers: &[OracleBind],
+    count: bool,
+) -> Vec<OracleBind> {
+    use oraclemcp_guard::effective_dml_plan::DmlPlanBindV1;
+    let grants = bind_values(plan.rewrite());
+    let layout = if count {
+        plan.impact_bind_layout()
+    } else {
+        plan.execution_bind_layout()
+    };
+    layout
+        .iter()
+        .map(|slot| match slot {
+            DmlPlanBindV1::Caller { position } => callers[*position - 1].clone(),
+            DmlPlanBindV1::Grant { index } => grants[*index].clone(),
+        })
+        .collect()
+}
+
+async fn native_count(
+    conn: &RustOracleConnection,
+    cx: &Cx,
+    sql: &str,
+    binds: &[OracleBind],
+) -> i64 {
+    let rows = conn
+        .query_rows(cx, sql, binds)
+        .await
+        .expect("actual Oracle count");
+    assert_eq!(rows.len(), 1);
+    rows[0].columns[0]
+        .1
+        .value
+        .as_deref()
+        .unwrap()
+        .parse()
+        .unwrap()
 }
 
 async fn create_table(conn: &RustOracleConnection, cx: &Cx, name: &str) {
@@ -218,13 +321,10 @@ fn grant_template_check_option_live_free23() {
         let qualified = format!("{owner}.{table}");
         create_table(&conn, &cx, &qualified).await;
         let id = target(&owner, &table);
-        let grant = grant(id.clone(), "UPDATE", "ID", "1");
-        let matched = match_sql(
-            &grant,
-            &format!("UPDATE {qualified} SET STATUS = 'new' WHERE ID IN (1, 2)"),
-            &resolved(id.clone()),
-        )
-        .unwrap();
+        let grant = make_grant(id.clone(), "UPDATE", "ID", "1");
+        let sql = format!("UPDATE {qualified} SET STATUS = 'new' WHERE ID IN (1, 2)");
+        let resolved = resolved(&cx, &conn, id.clone()).await;
+        match_sql(&grant, &sql, &resolved).unwrap();
         let policy = sqlparser::ast::Expr::BinaryOp {
             left: Box::new(sqlparser::ast::Expr::Identifier(
                 sqlparser::ast::Ident::new("TENANT_ID"),
@@ -234,9 +334,9 @@ fn grant_template_check_option_live_free23() {
                 sqlparser::ast::Value::Number("7".into(), false).into(),
             )),
         };
-        let rewrite =
-            render_grant_update(&matched, grant.row_predicate(), Some(&policy), 5).unwrap();
-        conn.execute(&cx, rewrite.executable_sql(), &bind_values(&rewrite))
+        let plan = build_plan(&sql, &grant, &resolved.columns, policy.clone(), 5, &[]);
+        let rewrite = render_grant_update(&plan).unwrap();
+        conn.execute(&cx, rewrite.executable_sql(), &bind_values(rewrite))
             .await
             .expect("execute CHECK OPTION update");
         let rows = conn
@@ -255,6 +355,80 @@ fn grant_template_check_option_live_free23() {
                 ))
                 .collect::<Vec<_>>(),
             vec![(1, "new".into()), (2, "old".into()), (3, "old".into())]
+        );
+
+        conn.execute(
+            &cx,
+            &format!("UPDATE {qualified} SET STATUS='old'"),
+            &[] as &[OracleBind],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            native_count(
+                &conn,
+                &cx,
+                &format!("SELECT COUNT(*) FROM {qualified} WHERE STATUS='old'"),
+                &[]
+            )
+            .await,
+            3
+        );
+        let capped_grant = make_grant(id.clone(), "UPDATE", "TENANT_ID", "7");
+        let cap_sql = format!("UPDATE {qualified} SET STATUS=:1 WHERE ID BETWEEN :3 AND :2");
+        let cap_plan = build_plan(
+            &cap_sql,
+            &capped_grant,
+            &resolved.columns,
+            policy,
+            1,
+            &[
+                CanonicalBind::String("capped"),
+                CanonicalBind::I64(3),
+                CanonicalBind::I64(1),
+            ],
+        );
+        let caller_values = [
+            OracleBind::from("capped"),
+            OracleBind::I64(3),
+            OracleBind::I64(1),
+        ];
+        let counted = native_count(
+            &conn,
+            &cx,
+            cap_plan.impact_count_sql(),
+            &plan_bind_values(&cap_plan, &caller_values, true),
+        )
+        .await;
+        assert_eq!(counted, 1, "two eligible rows must be capped to one");
+        let affected = conn
+            .execute(
+                &cx,
+                render_grant_update(&cap_plan).unwrap().executable_sql(),
+                &plan_bind_values(&cap_plan, &caller_values, false),
+            )
+            .await
+            .unwrap();
+        assert_eq!(affected, counted as u64);
+        assert_eq!(
+            native_count(
+                &conn,
+                &cx,
+                &format!("SELECT COUNT(*) FROM {qualified} WHERE STATUS='capped' AND TENANT_ID=7"),
+                &[]
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            native_count(
+                &conn,
+                &cx,
+                &format!("SELECT COUNT(*) FROM {qualified} WHERE ID=3 AND STATUS='old'"),
+                &[]
+            )
+            .await,
+            1
         );
 
         let leaving = format!(
@@ -298,13 +472,10 @@ fn grant_rewrite_live_delete_touches_only_p_rows() {
         let qualified = format!("{owner}.{table}");
         create_table(&conn, &cx, &qualified).await;
         let id = target(&owner, &table);
-        let grant = grant(id.clone(), "DELETE", "ID", "1");
-        let matched = match_sql(
-            &grant,
-            &format!("DELETE FROM {qualified} WHERE ID IN (1, 2, 3)"),
-            &resolved(id.clone()),
-        )
-        .unwrap();
+        let grant = make_grant(id.clone(), "DELETE", "ID", "1");
+        let sql = format!("DELETE FROM {qualified} WHERE ID IN (1, 2, 3)");
+        let resolved = resolved(&cx, &conn, id.clone()).await;
+        match_sql(&grant, &sql, &resolved).unwrap();
         let policy = sqlparser::ast::Expr::BinaryOp {
             left: Box::new(sqlparser::ast::Expr::Identifier(
                 sqlparser::ast::Ident::new("TENANT_ID"),
@@ -314,10 +485,10 @@ fn grant_rewrite_live_delete_touches_only_p_rows() {
                 sqlparser::ast::Value::Number("7".into(), false).into(),
             )),
         };
-        let rewrite =
-            render_grant_delete(&matched, grant.row_predicate(), Some(&policy), 5).unwrap();
+        let plan = build_plan(&sql, &grant, &resolved.columns, policy.clone(), 5, &[]);
+        let rewrite = render_grant_delete(&plan).unwrap();
         let affected = conn
-            .execute(&cx, rewrite.executable_sql(), &bind_values(&rewrite))
+            .execute(&cx, rewrite.executable_sql(), &bind_values(rewrite))
             .await
             .unwrap();
         assert_eq!(affected, 1);
@@ -334,6 +505,61 @@ fn grant_rewrite_live_delete_touches_only_p_rows() {
                 .map(|row| row.parse_i64("ID").unwrap())
                 .collect::<Vec<_>>(),
             vec![2, 3]
+        );
+        conn.execute(
+            &cx,
+            &format!("INSERT INTO {qualified} VALUES (4,7,'old')"),
+            &[] as &[OracleBind],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            native_count(
+                &conn,
+                &cx,
+                &format!("SELECT COUNT(*) FROM {qualified} WHERE TENANT_ID=7"),
+                &[]
+            )
+            .await,
+            2
+        );
+        let capped_grant = make_grant(id.clone(), "DELETE", "TENANT_ID", "7");
+        let cap_sql = format!("DELETE FROM {qualified} WHERE ID BETWEEN :2 AND :1");
+        let cap_plan = build_plan(
+            &cap_sql,
+            &capped_grant,
+            &resolved.columns,
+            policy,
+            1,
+            &[CanonicalBind::I64(4), CanonicalBind::I64(1)],
+        );
+        let caller_values = [OracleBind::I64(4), OracleBind::I64(1)];
+        let counted = native_count(
+            &conn,
+            &cx,
+            cap_plan.impact_count_sql(),
+            &plan_bind_values(&cap_plan, &caller_values, true),
+        )
+        .await;
+        assert_eq!(counted, 1);
+        let affected = conn
+            .execute(
+                &cx,
+                render_grant_delete(&cap_plan).unwrap().executable_sql(),
+                &plan_bind_values(&cap_plan, &caller_values, false),
+            )
+            .await
+            .unwrap();
+        assert_eq!(affected, counted as u64);
+        assert_eq!(
+            native_count(
+                &conn,
+                &cx,
+                &format!("SELECT COUNT(*) FROM {qualified} WHERE TENANT_ID=7"),
+                &[]
+            )
+            .await,
+            1
         );
         let _ = conn
             .execute(

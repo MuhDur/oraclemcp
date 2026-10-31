@@ -4,7 +4,10 @@ use std::time::Duration;
 use oraclemcp_guard::action_envelope::{
     ActionEnvelopeV1, ActionKind, BindEnvelope, CanonicalBind, ExecLimits, OutputCapture,
 };
-use oraclemcp_guard::effective_dml_plan::{DmlCallerStatementV1, DmlPlanError, EffectiveDmlPlanV1};
+use oraclemcp_guard::effective_dml_plan::{
+    DML_REWRITE_ALGORITHM_VERSION, DmlCallerStatementV1, DmlPlanBindV1, DmlPlanError,
+    EffectiveDmlPlanV1,
+};
 use oraclemcp_guard::impact_binding::ImpactBindingV1;
 use oraclemcp_guard::resolver::CatalogGeneration;
 use oraclemcp_guard::scoped_grant::{
@@ -338,12 +341,142 @@ fn impact_count_query_reuses_exact_effective_plan_predicate_and_binds() {
         execution.selection.as_ref(),
         Some(plan.effective_selection())
     );
+    let sqlparser::ast::FromTable::WithFromKeyword(execution_from) = &execution.from else {
+        panic!("local DELETE target")
+    };
+    assert_eq!(&impact_select.from, execution_from);
     assert!(plan.effective_sql().contains(":omcp_g1"));
     assert!(plan.impact_count_sql().contains(":omcp_g1"));
     assert!(!plan.effective_sql().contains("11"));
     assert!(!plan.impact_count_sql().contains("11"));
     assert_eq!(plan.grant_binds().len(), 1);
     assert_eq!(plan.grant_binds()[0].name(), "omcp_g1");
+}
+
+fn bound_plan(sql: &str, values: &[CanonicalBind<'_>], cap: u64) -> EffectiveDmlPlanV1 {
+    let binds = BindEnvelope::from_binds(&[7; 32], values);
+    let caller = DmlCallerStatementV1::parse(sql, target(), "APP", &columns(), &binds).unwrap();
+    let envelope = ActionEnvelopeV1 {
+        version: 1,
+        action_kind: ActionKind::ExecuteDml,
+        statement_digest: ActionEnvelopeV1::statement_digest(sql),
+        binds,
+        commit: false,
+        hold: false,
+        output: OutputCapture {
+            capture_dbms_output: false,
+            max_lines: 0,
+            max_chars: 0,
+        },
+        limits: ExecLimits {
+            timeout_seconds: Some(5),
+        },
+        scoped_grant_ref: Some([4; 32]),
+    };
+    EffectiveDmlPlanV1::from_verified_rewrite(
+        caller,
+        &envelope,
+        [1; 32],
+        [2; 32],
+        vec!["tenant".into()],
+        [3; 32],
+        Some(parse_expr("TENANT_ID = 3")),
+        &grant(),
+        cap,
+    )
+    .unwrap()
+}
+
+#[test]
+fn immutable_update_plan_owns_check_option_cap_and_count_bind_subset() {
+    use DmlPlanBindV1::{Caller, Grant};
+    let plan = bound_plan(
+        "UPDATE APP.ORDERS SET STATUS = :1 WHERE ID = :3 AND TENANT_ID = :2",
+        &[
+            CanonicalBind::String("ready"),
+            CanonicalBind::I64(3),
+            CanonicalBind::I64(11),
+        ],
+        2,
+    );
+    let rendered = oraclemcp_guard::scoped_grant::render_grant_update(&plan).unwrap();
+    assert!(std::ptr::eq(rendered, plan.rewrite()));
+    assert_eq!(rendered.executable_sql(), plan.effective_sql());
+    assert!(plan.effective_sql().contains("WITH CHECK OPTION"));
+    assert!(plan.effective_sql().contains("ROWNUM <= 2"));
+    assert!(plan.impact_count_sql().contains("ROWNUM <= 2"));
+    assert!(!plan.impact_count_sql().contains("STATUS"));
+    assert!(!plan.impact_count_sql().contains(":1"));
+    assert_eq!(
+        plan.execution_bind_layout(),
+        &[
+            Grant { index: 0 },
+            Caller { position: 1 },
+            Caller { position: 3 },
+            Caller { position: 2 }
+        ]
+    );
+    assert_eq!(
+        plan.impact_bind_layout(),
+        &[
+            Caller { position: 3 },
+            Caller { position: 2 },
+            Grant { index: 0 }
+        ]
+    );
+    assert_eq!(DML_REWRITE_ALGORITHM_VERSION, 2);
+    let statements = Parser::parse_sql(&OracleDialect {}, plan.impact_count_sql()).unwrap();
+    let [Statement::Query(count)] = statements.as_slice() else {
+        panic!("count SELECT")
+    };
+    let SetExpr::Select(count) = count.body.as_ref() else {
+        panic!("simple count")
+    };
+    assert_eq!(count.selection.as_ref(), Some(plan.effective_selection()));
+    assert_eq!(
+        count.from[0].relation.to_string(),
+        plan.rewrite().parts().target().to_string()
+    );
+}
+
+#[test]
+fn delete_plan_preserves_original_caller_positions_in_rendered_order() {
+    use DmlPlanBindV1::{Caller, Grant};
+    let plan = bound_plan(
+        "DELETE FROM APP.ORDERS WHERE ID = :2 AND TENANT_ID = :1",
+        &[CanonicalBind::I64(3), CanonicalBind::I64(11)],
+        1,
+    );
+    let rendered = oraclemcp_guard::scoped_grant::render_grant_delete(&plan).unwrap();
+    assert!(std::ptr::eq(rendered, plan.rewrite()));
+    assert_eq!(
+        plan.execution_bind_layout(),
+        &[
+            Caller { position: 2 },
+            Caller { position: 1 },
+            Grant { index: 0 }
+        ]
+    );
+    assert_eq!(plan.impact_bind_layout(), plan.execution_bind_layout());
+    assert!(plan.impact_count_sql().contains("ROWNUM <= 1"));
+}
+
+#[test]
+fn bind_looking_literal_text_is_never_added_to_a_physical_bind_layout() {
+    use DmlPlanBindV1::{Caller, Grant};
+    let plan = bound_plan(
+        "UPDATE APP.ORDERS SET STATUS='text:99' WHERE STATUS=':omcp_g1' AND ID=:1",
+        &[CanonicalBind::I64(11)],
+        1,
+    );
+    assert_eq!(
+        plan.execution_bind_layout(),
+        &[Grant { index: 0 }, Caller { position: 1 }]
+    );
+    assert_eq!(
+        plan.impact_bind_layout(),
+        &[Caller { position: 1 }, Grant { index: 0 }]
+    );
 }
 
 #[test]

@@ -1416,6 +1416,62 @@ impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::edition_lifecycle::Ed
 pub fn oraclemcp_guard::edition_lifecycle::EditionIdentifier::vzip(self) -> V
 pub fn oraclemcp_guard::edition_lifecycle::parse_edition_lifecycle_sql(&str) -> oraclemcp_guard::edition_lifecycle::EditionLifecycleParse
 pub mod oraclemcp_guard::effective_dml_plan
+pub enum oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+pub oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::Caller
+pub oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::Caller::position: usize
+pub oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::Grant
+pub oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::Grant::index: usize
+impl core::clone::Clone for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+pub fn oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::clone(&self) -> oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+impl core::cmp::Eq for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+impl core::cmp::PartialEq for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+pub fn oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::eq(&self, &oraclemcp_guard::effective_dml_plan::DmlPlanBindV1) -> bool
+impl core::fmt::Debug for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+pub fn oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+impl core::marker::StructuralPartialEq for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+impl core::marker::Freeze for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+impl core::marker::Send for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+impl core::marker::Sync for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+impl core::marker::Unpin for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+impl core::marker::UnsafeUnpin for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1 where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1 where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1 where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1 where U: core::convert::From<T>
+pub fn oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1 where U: core::convert::Into<T>
+pub type oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::Error = core::convert::Infallible
+pub fn oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1 where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1 where T: core::clone::Clone
+pub type oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::Owned = T
+pub fn oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+impl<T> core::any::Any for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1 where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1 where T: ?core::marker::Sized
+pub fn oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1 where T: ?core::marker::Sized
+pub fn oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1 where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+pub fn oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+impl<T> typenum::type_operators::Same for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1
+pub type oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1 where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::effective_dml_plan::DmlPlanBindV1 where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::effective_dml_plan::DmlPlanBindV1::vzip(self) -> V
 pub enum oraclemcp_guard::effective_dml_plan::DmlPlanError
 pub oraclemcp_guard::effective_dml_plan::DmlPlanError::BindCountMismatch
 pub oraclemcp_guard::effective_dml_plan::DmlPlanError::GrantMismatch
@@ -1424,6 +1480,7 @@ pub oraclemcp_guard::effective_dml_plan::DmlPlanError::InvalidEffectivePlan
 pub oraclemcp_guard::effective_dml_plan::DmlPlanError::Parse
 pub oraclemcp_guard::effective_dml_plan::DmlPlanError::PolicyPredicateInvalid
 pub oraclemcp_guard::effective_dml_plan::DmlPlanError::PredicateTooComplex
+pub oraclemcp_guard::effective_dml_plan::DmlPlanError::ReservedBindName
 pub oraclemcp_guard::effective_dml_plan::DmlPlanError::TargetMismatch
 pub oraclemcp_guard::effective_dml_plan::DmlPlanError::UnresolvedColumn
 pub oraclemcp_guard::effective_dml_plan::DmlPlanError::UnsupportedAssignment
@@ -1595,15 +1652,18 @@ pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::caller(&self) ->
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::digest(&self) -> [u8; 32]
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::effective_selection(&self) -> &sqlparser::ast::Expr
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::effective_sql(&self) -> &str
+pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::execution_bind_layout(&self) -> &[oraclemcp_guard::effective_dml_plan::DmlPlanBindV1]
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::from_verified_rewrite(oraclemcp_guard::effective_dml_plan::DmlCallerStatementV1, &oraclemcp_guard::action_envelope::ActionEnvelopeV1, [u8; 32], [u8; 32], alloc::vec::Vec<alloc::string::String>, [u8; 32], core::option::Option<sqlparser::ast::Expr>, &oraclemcp_guard::scoped_grant::ScopedGrant, u64) -> core::result::Result<Self, oraclemcp_guard::effective_dml_plan::DmlPlanError>
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::grant_binds(&self) -> &[oraclemcp_guard::scoped_grant::predicate::GrantBind]
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::grant_predicate(&self) -> &oraclemcp_guard::scoped_grant::GrantPredicateV1
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::grant_scope_digest(&self) -> [u8; 32]
+pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::impact_bind_layout(&self) -> &[oraclemcp_guard::effective_dml_plan::DmlPlanBindV1]
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::impact_count_sql(&self) -> &str
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::matched_rule_ids(&self) -> &[alloc::string::String]
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::policy_predicate(&self) -> core::option::Option<&sqlparser::ast::Expr>
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::policy_ruleset_digest(&self) -> [u8; 32]
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::policy_schema_digest(&self) -> [u8; 32]
+pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::rewrite(&self) -> &oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::row_cap(&self) -> u64
 impl core::fmt::Debug for oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -7496,6 +7556,8 @@ pub mod oraclemcp_guard::scoped_grant
 pub mod oraclemcp_guard::scoped_grant::matcher
 pub enum oraclemcp_guard::scoped_grant::matcher::GrantMismatch
 pub oraclemcp_guard::scoped_grant::matcher::GrantMismatch::BindCountMismatch
+pub oraclemcp_guard::scoped_grant::matcher::GrantMismatch::CallerPredicateRefused
+pub oraclemcp_guard::scoped_grant::matcher::GrantMismatch::CallerPredicateRefused::reason: oraclemcp_guard::effective_dml_plan::DmlPlanError
 pub oraclemcp_guard::scoped_grant::matcher::GrantMismatch::CollectionExpression
 pub oraclemcp_guard::scoped_grant::matcher::GrantMismatch::ColumnNotGranted
 pub oraclemcp_guard::scoped_grant::matcher::GrantMismatch::ColumnNotGranted::column: alloc::string::String
@@ -7736,6 +7798,7 @@ impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::scoped_grant::matcher
 pub fn oraclemcp_guard::scoped_grant::matcher::GrantMatch::vzip(self) -> V
 pub struct oraclemcp_guard::scoped_grant::matcher::ResolvedDmlTarget
 pub oraclemcp_guard::scoped_grant::matcher::ResolvedDmlTarget::bind_types: alloc::collections::btree::map::BTreeMap<alloc::string::String, oraclemcp_guard::action_envelope::OracleBindType>
+pub oraclemcp_guard::scoped_grant::matcher::ResolvedDmlTarget::columns: alloc::collections::btree::set::BTreeSet<oraclemcp_guard::scoped_grant::ColumnIdent>
 pub oraclemcp_guard::scoped_grant::matcher::ResolvedDmlTarget::identity: oraclemcp_guard::scoped_grant::GrantTargetIdentity
 pub oraclemcp_guard::scoped_grant::matcher::ResolvedDmlTarget::object_kind: oraclemcp_guard::resolver::CatalogObjectKind
 pub oraclemcp_guard::scoped_grant::matcher::ResolvedDmlTarget::raw_name: oraclemcp_guard::resolver::RawName
@@ -8537,10 +8600,12 @@ pub type oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::vzip(self) -> V
-pub fn oraclemcp_guard::scoped_grant::rewrite::render_grant_delete(&oraclemcp_guard::scoped_grant::matcher::GrantMatch, &oraclemcp_guard::scoped_grant::GrantPredicateV1, core::option::Option<&sqlparser::ast::Expr>, u32) -> core::result::Result<oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1, oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError>
-pub fn oraclemcp_guard::scoped_grant::rewrite::render_grant_update(&oraclemcp_guard::scoped_grant::matcher::GrantMatch, &oraclemcp_guard::scoped_grant::GrantPredicateV1, core::option::Option<&sqlparser::ast::Expr>, u32) -> core::result::Result<oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1, oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError>
+pub fn oraclemcp_guard::scoped_grant::rewrite::render_grant_delete(&oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1) -> core::result::Result<&oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1, oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError>
+pub fn oraclemcp_guard::scoped_grant::rewrite::render_grant_update(&oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1) -> core::result::Result<&oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1, oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError>
 pub enum oraclemcp_guard::scoped_grant::GrantMismatch
 pub oraclemcp_guard::scoped_grant::GrantMismatch::BindCountMismatch
+pub oraclemcp_guard::scoped_grant::GrantMismatch::CallerPredicateRefused
+pub oraclemcp_guard::scoped_grant::GrantMismatch::CallerPredicateRefused::reason: oraclemcp_guard::effective_dml_plan::DmlPlanError
 pub oraclemcp_guard::scoped_grant::GrantMismatch::CollectionExpression
 pub oraclemcp_guard::scoped_grant::GrantMismatch::ColumnNotGranted
 pub oraclemcp_guard::scoped_grant::GrantMismatch::ColumnNotGranted::column: alloc::string::String
@@ -10829,6 +10894,7 @@ impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::scoped_grant::predica
 pub fn oraclemcp_guard::scoped_grant::predicate::ResolvedColumns::vzip(self) -> V
 pub struct oraclemcp_guard::scoped_grant::ResolvedDmlTarget
 pub oraclemcp_guard::scoped_grant::ResolvedDmlTarget::bind_types: alloc::collections::btree::map::BTreeMap<alloc::string::String, oraclemcp_guard::action_envelope::OracleBindType>
+pub oraclemcp_guard::scoped_grant::ResolvedDmlTarget::columns: alloc::collections::btree::set::BTreeSet<oraclemcp_guard::scoped_grant::ColumnIdent>
 pub oraclemcp_guard::scoped_grant::ResolvedDmlTarget::identity: oraclemcp_guard::scoped_grant::GrantTargetIdentity
 pub oraclemcp_guard::scoped_grant::ResolvedDmlTarget::object_kind: oraclemcp_guard::resolver::CatalogObjectKind
 pub oraclemcp_guard::scoped_grant::ResolvedDmlTarget::raw_name: oraclemcp_guard::resolver::RawName
@@ -11406,8 +11472,8 @@ pub fn oraclemcp_guard::scoped_grant::hex(&[u8]) -> alloc::string::String
 pub fn oraclemcp_guard::scoped_grant::match_sql(&oraclemcp_guard::scoped_grant::ScopedGrant, &str, &oraclemcp_guard::scoped_grant::matcher::ResolvedDmlTarget) -> core::result::Result<oraclemcp_guard::scoped_grant::matcher::GrantMatch, oraclemcp_guard::scoped_grant::matcher::GrantMismatch>
 pub fn oraclemcp_guard::scoped_grant::match_statement(&oraclemcp_guard::scoped_grant::ScopedGrant, &sqlparser::ast::Statement, &oraclemcp_guard::scoped_grant::matcher::ResolvedDmlTarget) -> core::result::Result<oraclemcp_guard::scoped_grant::matcher::GrantMatch, oraclemcp_guard::scoped_grant::matcher::GrantMismatch>
 pub fn oraclemcp_guard::scoped_grant::render_ast(&oraclemcp_guard::scoped_grant::GrantPredicateV1) -> (sqlparser::ast::Expr, alloc::vec::Vec<oraclemcp_guard::scoped_grant::predicate::GrantBind>)
-pub fn oraclemcp_guard::scoped_grant::render_grant_delete(&oraclemcp_guard::scoped_grant::matcher::GrantMatch, &oraclemcp_guard::scoped_grant::GrantPredicateV1, core::option::Option<&sqlparser::ast::Expr>, u32) -> core::result::Result<oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1, oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError>
-pub fn oraclemcp_guard::scoped_grant::render_grant_update(&oraclemcp_guard::scoped_grant::matcher::GrantMatch, &oraclemcp_guard::scoped_grant::GrantPredicateV1, core::option::Option<&sqlparser::ast::Expr>, u32) -> core::result::Result<oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1, oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError>
+pub fn oraclemcp_guard::scoped_grant::render_grant_delete(&oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1) -> core::result::Result<&oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1, oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError>
+pub fn oraclemcp_guard::scoped_grant::render_grant_update(&oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1) -> core::result::Result<&oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1, oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError>
 pub mod oraclemcp_guard::stepup
 pub enum oraclemcp_guard::stepup::ChallengeStatus
 pub oraclemcp_guard::stepup::ChallengeStatus::ExpiredOrUnknown
@@ -12527,6 +12593,7 @@ pub oraclemcp_guard::DmlPlanError::InvalidEffectivePlan
 pub oraclemcp_guard::DmlPlanError::Parse
 pub oraclemcp_guard::DmlPlanError::PolicyPredicateInvalid
 pub oraclemcp_guard::DmlPlanError::PredicateTooComplex
+pub oraclemcp_guard::DmlPlanError::ReservedBindName
 pub oraclemcp_guard::DmlPlanError::TargetMismatch
 pub oraclemcp_guard::DmlPlanError::UnresolvedColumn
 pub oraclemcp_guard::DmlPlanError::UnsupportedAssignment
@@ -16326,15 +16393,18 @@ pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::caller(&self) ->
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::digest(&self) -> [u8; 32]
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::effective_selection(&self) -> &sqlparser::ast::Expr
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::effective_sql(&self) -> &str
+pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::execution_bind_layout(&self) -> &[oraclemcp_guard::effective_dml_plan::DmlPlanBindV1]
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::from_verified_rewrite(oraclemcp_guard::effective_dml_plan::DmlCallerStatementV1, &oraclemcp_guard::action_envelope::ActionEnvelopeV1, [u8; 32], [u8; 32], alloc::vec::Vec<alloc::string::String>, [u8; 32], core::option::Option<sqlparser::ast::Expr>, &oraclemcp_guard::scoped_grant::ScopedGrant, u64) -> core::result::Result<Self, oraclemcp_guard::effective_dml_plan::DmlPlanError>
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::grant_binds(&self) -> &[oraclemcp_guard::scoped_grant::predicate::GrantBind]
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::grant_predicate(&self) -> &oraclemcp_guard::scoped_grant::GrantPredicateV1
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::grant_scope_digest(&self) -> [u8; 32]
+pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::impact_bind_layout(&self) -> &[oraclemcp_guard::effective_dml_plan::DmlPlanBindV1]
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::impact_count_sql(&self) -> &str
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::matched_rule_ids(&self) -> &[alloc::string::String]
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::policy_predicate(&self) -> core::option::Option<&sqlparser::ast::Expr>
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::policy_ruleset_digest(&self) -> [u8; 32]
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::policy_schema_digest(&self) -> [u8; 32]
+pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::rewrite(&self) -> &oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::row_cap(&self) -> u64
 impl core::fmt::Debug for oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result

@@ -17,6 +17,7 @@ use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::action_envelope::OracleBindType;
+use crate::effective_dml_plan::{DmlPlanError, validate_named_filter};
 use crate::resolver::{CatalogObjectKind, QuoteSemantics, RawName, SyntacticRole};
 
 use super::{ColumnIdent, GrantPredicateV1, GrantTargetIdentity, GrantVerb, ScopedGrant};
@@ -31,6 +32,9 @@ pub struct ResolvedDmlTarget {
     pub object_kind: CatalogObjectKind,
     /// Transport-decoded type of every caller bind, keyed by name without `:`.
     pub bind_types: BTreeMap<String, OracleBindType>,
+    /// Exact catalog-resolved target column names. Grant columns are not a
+    /// substitute: caller predicates may reference other target columns.
+    pub columns: BTreeSet<ColumnIdent>,
 }
 
 /// Why a SET expression cannot be carried by a scoped grant.
@@ -68,6 +72,7 @@ pub enum GrantMismatch {
     CteDmlUnresolved,
     ReservedBindName,
     BindCountMismatch,
+    CallerPredicateRefused { reason: DmlPlanError },
     UnsupportedStatement,
 }
 
@@ -94,6 +99,7 @@ impl GrantMismatch {
             Self::CteDmlUnresolved => "GRANT_CTE_DML_UNRESOLVED",
             Self::ReservedBindName => "GRANT_RESERVED_BIND_NAME",
             Self::BindCountMismatch => "GRANT_BIND_COUNT_MISMATCH",
+            Self::CallerPredicateRefused { .. } => "GRANT_CALLER_PREDICATE_REFUSED",
             Self::UnsupportedStatement => "GRANT_STATEMENT_UNSUPPORTED",
         }
     }
@@ -145,6 +151,7 @@ pub struct GrantMatch {
     set_assignments: Vec<(ColumnIdent, AssignedValue)>,
     caller_where: Option<Expr>,
     cte: Option<With>,
+    resolved_columns: BTreeSet<ColumnIdent>,
 }
 
 impl fmt::Debug for GrantMatch {
@@ -190,6 +197,10 @@ impl GrantMatch {
 
     pub(super) fn max_rows_per_statement(&self) -> u64 {
         self.max_rows_per_statement
+    }
+
+    pub(crate) fn resolved_columns(&self) -> &BTreeSet<ColumnIdent> {
+        &self.resolved_columns
     }
 }
 
@@ -291,6 +302,11 @@ pub fn match_statement(
                 });
             };
             let column = column_name(name)?;
+            if !resolved.columns.contains(&column) {
+                return Err(GrantMismatch::ColumnNotGranted {
+                    column: column.as_str().to_owned(),
+                });
+            }
             let assigned = check_assigned_value(&assignment.value, &resolved.bind_types)?;
             if grant.row_predicate().columns().contains(&column) {
                 return Err(GrantMismatch::SetPredicateColumn {
@@ -305,6 +321,14 @@ pub fn match_statement(
             set_assignments.push((column, assigned));
         }
     }
+    if let Some(selection) = selection {
+        validate_named_filter(selection, &resolved.columns, &resolved.bind_types).map_err(
+            |reason| match reason {
+                DmlPlanError::ReservedBindName => GrantMismatch::ReservedBindName,
+                reason => GrantMismatch::CallerPredicateRefused { reason },
+            },
+        )?;
+    }
     check_binds(whole_statement, &resolved.bind_types)?;
     Ok(GrantMatch {
         verb,
@@ -314,6 +338,7 @@ pub fn match_statement(
         set_assignments,
         caller_where: selection.cloned(),
         cte: cte.cloned(),
+        resolved_columns: resolved.columns.clone(),
     })
 }
 

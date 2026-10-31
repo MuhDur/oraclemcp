@@ -10,7 +10,7 @@ use oraclemcp_guard::action_envelope::OracleBindType;
 use oraclemcp_guard::resolver::{
     CatalogGeneration, CatalogObjectKind, QuoteSemantics, RawName, RawNamePart, SyntacticRole,
 };
-use oraclemcp_guard::scoped_grant::{GrantMatch, ResolvedDmlTarget, match_sql};
+use oraclemcp_guard::scoped_grant::{match_sql, GrantMatch, ResolvedDmlTarget};
 use oraclemcp_guard::{
     ClosureFingerprints, ColumnIdent, EffectiveCeiling, ExecGrantBinding, GrantComparison,
     GrantContainer, GrantLimits, GrantOp, GrantOperand, GrantPredicateV1, GrantTargetIdentity,
@@ -88,6 +88,10 @@ fn resolved() -> ResolvedDmlTarget {
         ),
         identity: target(),
         object_kind: CatalogObjectKind::Table,
+        columns: ["ID", "STATUS", "TENANT_ID"]
+            .into_iter()
+            .map(|name| ColumnIdent::new(name).unwrap())
+            .collect(),
         bind_types: BTreeMap::from([
             ("S".into(), OracleBindType::String),
             ("ID".into(), OracleBindType::I64),

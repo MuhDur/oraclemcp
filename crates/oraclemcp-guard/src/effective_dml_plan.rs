@@ -8,7 +8,7 @@
 //! dispatch still refuses scoped-grant execution until the runtime consumer is
 //! wired; this plan does not itself authorize or execute DML.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use sha2::{Digest, Sha256};
@@ -18,9 +18,12 @@ use sqlparser::ast::{
 };
 use sqlparser::dialect::OracleDialect;
 use sqlparser::parser::Parser;
+use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::action_envelope::{ActionEnvelopeV1, ActionKind, BindEnvelope, OracleBindType};
-use crate::scoped_grant::predicate::{compose_where, render_ast};
+use crate::resolver::{CatalogObjectKind, RawName, RawNamePart, SyntacticRole};
+use crate::scoped_grant::matcher::{ResolvedDmlTarget, match_statement};
+use crate::scoped_grant::rewrite::{GrantRewriteV1, QuotedIdent, build_rewrite};
 use crate::scoped_grant::{
     ColumnIdent, GrantBind, GrantPredicateV1, GrantTargetIdentity, GrantVerb, MAX_IN_LIST_VALUES,
     ScopedGrant,
@@ -28,7 +31,7 @@ use crate::scoped_grant::{
 
 const PLAN_DOMAIN: &[u8] = b"omcp/effective-dml-plan/v1";
 /// Every change to the W13 SQL template must change this version.
-pub const DML_REWRITE_ALGORITHM_VERSION: u16 = 1;
+pub const DML_REWRITE_ALGORITHM_VERSION: u16 = 2;
 const MAX_CONJUNCTS: usize = 64;
 const MAX_PREDICATE_DEPTH: usize = 32;
 
@@ -43,6 +46,7 @@ pub enum DmlPlanError {
     UnsupportedPredicate,
     PredicateTooComplex,
     InvalidBind,
+    ReservedBindName,
     BindCountMismatch,
     GrantMismatch,
     PolicyPredicateInvalid,
@@ -61,6 +65,7 @@ impl DmlPlanError {
             Self::UnsupportedPredicate => "DML_PLAN_PREDICATE_UNSUPPORTED",
             Self::PredicateTooComplex => "DML_PLAN_PREDICATE_TOO_COMPLEX",
             Self::InvalidBind => "DML_PLAN_BIND_INVALID",
+            Self::ReservedBindName => "DML_PLAN_BIND_RESERVED",
             Self::BindCountMismatch => "DML_PLAN_BIND_COUNT_MISMATCH",
             Self::GrantMismatch => "DML_PLAN_GRANT_MISMATCH",
             Self::PolicyPredicateInvalid => "DML_PLAN_POLICY_PREDICATE_INVALID",
@@ -182,8 +187,12 @@ impl DmlCallerStatementV1 {
                     if !assignments.insert(column) {
                         return Err(DmlPlanError::UnsupportedAssignment);
                     }
-                    check_value(&assignment.value, binds, &mut bind_positions)
-                        .map_err(|_| DmlPlanError::UnsupportedAssignment)?;
+                    check_value(
+                        &assignment.value,
+                        PredicateBinds::Positional(binds),
+                        &mut bind_positions,
+                    )
+                    .map_err(|_| DmlPlanError::UnsupportedAssignment)?;
                 }
                 (GrantVerb::Update, update.selection.as_ref())
             }
@@ -214,7 +223,7 @@ impl DmlCallerStatementV1 {
         check_predicate(
             selection,
             columns,
-            binds,
+            PredicateBinds::Positional(binds),
             &mut predicate_binds,
             &mut predicate_columns,
             &mut conjuncts,
@@ -362,9 +371,49 @@ fn resolve_expr_column(
         .ok_or(DmlPlanError::UnresolvedColumn)
 }
 
+/// Binding modes are explicit: a named matcher input never acquires a
+/// positional order from iteration over a map.
+#[derive(Clone, Copy)]
+enum PredicateBinds<'a> {
+    Positional(&'a BindEnvelope),
+    Named(&'a BTreeMap<String, OracleBindType>),
+    None,
+}
+
+pub(crate) fn validate_named_filter(
+    expr: &Expr,
+    columns: &BTreeSet<ColumnIdent>,
+    binds: &BTreeMap<String, OracleBindType>,
+) -> Result<(), DmlPlanError> {
+    validate_filter(expr, columns, PredicateBinds::Named(binds))
+}
+
+pub(crate) fn validate_policy_filter(
+    expr: &Expr,
+    columns: &BTreeSet<ColumnIdent>,
+) -> Result<(), DmlPlanError> {
+    validate_filter(expr, columns, PredicateBinds::None)
+}
+
+fn validate_filter(
+    expr: &Expr,
+    columns: &BTreeSet<ColumnIdent>,
+    binds: PredicateBinds<'_>,
+) -> Result<(), DmlPlanError> {
+    check_predicate(
+        expr,
+        columns,
+        binds,
+        &mut BTreeSet::new(),
+        &mut BTreeSet::new(),
+        &mut 0,
+        0,
+    )
+}
+
 fn check_value(
     expr: &Expr,
-    binds: &BindEnvelope,
+    binds: PredicateBinds<'_>,
     positions: &mut BTreeSet<usize>,
 ) -> Result<(), DmlPlanError> {
     let mut expr = expr;
@@ -382,17 +431,44 @@ fn check_value(
                 Ok(())
             }
             Value::Placeholder(raw) => {
-                let index = raw
-                    .strip_prefix(':')
-                    .and_then(|number| number.parse::<usize>().ok())
-                    .filter(|index| *index > 0 && *index <= binds.arity)
-                    .ok_or(DmlPlanError::InvalidBind)?;
-                match binds.types[index - 1] {
+                let name = raw.strip_prefix(':').ok_or(DmlPlanError::InvalidBind)?;
+                let (bind_type, position) = match binds {
+                    PredicateBinds::Positional(envelope) => {
+                        let index = name
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|index| *index > 0 && *index <= envelope.arity)
+                            .ok_or(DmlPlanError::InvalidBind)?;
+                        (
+                            *envelope
+                                .types
+                                .get(index - 1)
+                                .ok_or(DmlPlanError::InvalidBind)?,
+                            Some(index),
+                        )
+                    }
+                    PredicateBinds::Named(types) => {
+                        if name.is_empty()
+                            || !name.bytes().all(|byte| {
+                                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'#')
+                            })
+                        {
+                            return Err(DmlPlanError::InvalidBind);
+                        }
+                        let name = name.to_ascii_uppercase();
+                        if name.starts_with("OMCP_G") {
+                            return Err(DmlPlanError::ReservedBindName);
+                        }
+                        (*types.get(&name).ok_or(DmlPlanError::InvalidBind)?, None)
+                    }
+                    PredicateBinds::None => return Err(DmlPlanError::InvalidBind),
+                };
+                match bind_type {
                     OracleBindType::String
                     | OracleBindType::I64
                     | OracleBindType::F64
                     | OracleBindType::TimestampTz => {
-                        if positions.insert(index) {
+                        if position.is_none_or(|index| positions.insert(index)) {
                             Ok(())
                         } else {
                             Err(DmlPlanError::BindCountMismatch)
@@ -423,7 +499,7 @@ fn check_value(
 fn check_predicate(
     expr: &Expr,
     columns: &BTreeSet<ColumnIdent>,
-    binds: &BindEnvelope,
+    binds: PredicateBinds<'_>,
     positions: &mut BTreeSet<usize>,
     referenced: &mut BTreeSet<ColumnIdent>,
     conjuncts: &mut usize,
@@ -522,6 +598,15 @@ fn checked_comparison(
     Ok(())
 }
 
+/// A bind source in the physical SQL's occurrence order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DmlPlanBindV1 {
+    /// One-based position in the original ActionEnvelope bind vector.
+    Caller { position: usize },
+    /// Zero-based index into the server-owned grant bind vector.
+    Grant { index: usize },
+}
+
 /// Bound components of one executable DML rewrite and its impact-count query.
 /// Construction validates and renders the plan but does not authorize or
 /// execute DML.
@@ -537,10 +622,10 @@ pub struct EffectiveDmlPlanV1 {
     grant_scope_digest: [u8; 32],
     bind_hmac: [u8; 32],
     row_cap: u64,
-    executable_template: String,
+    rewrite: GrantRewriteV1,
     impact_count_template: String,
-    grant_binds: Vec<GrantBind>,
-    effective_selection: Expr,
+    execution_bind_layout: Vec<DmlPlanBindV1>,
+    impact_bind_layout: Vec<DmlPlanBindV1>,
 }
 
 impl fmt::Debug for EffectiveDmlPlanV1 {
@@ -601,45 +686,30 @@ impl EffectiveDmlPlanV1 {
         }
 
         if let Some(predicate) = &policy_predicate {
-            let mut positions = BTreeSet::new();
-            let mut columns = BTreeSet::new();
-            let mut conjuncts = 0;
-            check_predicate(
-                predicate,
-                &caller.resolved_columns,
-                &caller.binds,
-                &mut positions,
-                &mut columns,
-                &mut conjuncts,
-                0,
-            )
-            .map_err(|_| DmlPlanError::PolicyPredicateInvalid)?;
-            if !positions.is_empty() {
-                return Err(DmlPlanError::PolicyPredicateInvalid);
-            }
+            validate_policy_filter(predicate, &caller.resolved_columns)
+                .map_err(|_| DmlPlanError::PolicyPredicateInvalid)?;
         }
 
-        let (grant_predicate_ast, grant_binds) = render_ast(grant.row_predicate());
-        let caller_where = match &caller.statement {
-            Statement::Update(update) => update.selection.clone(),
-            Statement::Delete(delete) => delete.selection.clone(),
-            _ => None,
-        }
-        .ok_or(DmlPlanError::InvalidEffectivePlan)?;
-        let effective_selection = compose_where(
-            Some(caller_where),
-            policy_predicate.clone(),
-            grant_predicate_ast,
-        );
-        let mut effective_statement = caller.statement.clone();
-        match &mut effective_statement {
-            Statement::Update(update) => update.selection = Some(effective_selection.clone()),
-            Statement::Delete(delete) => delete.selection = Some(effective_selection.clone()),
-            _ => return Err(DmlPlanError::InvalidEffectivePlan),
-        }
-        let executable_template = effective_statement.to_string();
-        let impact_count_template =
-            impact_count_template(&caller.target, effective_selection.clone())?;
+        let matched = match_caller_grant(&caller, grant)?;
+        let cap = u32::try_from(row_cap).map_err(|_| DmlPlanError::InvalidEffectivePlan)?;
+        let rewrite = build_rewrite(
+            &matched,
+            grant.row_predicate(),
+            policy_predicate.as_ref(),
+            cap,
+        )
+        .map_err(|_| DmlPlanError::InvalidEffectivePlan)?;
+        let impact_count_template = impact_count_template(
+            rewrite.parts().target(),
+            rewrite.effective_selection().clone(),
+        )?;
+        let execution_bind_layout = bind_layout(
+            rewrite.executable_sql(),
+            caller.binds.arity,
+            rewrite.binds(),
+        )?;
+        let impact_bind_layout =
+            bind_layout(&impact_count_template, caller.binds.arity, rewrite.binds())?;
 
         Ok(Self {
             caller,
@@ -653,16 +723,36 @@ impl EffectiveDmlPlanV1 {
             grant_scope_digest: grant.scope_digest(),
             bind_hmac: envelope.binds.value_hmac,
             row_cap,
-            executable_template,
+            rewrite,
             impact_count_template,
-            grant_binds,
-            effective_selection,
+            execution_bind_layout,
+            impact_bind_layout,
         })
     }
 
     #[must_use]
     pub fn effective_sql(&self) -> &str {
-        &self.executable_template
+        self.rewrite.executable_sql()
+    }
+
+    /// The immutable physical SQL template used by both grant renderers.
+    #[must_use]
+    pub fn rewrite(&self) -> &GrantRewriteV1 {
+        &self.rewrite
+    }
+
+    /// Values must be selected in this rendered occurrence order. This is
+    /// deliberately independent of a named-bind map's iteration order.
+    #[must_use]
+    pub fn execution_bind_layout(&self) -> &[DmlPlanBindV1] {
+        &self.execution_bind_layout
+    }
+
+    /// Count inputs omit SET-only caller values and preserve each remaining
+    /// original caller position alongside distinct server-owned grant slots.
+    #[must_use]
+    pub fn impact_bind_layout(&self) -> &[DmlPlanBindV1] {
+        &self.impact_bind_layout
     }
 
     #[must_use]
@@ -682,12 +772,14 @@ impl EffectiveDmlPlanV1 {
 
     #[must_use]
     pub fn grant_binds(&self) -> &[GrantBind] {
-        &self.grant_binds
+        self.rewrite.binds()
     }
 
     /// COUNT query template derived from the exact selection in
     /// [`Self::effective_sql`]. Caller binds stay in the original envelope;
     /// server-owned grant binds are returned by [`Self::grant_binds`].
+    /// Select and order those values using [`Self::impact_bind_layout`], which
+    /// omits SET-only binds rather than passing the execution bind vector.
     #[must_use]
     pub fn impact_count_sql(&self) -> &str {
         &self.impact_count_template
@@ -695,7 +787,7 @@ impl EffectiveDmlPlanV1 {
 
     #[must_use]
     pub fn effective_selection(&self) -> &Expr {
-        &self.effective_selection
+        self.rewrite.effective_selection()
     }
 
     #[must_use]
@@ -771,9 +863,123 @@ impl EffectiveDmlPlanV1 {
         put(&mut bytes, &self.grant_scope_digest);
         put(&mut bytes, &self.bind_hmac);
         bytes.extend_from_slice(&self.row_cap.to_be_bytes());
-        put(&mut bytes, self.executable_template.as_bytes());
+        put(&mut bytes, self.effective_sql().as_bytes());
+        put(&mut bytes, self.impact_count_template.as_bytes());
+        for layout in [&self.execution_bind_layout, &self.impact_bind_layout] {
+            bytes.extend_from_slice(&(layout.len() as u64).to_be_bytes());
+            for slot in layout {
+                match slot {
+                    DmlPlanBindV1::Caller { position } => {
+                        bytes.push(0);
+                        bytes.extend_from_slice(&(*position as u64).to_be_bytes());
+                    }
+                    DmlPlanBindV1::Grant { index } => {
+                        bytes.push(1);
+                        bytes.extend_from_slice(&(*index as u64).to_be_bytes());
+                    }
+                }
+            }
+        }
         Sha256::digest(bytes).into()
     }
+}
+
+fn match_caller_grant(
+    caller: &DmlCallerStatementV1,
+    grant: &ScopedGrant,
+) -> Result<crate::scoped_grant::GrantMatch, DmlPlanError> {
+    let relation = match &caller.statement {
+        Statement::Update(update) => &update.table.relation,
+        Statement::Delete(delete) => {
+            let FromTable::WithFromKeyword(tables) = &delete.from else {
+                return Err(DmlPlanError::InvalidEffectivePlan);
+            };
+            &tables
+                .first()
+                .ok_or(DmlPlanError::InvalidEffectivePlan)?
+                .relation
+        }
+        _ => return Err(DmlPlanError::InvalidEffectivePlan),
+    };
+    let TableFactor::Table { name, .. } = relation else {
+        return Err(DmlPlanError::InvalidEffectivePlan);
+    };
+    let parts = name
+        .0
+        .iter()
+        .map(|part| {
+            let ident = part.as_ident().ok_or(DmlPlanError::InvalidEffectivePlan)?;
+            Ok(if ident.quote_style.is_some() {
+                RawNamePart::quoted(&ident.value)
+            } else {
+                RawNamePart::unquoted(&ident.value)
+            })
+        })
+        .collect::<Result<Vec<_>, DmlPlanError>>()?;
+    let resolved = ResolvedDmlTarget {
+        raw_name: RawName::new(parts, SyntacticRole::FromFactor),
+        identity: caller.target.clone(),
+        object_kind: CatalogObjectKind::Table,
+        columns: caller.resolved_columns.clone(),
+        bind_types: caller
+            .binds
+            .types
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| ((index + 1).to_string(), *kind))
+            .collect(),
+    };
+    match_statement(grant, &caller.statement, &resolved).map_err(|_| DmlPlanError::GrantMismatch)
+}
+
+fn bind_layout(
+    sql: &str,
+    caller_arity: usize,
+    grants: &[GrantBind],
+) -> Result<Vec<DmlPlanBindV1>, DmlPlanError> {
+    let tokens = Tokenizer::new(&OracleDialect {}, sql)
+        .tokenize()
+        .map_err(|_| DmlPlanError::InvalidEffectivePlan)?;
+    let mut tokens = tokens
+        .into_iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)));
+    let mut names = Vec::new();
+    while let Some(token) = tokens.next() {
+        let name = match token {
+            Token::Colon => match tokens.next() {
+                Some(Token::Word(word)) if word.quote_style.is_none() => word.value,
+                Some(Token::Number(number, false))
+                    if number.bytes().all(|byte| byte.is_ascii_digit()) =>
+                {
+                    number
+                }
+                _ => return Err(DmlPlanError::InvalidEffectivePlan),
+            },
+            Token::Placeholder(raw) => raw
+                .strip_prefix(':')
+                .ok_or(DmlPlanError::InvalidEffectivePlan)?
+                .to_owned(),
+            _ => continue,
+        };
+        names.push(name);
+    }
+    names
+        .into_iter()
+        .map(|name| {
+            if let Some(index) = grants
+                .iter()
+                .position(|bind| bind.name().eq_ignore_ascii_case(&name))
+            {
+                return Ok(DmlPlanBindV1::Grant { index });
+            }
+            let position = name
+                .parse::<usize>()
+                .ok()
+                .filter(|position| *position > 0 && *position <= caller_arity)
+                .ok_or(DmlPlanError::InvalidEffectivePlan)?;
+            Ok(DmlPlanBindV1::Caller { position })
+        })
+        .collect()
 }
 
 fn put(out: &mut Vec<u8>, value: &[u8]) {
@@ -781,13 +987,8 @@ fn put(out: &mut Vec<u8>, value: &[u8]) {
     out.extend_from_slice(value);
 }
 
-fn impact_count_template(
-    target: &GrantTargetIdentity,
-    selection: Expr,
-) -> Result<String, DmlPlanError> {
-    let owner = sqlparser::ast::Ident::with_quote('"', &target.owner);
-    let object = sqlparser::ast::Ident::with_quote('"', &target.object_name);
-    let sql = format!("SELECT COUNT(*) FROM {owner}.{object}");
+fn impact_count_template(target: &QuotedIdent, selection: Expr) -> Result<String, DmlPlanError> {
+    let sql = format!("SELECT COUNT(*) FROM {target}");
     let mut statements = Parser::parse_sql(&OracleDialect {}, &sql)
         .map_err(|_| DmlPlanError::InvalidEffectivePlan)?;
     let [Statement::Query(query)] = statements.as_mut_slice() else {

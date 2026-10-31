@@ -4,10 +4,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use libfuzzer_sys::fuzz_target;
+use oraclemcp_guard::action_envelope::{
+    ActionEnvelopeV1, ActionKind, BindEnvelope, ExecLimits, OutputCapture,
+};
+use oraclemcp_guard::effective_dml_plan::{DmlCallerStatementV1, EffectiveDmlPlanV1};
 use oraclemcp_guard::resolver::{
     CatalogGeneration, CatalogObjectKind, RawName, RawNamePart, SyntacticRole,
 };
-use oraclemcp_guard::scoped_grant::matcher::{ResolvedDmlTarget, match_sql};
+use oraclemcp_guard::scoped_grant::matcher::{match_sql, ResolvedDmlTarget};
 use oraclemcp_guard::scoped_grant::rewrite::{render_grant_delete, render_grant_update};
 use oraclemcp_guard::{
     ClosureFingerprints, ColumnIdent, EffectiveCeiling, ExecGrantBinding, GrantComparison,
@@ -118,6 +122,7 @@ fuzz_target!(|data: &[u8]| {
         ),
         identity: target,
         object_kind: CatalogObjectKind::Table,
+        columns: ["ID", "STATUS", "TENANT_ID"].into_iter().map(col).collect(),
         bind_types: BTreeMap::new(),
     };
 
@@ -162,16 +167,49 @@ fuzz_target!(|data: &[u8]| {
         let from_kw = if selector & 0x08 != 0 { "from" } else { "FROM" };
         format!("{sql_verb} {from_kw} {table} {where_kw} {where_sql}")
     };
-    if let Ok(matched) = match_sql(&grant, &sql, &resolved) {
-        let p = GrantPredicateV1::new(vec![GrantComparison {
-            column: col("ID"),
-            op: GrantOp::Eq,
-            operand: GrantOperand::Single(GrantValue::number("1").unwrap()),
-        }]);
+    if match_sql(&grant, &sql, &resolved).is_ok() {
+        let binds = BindEnvelope::from_binds(&[7; 32], &[]);
+        let caller = DmlCallerStatementV1::parse(
+            &sql,
+            resolved.identity.clone(),
+            "APP",
+            &resolved.columns,
+            &binds,
+        )
+        .expect("matched restricted generated source has a positional plan");
+        let envelope = ActionEnvelopeV1 {
+            version: 1,
+            action_kind: ActionKind::ExecuteDml,
+            statement_digest: ActionEnvelopeV1::statement_digest(&sql),
+            binds,
+            commit: false,
+            hold: false,
+            output: OutputCapture {
+                capture_dbms_output: false,
+                max_lines: 0,
+                max_chars: 0,
+            },
+            limits: ExecLimits {
+                timeout_seconds: Some(5),
+            },
+            scoped_grant_ref: Some([4; 32]),
+        };
+        let plan = EffectiveDmlPlanV1::from_verified_rewrite(
+            caller,
+            &envelope,
+            [1; 32],
+            [2; 32],
+            Vec::new(),
+            [3; 32],
+            None,
+            &grant,
+            5,
+        )
+        .expect("one canonical restricted rewrite");
         let result = if verb == "UPDATE" {
-            render_grant_update(&matched, &p, None, 5)
+            render_grant_update(&plan)
         } else {
-            render_grant_delete(&matched, &p, None, 5)
+            render_grant_delete(&plan)
         };
         if let Ok(rewrite) = result {
             assert_eq!(
