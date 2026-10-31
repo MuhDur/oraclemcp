@@ -183,6 +183,9 @@ run_impact_read_only_explain_probe() (
   export ORACLEMCP_TEST_USER="$(lane_user "$1")"
   export ORACLEMCP_TEST_PASSWORD="$(lane_password "$1")"
   export ORACLE_MATRIX_ACTIVE_LANE="$1"
+  # Compile outside the probe's deadline: a cold CI cache spent the whole
+  # 180 s budget compiling and left the live probe about one second.
+  cargo test -p oraclemcp-db --features live-xe --lib --no-run
   timeout -k 10 180 cargo test -p oraclemcp-db --features live-xe --lib \
     live_read_only_explain_behavior -- --ignored --nocapture
 )
@@ -608,6 +611,13 @@ PY
     # Missing Docker/fixture prerequisites fail; this test has no opt-in skip.
     # CI supplies its service container id; local swarm uses its fixed lab name.
     e2e_log_event "policy_timeout_lifecycle" "act" "running" 0 "mandatory real-server observation lifecycle proof"
+    # Build once outside the lifecycle deadlines so cold compiles do not eat them.
+    env CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}" \
+      cargo test -p oraclemcp-db --features live-xe --test live_oracle --no-run \
+      >"$lane_dir/policy_lifecycle_build.log" 2>&1 || {
+      e2e_log_event "policy_timeout_lifecycle" "assert" "fail" 0 "live_oracle build failed (see $lane_dir/policy_lifecycle_build.log)"
+      return 1
+    }
     if ! env CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}" ORACLEMCP_TEST_DSN="$dsn" \
       ORACLEMCP_TEST_LAB_CONTAINER="${ORACLEMCP_TEST_LAB_CONTAINER:-oraclemcp-free23-rel}" \
       ORACLEMCP_TEST_LAB_PDB=FREEPDB1 ORACLEMCP_POLICY_QUERY_BINARY="$BINARY" \
