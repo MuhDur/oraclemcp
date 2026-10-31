@@ -661,12 +661,7 @@ fn execute_actor_command(
             let session_context = official_session_context(connection)?;
             let info = OracleConnectionInfo {
                 backend: Some(OracleBackend::OfficialOracle),
-                server_version: Some(
-                    connection
-                        .version()
-                        .map_err(|error| official_error(error, OfficialOperation::Query))?
-                        .to_string(),
-                ),
+                server_version: Some(official_server_version(connection)?),
                 service_name: Some(
                     connection
                         .service_name()
@@ -898,6 +893,36 @@ struct OfficialSessionContext {
     os_user: Option<String>,
     host: Option<String>,
     terminal: Option<String>,
+}
+
+const OFFICIAL_SERVER_VERSION_FULL_SQL: &str =
+    "SELECT MAX(version_full) FROM SYS.PRODUCT_COMPONENT_VERSION WHERE product LIKE 'Oracle%'";
+
+/// The full server version, as driver-cx reports it.
+///
+/// Oracle 18c encodes only its release base ("18.0.0.0.0") in the
+/// `AUTH_VERSION_NO` session value, which the official driver decodes
+/// faithfully (python-oracledb reports the same), while driver-cx reports the
+/// server's version string ("18.4.0.0.0") and 21c and later encode the full
+/// version. Report the catalog's `VERSION_FULL` (18c and later) so both
+/// backends describe the same server; a server without that column (ORA-00904)
+/// keeps the decoded value.
+fn official_server_version(connection: &oracledb::Connection) -> Result<String, DbError> {
+    let decoded = connection
+        .version()
+        .map_err(|error| official_error(error, OfficialOperation::Query))?
+        .to_string();
+    match connection.query_row(OFFICIAL_SERVER_VERSION_FULL_SQL, &[]) {
+        Ok(row) => Ok(row
+            .get::<Option<String>>(0)
+            .map_err(|error| official_error(error, OfficialOperation::Query))?
+            .filter(|full| !full.is_empty())
+            .unwrap_or(decoded)),
+        Err(error) if oraclemcp_error::parse_ora_code(&error.to_string()) == Some(904) => {
+            Ok(decoded)
+        }
+        Err(error) => Err(official_error(error, OfficialOperation::Query)),
+    }
 }
 
 fn official_session_context(

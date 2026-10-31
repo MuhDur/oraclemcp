@@ -116,6 +116,19 @@ fn live_env_ready(lookup: &dyn Fn(&str) -> Option<String>, names: &[&str], test:
     false
 }
 
+/// VECTOR exists from Oracle 23ai. The decision follows the server version the
+/// driver reports; a version that cannot be parsed fails the test instead of
+/// silently skipping the VECTOR scenarios.
+fn server_supports_vector(server_version: Option<&str>) -> bool {
+    let major = server_version
+        .and_then(|version| version.split('.').next())
+        .and_then(|major| major.parse::<u32>().ok())
+        .unwrap_or_else(|| {
+            panic!("cannot decide VECTOR support from server version {server_version:?}")
+        });
+    major >= 23
+}
+
 fn process_env(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
@@ -726,7 +739,18 @@ fn live_cross_backend_error_and_vector_parity() {
             .await
             .expect("official W4 low-privilege connection");
 
-        run_vector_variants_scenario(&cx, &driver, &official, &run_id).await;
+        let server_version = driver
+            .describe(&cx)
+            .await
+            .expect("driver-cx describe")
+            .server_version;
+        if server_supports_vector(server_version.as_deref()) {
+            run_vector_variants_scenario(&cx, &driver, &official, &run_id).await;
+        } else {
+            eprintln!(
+                "[parity] SKIP VECTOR variants on {server_version:?}: VECTOR needs Oracle 23ai"
+            );
+        }
         run_error_taxonomy_scenario(&cx, &driver, &official, &low_driver, &low_official, &run_id)
             .await;
 
@@ -1569,18 +1593,30 @@ fn live_cross_backend_parity_for_supported_basic_auth() {
         run_datetime_interval_scenario(&cx, &driver_cx, &official, &run_id).await;
         run_lob_null_scenario(&cx, &driver_cx, &official, &run_id).await;
         let suffix = run_id;
-        let driver_vector_table = format!("W4O_{suffix}.ORACLEMCP_PARITY_VEC_CX_{suffix}");
-        let official_vector_table = format!("W4O_{suffix}.ORACLEMCP_PARITY_VEC_OFFICIAL_{suffix}");
-        let driver_dense_vector =
-            run_dense_vector_scenario(&cx, &driver_cx, &driver_vector_table).await;
-        let official_dense_vector =
-            run_dense_vector_scenario(&cx, &official, &official_vector_table).await;
-        assert_eq!(
-            driver_dense_vector, official_dense_vector,
-            "dense VECTOR serialization"
-        );
+        let vector_lab = server_supports_vector(driver_info.server_version.as_deref());
+        if vector_lab {
+            let driver_vector_table = format!("W4O_{suffix}.ORACLEMCP_PARITY_VEC_CX_{suffix}");
+            let official_vector_table =
+                format!("W4O_{suffix}.ORACLEMCP_PARITY_VEC_OFFICIAL_{suffix}");
+            let driver_dense_vector =
+                run_dense_vector_scenario(&cx, &driver_cx, &driver_vector_table).await;
+            let official_dense_vector =
+                run_dense_vector_scenario(&cx, &official, &official_vector_table).await;
+            assert_eq!(
+                driver_dense_vector, official_dense_vector,
+                "dense VECTOR serialization"
+            );
+        } else {
+            eprintln!(
+                "[parity] SKIP dense and sparse VECTOR on {:?}: VECTOR needs Oracle 23ai",
+                driver_info.server_version
+            );
+        }
 
-        for (label, sql) in [("sparse VECTOR", SPARSE_VECTOR_SQL)] {
+        for (label, sql) in [("sparse VECTOR", SPARSE_VECTOR_SQL)]
+            .into_iter()
+            .filter(|_| vector_lab)
+        {
             let driver_vector = serialized_single_row(
                 driver_cx
                     .query_rows(&cx, sql, &[])
@@ -1946,4 +1982,20 @@ fn official_adapter_refuses_iam_token_typed() {
         options,
         "official Oracle backend does not support IAM or OAuth database tokens",
     );
+}
+
+#[test]
+fn vector_gate_follows_the_server_major_version() {
+    for version in ["23.26.2.0.0", "23.0.0.0.0", "26.1.0.0.0"] {
+        assert!(server_supports_vector(Some(version)), "{version}");
+    }
+    for version in ["21.3.0.0.0", "18.4.0.0.0", "19.27.0.0.0"] {
+        assert!(!server_supports_vector(Some(version)), "{version}");
+    }
+    for unknown in [None, Some(""), Some("unknown")] {
+        assert!(
+            std::panic::catch_unwind(|| server_supports_vector(unknown)).is_err(),
+            "an unparsable version must fail, not skip: {unknown:?}"
+        );
+    }
 }
