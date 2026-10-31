@@ -2785,6 +2785,7 @@ dependencies = [
  "oraclemcp-guard",
  "proc-macro2",
  "regex",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.0",

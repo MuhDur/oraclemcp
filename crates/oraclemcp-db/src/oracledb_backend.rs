@@ -603,6 +603,7 @@ fn execute_actor_command(
                     ));
                 }
             };
+            ensure_official_tls_provider();
             let connection = match oracledb::connect(config) {
                 Ok(connection) => connection,
                 Err(error) => {
@@ -955,6 +956,18 @@ fn set_driver_timeout(
     connection
         .set_call_timeout(timeout)
         .map_err(|error| official_error(error, operation))
+}
+
+/// The official driver builds its TLS configuration from rustls's
+/// process-level default provider. This dependency graph compiles rustls with
+/// both the aws-lc-rs and ring providers, so rustls cannot choose one and
+/// panics inside the driver on the first TCPS connect, which ends the actor
+/// and quarantines the session. Install ring, the provider oraclemcp's own TLS
+/// code already uses explicitly; a default installed earlier is kept.
+fn ensure_official_tls_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
 }
 
 fn config_from_options(options: &OracleConnectOptions) -> Result<oracledb::Config, DbError> {
@@ -1814,6 +1827,45 @@ mod tests {
     use std::sync::{Condvar, OnceLock};
     use std::thread;
     use std::time::Instant;
+
+    #[test]
+    fn official_tcps_connect_reaches_tls_instead_of_losing_its_actor() {
+        // The official connect guard is process-wide; the blackhole tests fill
+        // its slots on purpose, so share their serialization.
+        let _serial = blackhole_test_lock();
+        // A TCP peer that accepts, reads what the client sends, and hangs up:
+        // enough for the driver to start TLS, with no Oracle and no network.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("loopback addr").port();
+        let peer = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let mut hello = [0u8; 512];
+                let _ = io::Read::read(&mut stream, &mut hello);
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+        });
+        let options = OracleConnectOptions {
+            connect_string: format!("tcps://127.0.0.1:{port}/ORACLEMCP_TLS_PROVIDER"),
+            username: Some("parity".to_owned()),
+            password: Some("synthetic".to_owned()),
+            ..Default::default()
+        };
+        // Bounded: a hang becomes a red timeout, never a stuck test.
+        let error = match run_official_connect(options, Duration::from_secs(15)) {
+            Ok(_) => panic!("a peer that hangs up cannot complete an Oracle TCPS logon"),
+            Err(error) => error,
+        };
+        peer.join().expect("loopback peer");
+        assert!(
+            !matches!(error, DbError::Quarantined { .. }),
+            "official TCPS connect must fail at the handshake, not lose its actor: {error:?}"
+        );
+        assert!(
+            rustls::crypto::CryptoProvider::get_default().is_some(),
+            "a process-level rustls provider is installed for the official driver"
+        );
+    }
 
     fn block_on_backend<T>(future: impl std::future::Future<Output = T>) -> T {
         let reactor = asupersync::runtime::reactor::create_reactor()

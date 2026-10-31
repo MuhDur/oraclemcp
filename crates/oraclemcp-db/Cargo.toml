@@ -16,7 +16,7 @@ default = ["oracledb"]
 # connection actor and capability-aware acquisition selector. This beta adapter
 # ships in every build as a bounded raw-acquisition alternate; driver-cx stays
 # primary and all unsupported/session operations fail closed.
-oracledb = ["dep:oracledb"]
+oracledb = ["dep:oracledb", "dep:rustls"]
 # Live Oracle integration tests (gated; require a reachable DB).
 live-xe = []
 # Test-only seam for higher-level crates that need deterministic row streams
@@ -41,6 +41,9 @@ getrandom = "0.2"
 # `tracing` dep (no async runtime), so the engine-free boundary holds.
 oraclemcp-driver-cx = { workspace = true, features = ["tracing"] }
 oracledb = { workspace = true, optional = true }
+# The official driver takes rustls's process-level default provider; see
+# `ensure_official_tls_provider` in src/oracledb_backend.rs.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
 # TNS-onboarding parse adapter (src/tns.rs): reuse the upstream pure-Rust
 # `TnsnamesReader` from the protocol core directly, via the
 # `oraclemcp_driver_cx_protocol::` path.
