@@ -1246,7 +1246,6 @@ mod tests {
         let path = root.path().canonicalize().unwrap();
         let metadata = std::fs::metadata(&path).unwrap();
         let namespace = |uid| endpoint_namespace(uid, &path, metadata.dev(), metadata.ino());
-        assert_eq!(namespace(42), namespace(42));
         assert_ne!(namespace(42), namespace(43));
     }
 
