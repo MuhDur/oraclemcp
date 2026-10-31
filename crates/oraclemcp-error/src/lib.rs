@@ -345,6 +345,10 @@ impl ErrorClass {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 #[non_exhaustive]
 pub enum ReasonCategory {
+    /// An enabled schema/database DDL trigger has effects beyond the W12 limit.
+    DdlTriggerEffectful,
+    /// Complete source-bound DDL-trigger safety could not be established.
+    DdlTriggerUnknown,
     /// A stacked/multi-statement batch, a buried `;`, or trailing top-level SQL
     /// after a PL/SQL block — each statement must be submitted on its own.
     MultiStatementBatch,
@@ -410,9 +414,11 @@ pub enum ReasonCategory {
 
 impl ReasonCategory {
     /// Every currently defined structured refusal category, in deterministic wire order.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 24] = [
         Self::BlockListed,
         Self::CostBudgetExceeded,
+        Self::DdlTriggerEffectful,
+        Self::DdlTriggerUnknown,
         Self::DynamicSql,
         Self::EditionsNotEnabled,
         Self::MultiStatementBatch,
@@ -439,6 +445,8 @@ impl ReasonCategory {
     #[must_use]
     pub const fn meaning(self) -> &'static str {
         match self {
+            Self::DdlTriggerEffectful => "a DDL trigger has effects disallowed for change requests",
+            Self::DdlTriggerUnknown => "the complete DDL-trigger effect closure is unproven",
             Self::MultiStatementBatch => "more than one top-level statement was supplied",
             Self::DynamicSql => "dynamic SQL or side-effecting API was detected",
             Self::TransactionControl => "caller attempted server-owned transaction control",
@@ -470,6 +478,12 @@ impl ReasonCategory {
     #[must_use]
     pub const fn typical_cause(self) -> &'static str {
         match self {
+            Self::DdlTriggerEffectful => {
+                "an enabled DDL trigger writes, locks rows, or performs autonomous or transaction-control work"
+            }
+            Self::DdlTriggerUnknown => {
+                "DDL-trigger catalog visibility, valid source, predicates or whole-call effects are unavailable"
+            }
             Self::MultiStatementBatch => "semicolon-separated or trailing top-level SQL",
             Self::DynamicSql => "EXECUTE IMMEDIATE, DBMS_SQL, UTL, scheduler, or string-built SQL",
             Self::TransactionControl => "COMMIT, ROLLBACK, SAVEPOINT, or SET TRANSACTION",
@@ -507,6 +521,12 @@ impl ReasonCategory {
     #[must_use]
     pub const fn next_action(self) -> &'static str {
         match self {
+            Self::DdlTriggerEffectful => {
+                "ask the operator to review the enabled DDL triggers, then obtain a fresh preview"
+            }
+            Self::DdlTriggerUnknown => {
+                "restore the required DDL-trigger catalog and source proof, then obtain a fresh preview"
+            }
             Self::MultiStatementBatch => {
                 "submit each statement separately through the guarded tool"
             }

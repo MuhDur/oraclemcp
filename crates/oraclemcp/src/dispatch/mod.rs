@@ -5143,6 +5143,10 @@ use read_executor::{
     ReadUncertaintyConn, ensure_read_only_backstop_bounded,
 };
 
+pub mod change_request {
+    pub mod ddl_closure;
+}
+
 mod impact;
 mod impact_grants;
 use impact_grants::*;

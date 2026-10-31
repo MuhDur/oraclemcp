@@ -221,6 +221,8 @@ pub fn oraclemcp_error::OracleRetryAction::from(T) -> T
 #[non_exhaustive] pub enum oraclemcp_error::ReasonCategory
 pub oraclemcp_error::ReasonCategory::BlockListed
 pub oraclemcp_error::ReasonCategory::CostBudgetExceeded
+pub oraclemcp_error::ReasonCategory::DdlTriggerEffectful
+pub oraclemcp_error::ReasonCategory::DdlTriggerUnknown
 pub oraclemcp_error::ReasonCategory::DynamicSql
 pub oraclemcp_error::ReasonCategory::EditionsNotEnabled
 pub oraclemcp_error::ReasonCategory::MultiStatementBatch
@@ -242,7 +244,7 @@ pub oraclemcp_error::ReasonCategory::UnbalancedBlock
 pub oraclemcp_error::ReasonCategory::UnprovenSideEffect
 pub oraclemcp_error::ReasonCategory::UseChangeRequest
 impl oraclemcp_error::ReasonCategory
-pub const oraclemcp_error::ReasonCategory::ALL: [Self; 22]
+pub const oraclemcp_error::ReasonCategory::ALL: [Self; 24]
 pub const fn oraclemcp_error::ReasonCategory::meaning(self) -> &'static str
 pub const fn oraclemcp_error::ReasonCategory::next_action(self) -> &'static str
 pub const fn oraclemcp_error::ReasonCategory::typical_cause(self) -> &'static str
