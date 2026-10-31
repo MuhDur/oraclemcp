@@ -258,6 +258,62 @@ async fn target_identity(
     ))
 }
 
+/// Dictionary facts that decide whether a scoped grant may target this table:
+/// its exact local identity plus partitioning, organization, clustering,
+/// temporary and external kind. Object and XMLType tables are absent from
+/// `ALL_TABLES` and refuse; an identity that moves between the two reads is
+/// uncertainty. The table is resolved locally by name, so it is never remote.
+pub async fn read_grant_target_facts(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: &str,
+    name: &str,
+) -> Result<oraclemcp_guard::scoped_grant::admission::GrantTargetFacts, MutationUnavailableReason> {
+    let (target, _) = target_identity(cx, conn, owner, name, None).await?;
+    let rows = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::GrantTargetTable,
+        &[owner.into(), name.into(), 2_i64.into()],
+    )
+    .await
+    .map_err(|_| MutationUnavailableReason::CatalogUnreadable)?;
+    let [row] = rows.as_slice() else {
+        return Err(MutationUnavailableReason::IdentityMismatch);
+    };
+    if required(row, "OWNER")? != owner || required(row, "TABLE_NAME")? != name {
+        return Err(MutationUnavailableReason::IdentityMismatch);
+    }
+    let partitioned = match required(row, "PARTITIONED")?.trim_end() {
+        "YES" => true,
+        "NO" => false,
+        _ => return Err(MutationUnavailableReason::CatalogIncomplete),
+    };
+    let temporary = match required(row, "TEMPORARY")?.trim_end() {
+        "Y" => true,
+        "N" => false,
+        _ => return Err(MutationUnavailableReason::CatalogIncomplete),
+    };
+    let external = row
+        .parse_i64("EXTERNAL_COUNT")
+        .ok_or(MutationUnavailableReason::CatalogIncomplete)?
+        != 0;
+    let facts = oraclemcp_guard::scoped_grant::admission::GrantTargetFacts {
+        target,
+        partitioned,
+        index_organized: optional(row, "IOT_TYPE")?.is_some_and(|value| !value.trim().is_empty()),
+        clustered: optional(row, "CLUSTER_NAME")?.is_some_and(|value| !value.trim().is_empty()),
+        temporary,
+        external,
+        remote: false,
+    };
+    let (fresh, _) = target_identity(cx, conn, owner, name, Some(facts.target.object_id)).await?;
+    if fresh != facts.target {
+        return Err(MutationUnavailableReason::EffectSourceMismatch);
+    }
+    Ok(facts)
+}
+
 fn resolved_target(target: &MutationTarget) -> ResolvedObject {
     ResolvedObject {
         owner: target.owner.clone(),

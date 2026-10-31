@@ -1129,6 +1129,7 @@ pub fn oraclemcp_db::mutation_closure::MutationEffectOracle::prove_source<'life0
 impl oraclemcp_db::mutation_closure::MutationEffectOracle for oraclemcp_db::mutation_closure::UnknownMutationEffects
 pub fn oraclemcp_db::mutation_closure::UnknownMutationEffects::prove_source<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 dyn oraclemcp_db::OracleConnection, &'life3 oraclemcp_db::mutation_closure::MutationRoutineSource) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::mutation_closure::MutationRoutineProof, oraclemcp_guard::mutation_closure::MutationUnavailableReason>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
 pub async fn oraclemcp_db::mutation_closure::collect_mutation_effect_closure(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, oraclemcp_db::mutation_closure::MutationRequest, &dyn oraclemcp_db::mutation_closure::MutationEffectOracle) -> oraclemcp_guard::mutation_closure::MutationEffectClosureV1
+pub async fn oraclemcp_db::mutation_closure::read_grant_target_facts(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<oraclemcp_guard::scoped_grant::admission::GrantTargetFacts, oraclemcp_guard::mutation_closure::MutationUnavailableReason>
 pub async fn oraclemcp_db::mutation_closure::read_mutation_routine_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, &str, core::option::Option<&str>) -> core::result::Result<oraclemcp_db::mutation_closure::MutationRoutineSource, oraclemcp_guard::mutation_closure::MutationUnavailableReason>
 pub enum oraclemcp_db::AsOf
 pub oraclemcp_db::AsOf::Scn(u64)
@@ -1624,6 +1625,7 @@ pub oraclemcp_db::CatalogQueryId::FgaCatalogProof
 pub oraclemcp_db::CatalogQueryId::FgaPoliciesForRelations32
 pub oraclemcp_db::CatalogQueryId::GetDdl
 pub oraclemcp_db::CatalogQueryId::GetSource
+pub oraclemcp_db::CatalogQueryId::GrantTargetTable
 pub oraclemcp_db::CatalogQueryId::HardParseAssociations
 pub oraclemcp_db::CatalogQueryId::HardParseColumnTypes
 pub oraclemcp_db::CatalogQueryId::HardParseIndexes
@@ -1759,7 +1761,7 @@ pub oraclemcp_db::CatalogQueryId::VirtualColumnsForRelations32
 pub oraclemcp_db::CatalogQueryId::VpdRlsPoliciesByObject
 pub oraclemcp_db::CatalogQueryId::VpdRlsPoliciesBySchema
 impl oraclemcp_db::CatalogQueryId
-pub const oraclemcp_db::CatalogQueryId::ALL: [Self; 197]
+pub const oraclemcp_db::CatalogQueryId::ALL: [Self; 198]
 pub const fn oraclemcp_db::CatalogQueryId::spec(self) -> oraclemcp_db::CatalogReadSpec
 impl core::clone::Clone for oraclemcp_db::CatalogQueryId
 pub fn oraclemcp_db::CatalogQueryId::clone(&self) -> oraclemcp_db::CatalogQueryId

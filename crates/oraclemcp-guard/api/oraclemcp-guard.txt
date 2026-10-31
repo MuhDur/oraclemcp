@@ -8925,6 +8925,303 @@ pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::resolve(&self, &ora
 pub mod oraclemcp_guard::rewrite
 pub fn oraclemcp_guard::rewrite::suggest_parameterized_form(&str) -> core::option::Option<alloc::string::String>
 pub mod oraclemcp_guard::scoped_grant
+pub mod oraclemcp_guard::scoped_grant::admission
+pub enum oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+pub oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::ClosureUnknown
+pub oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::ClosureUnknown::reason: oraclemcp_guard::mutation_closure::MutationUnavailableReason
+pub oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::ClosureUnknown::source: oraclemcp_guard::mutation_closure::MutationCatalogSource
+pub oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::DomainIndex
+pub oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::DomainIndex::index: alloc::string::String
+pub oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::EffectRefused
+pub oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::EffectRefused::effect: oraclemcp_guard::purity::RoutineEffect
+pub oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::FkDeleteAction
+pub oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::FkDeleteAction::constraint: alloc::string::String
+pub oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::FkDeleteAction::rule: oraclemcp_guard::mutation_closure::MutationForeignKeyAction
+pub oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::NotOrdinaryHeapTable
+pub oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::NotOrdinaryHeapTable::kind: oraclemcp_guard::scoped_grant::admission::NonHeapKind
+pub oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::UnprovenCallback
+pub oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::UnprovenCallback::identity: alloc::string::String
+pub oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::UnprovenCallback::mechanism: &'static str
+pub oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::UserDmlTrigger
+pub oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::UserDmlTrigger::trigger: alloc::string::String
+impl core::clone::Clone for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+pub fn oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::clone(&self) -> oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+impl core::cmp::Eq for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+impl core::cmp::PartialEq for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+pub fn oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::eq(&self, &oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal) -> bool
+impl core::fmt::Debug for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+pub fn oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+impl core::marker::Freeze for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+impl core::marker::Send for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+impl core::marker::Sync for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+impl core::marker::Unpin for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+impl core::marker::UnsafeUnpin for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal where U: core::convert::From<T>
+pub fn oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal where U: core::convert::Into<T>
+pub type oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::Error = core::convert::Infallible
+pub fn oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal where T: core::clone::Clone
+pub type oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::Owned = T
+pub fn oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+impl<T> core::any::Any for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+pub fn oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+impl<T> typenum::type_operators::Same for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal
+pub type oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal::vzip(self) -> V
+pub enum oraclemcp_guard::scoped_grant::admission::GrantDrift
+pub oraclemcp_guard::scoped_grant::admission::GrantDrift::FingerprintChanged
+pub oraclemcp_guard::scoped_grant::admission::GrantDrift::Refused(oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal)
+impl core::clone::Clone for oraclemcp_guard::scoped_grant::admission::GrantDrift
+pub fn oraclemcp_guard::scoped_grant::admission::GrantDrift::clone(&self) -> oraclemcp_guard::scoped_grant::admission::GrantDrift
+impl core::cmp::Eq for oraclemcp_guard::scoped_grant::admission::GrantDrift
+impl core::cmp::PartialEq for oraclemcp_guard::scoped_grant::admission::GrantDrift
+pub fn oraclemcp_guard::scoped_grant::admission::GrantDrift::eq(&self, &oraclemcp_guard::scoped_grant::admission::GrantDrift) -> bool
+impl core::fmt::Debug for oraclemcp_guard::scoped_grant::admission::GrantDrift
+pub fn oraclemcp_guard::scoped_grant::admission::GrantDrift::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::scoped_grant::admission::GrantDrift
+impl core::marker::Freeze for oraclemcp_guard::scoped_grant::admission::GrantDrift
+impl core::marker::Send for oraclemcp_guard::scoped_grant::admission::GrantDrift
+impl core::marker::Sync for oraclemcp_guard::scoped_grant::admission::GrantDrift
+impl core::marker::Unpin for oraclemcp_guard::scoped_grant::admission::GrantDrift
+impl core::marker::UnsafeUnpin for oraclemcp_guard::scoped_grant::admission::GrantDrift
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::scoped_grant::admission::GrantDrift
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::scoped_grant::admission::GrantDrift
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::scoped_grant::admission::GrantDrift where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::GrantDrift::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::scoped_grant::admission::GrantDrift where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::scoped_grant::admission::GrantDrift where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::scoped_grant::admission::GrantDrift where U: core::convert::From<T>
+pub fn oraclemcp_guard::scoped_grant::admission::GrantDrift::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::scoped_grant::admission::GrantDrift where U: core::convert::Into<T>
+pub type oraclemcp_guard::scoped_grant::admission::GrantDrift::Error = core::convert::Infallible
+pub fn oraclemcp_guard::scoped_grant::admission::GrantDrift::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::scoped_grant::admission::GrantDrift where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::scoped_grant::admission::GrantDrift::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::scoped_grant::admission::GrantDrift::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::scoped_grant::admission::GrantDrift where T: core::clone::Clone
+pub type oraclemcp_guard::scoped_grant::admission::GrantDrift::Owned = T
+pub fn oraclemcp_guard::scoped_grant::admission::GrantDrift::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::scoped_grant::admission::GrantDrift::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::scoped_grant::admission::GrantDrift
+impl<T> core::any::Any for oraclemcp_guard::scoped_grant::admission::GrantDrift where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::GrantDrift::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::scoped_grant::admission::GrantDrift where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::GrantDrift::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::scoped_grant::admission::GrantDrift where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::GrantDrift::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::scoped_grant::admission::GrantDrift where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::scoped_grant::admission::GrantDrift::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::scoped_grant::admission::GrantDrift
+pub fn oraclemcp_guard::scoped_grant::admission::GrantDrift::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::scoped_grant::admission::GrantDrift
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::scoped_grant::admission::GrantDrift
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::scoped_grant::admission::GrantDrift
+impl<T> typenum::type_operators::Same for oraclemcp_guard::scoped_grant::admission::GrantDrift
+pub type oraclemcp_guard::scoped_grant::admission::GrantDrift::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::scoped_grant::admission::GrantDrift where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::scoped_grant::admission::GrantDrift where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::scoped_grant::admission::GrantDrift::vzip(self) -> V
+pub enum oraclemcp_guard::scoped_grant::admission::NonHeapKind
+pub oraclemcp_guard::scoped_grant::admission::NonHeapKind::Clustered
+pub oraclemcp_guard::scoped_grant::admission::NonHeapKind::External
+pub oraclemcp_guard::scoped_grant::admission::NonHeapKind::IndexOrganized
+pub oraclemcp_guard::scoped_grant::admission::NonHeapKind::Partitioned
+pub oraclemcp_guard::scoped_grant::admission::NonHeapKind::Remote
+pub oraclemcp_guard::scoped_grant::admission::NonHeapKind::Temporary
+impl core::clone::Clone for oraclemcp_guard::scoped_grant::admission::NonHeapKind
+pub fn oraclemcp_guard::scoped_grant::admission::NonHeapKind::clone(&self) -> oraclemcp_guard::scoped_grant::admission::NonHeapKind
+impl core::cmp::Eq for oraclemcp_guard::scoped_grant::admission::NonHeapKind
+impl core::cmp::PartialEq for oraclemcp_guard::scoped_grant::admission::NonHeapKind
+pub fn oraclemcp_guard::scoped_grant::admission::NonHeapKind::eq(&self, &oraclemcp_guard::scoped_grant::admission::NonHeapKind) -> bool
+impl core::fmt::Debug for oraclemcp_guard::scoped_grant::admission::NonHeapKind
+pub fn oraclemcp_guard::scoped_grant::admission::NonHeapKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::scoped_grant::admission::NonHeapKind
+impl core::marker::StructuralPartialEq for oraclemcp_guard::scoped_grant::admission::NonHeapKind
+impl core::marker::Freeze for oraclemcp_guard::scoped_grant::admission::NonHeapKind
+impl core::marker::Send for oraclemcp_guard::scoped_grant::admission::NonHeapKind
+impl core::marker::Sync for oraclemcp_guard::scoped_grant::admission::NonHeapKind
+impl core::marker::Unpin for oraclemcp_guard::scoped_grant::admission::NonHeapKind
+impl core::marker::UnsafeUnpin for oraclemcp_guard::scoped_grant::admission::NonHeapKind
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::scoped_grant::admission::NonHeapKind
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::scoped_grant::admission::NonHeapKind
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::scoped_grant::admission::NonHeapKind where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::NonHeapKind::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::scoped_grant::admission::NonHeapKind where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::scoped_grant::admission::NonHeapKind where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::scoped_grant::admission::NonHeapKind where U: core::convert::From<T>
+pub fn oraclemcp_guard::scoped_grant::admission::NonHeapKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::scoped_grant::admission::NonHeapKind where U: core::convert::Into<T>
+pub type oraclemcp_guard::scoped_grant::admission::NonHeapKind::Error = core::convert::Infallible
+pub fn oraclemcp_guard::scoped_grant::admission::NonHeapKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::scoped_grant::admission::NonHeapKind where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::scoped_grant::admission::NonHeapKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::scoped_grant::admission::NonHeapKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::scoped_grant::admission::NonHeapKind where T: core::clone::Clone
+pub type oraclemcp_guard::scoped_grant::admission::NonHeapKind::Owned = T
+pub fn oraclemcp_guard::scoped_grant::admission::NonHeapKind::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::scoped_grant::admission::NonHeapKind::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::scoped_grant::admission::NonHeapKind
+impl<T> core::any::Any for oraclemcp_guard::scoped_grant::admission::NonHeapKind where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::NonHeapKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::scoped_grant::admission::NonHeapKind where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::NonHeapKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::scoped_grant::admission::NonHeapKind where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::NonHeapKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::scoped_grant::admission::NonHeapKind where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::scoped_grant::admission::NonHeapKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::scoped_grant::admission::NonHeapKind
+pub fn oraclemcp_guard::scoped_grant::admission::NonHeapKind::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::scoped_grant::admission::NonHeapKind
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::scoped_grant::admission::NonHeapKind
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::scoped_grant::admission::NonHeapKind
+impl<T> typenum::type_operators::Same for oraclemcp_guard::scoped_grant::admission::NonHeapKind
+pub type oraclemcp_guard::scoped_grant::admission::NonHeapKind::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::scoped_grant::admission::NonHeapKind where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::scoped_grant::admission::NonHeapKind where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::scoped_grant::admission::NonHeapKind::vzip(self) -> V
+pub struct oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+pub oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::closure: oraclemcp_guard::scoped_grant::ClosureFingerprints
+pub oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::last_ddl_time: oraclemcp_guard::scoped_grant::LastDdlTime
+pub oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::required_level: oraclemcp_guard::levels::OperatingLevel
+pub oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::target: oraclemcp_guard::mutation_closure::MutationTarget
+impl core::clone::Clone for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+pub fn oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::clone(&self) -> oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+impl core::cmp::Eq for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+impl core::cmp::PartialEq for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+pub fn oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::eq(&self, &oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget) -> bool
+impl core::fmt::Debug for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+pub fn oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+impl core::marker::Freeze for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+impl core::marker::Send for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+impl core::marker::Sync for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+impl core::marker::Unpin for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+impl core::marker::UnsafeUnpin for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget where U: core::convert::From<T>
+pub fn oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget where U: core::convert::Into<T>
+pub type oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::Error = core::convert::Infallible
+pub fn oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget where T: core::clone::Clone
+pub type oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::Owned = T
+pub fn oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+impl<T> core::any::Any for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+pub fn oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+impl<T> typenum::type_operators::Same for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget
+pub type oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget::vzip(self) -> V
+pub struct oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+pub oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::clustered: bool
+pub oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::external: bool
+pub oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::index_organized: bool
+pub oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::partitioned: bool
+pub oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::remote: bool
+pub oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::target: oraclemcp_guard::mutation_closure::MutationTarget
+pub oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::temporary: bool
+impl oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+pub fn oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::non_heap_kind(&self) -> core::option::Option<oraclemcp_guard::scoped_grant::admission::NonHeapKind>
+impl core::clone::Clone for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+pub fn oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::clone(&self) -> oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+impl core::cmp::Eq for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+impl core::cmp::PartialEq for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+pub fn oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::eq(&self, &oraclemcp_guard::scoped_grant::admission::GrantTargetFacts) -> bool
+impl core::fmt::Debug for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+pub fn oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+impl core::marker::Freeze for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+impl core::marker::Send for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+impl core::marker::Sync for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+impl core::marker::Unpin for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+impl core::marker::UnsafeUnpin for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts where U: core::convert::From<T>
+pub fn oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts where U: core::convert::Into<T>
+pub type oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::Error = core::convert::Infallible
+pub fn oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts where T: core::clone::Clone
+pub type oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::Owned = T
+pub fn oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+impl<T> core::any::Any for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+pub fn oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+impl<T> typenum::type_operators::Same for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts
+pub type oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::scoped_grant::admission::GrantTargetFacts where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::scoped_grant::admission::GrantTargetFacts::vzip(self) -> V
+pub fn oraclemcp_guard::scoped_grant::admission::admit_grant_target(&oraclemcp_guard::scoped_grant::admission::GrantTargetFacts, &[oraclemcp_guard::mutation_closure::MutationEffectClosureV1], &oraclemcp_guard::scoped_grant::GrantVerbs, &alloc::collections::btree::set::BTreeSet<oraclemcp_guard::scoped_grant::ColumnIdent>) -> core::result::Result<oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget, oraclemcp_guard::scoped_grant::admission::GrantAdmissionRefusal>
+pub fn oraclemcp_guard::scoped_grant::admission::recheck_grant_closure(&oraclemcp_guard::scoped_grant::admission::AdmittedGrantTarget, &oraclemcp_guard::scoped_grant::admission::GrantTargetFacts, &[oraclemcp_guard::mutation_closure::MutationEffectClosureV1], &oraclemcp_guard::scoped_grant::GrantVerbs, &alloc::collections::btree::set::BTreeSet<oraclemcp_guard::scoped_grant::ColumnIdent>) -> core::result::Result<(), oraclemcp_guard::scoped_grant::admission::GrantDrift>
 pub mod oraclemcp_guard::scoped_grant::matcher
 pub enum oraclemcp_guard::scoped_grant::matcher::GrantMismatch
 pub oraclemcp_guard::scoped_grant::matcher::GrantMismatch::BindCountMismatch

@@ -438,6 +438,9 @@ pub enum CatalogQueryId {
     MutationRasPolicies,
     /// Definer-rights identity of a domain-index implementation type.
     MutationTypeAuthid,
+    /// Physical kind of a scoped-grant target: partitioning, organization,
+    /// clustering, temporary and external tables.
+    GrantTargetTable,
     /// Gathered optimizer statistics for one table.
     TableStats,
     /// Staleness of gathered table statistics.
@@ -712,7 +715,7 @@ pub enum ReadQueryProvenance {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 197] = [
+    pub const ALL: [Self; 198] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::PolicyObservationSessionContext,
@@ -910,6 +913,7 @@ impl CatalogQueryId {
         Self::MutationIndexImplementation,
         Self::MutationRasPolicies,
         Self::MutationTypeAuthid,
+        Self::GrantTargetTable,
     ];
 
     /// Return the immutable SQL, bind and handling contract for this ID.
@@ -2846,6 +2850,16 @@ order by owner, name, referenced_owner, referenced_name"#
                  WHERE log_owner=:1 AND master=:2 AND ROWNUM <= :3",
                 TTI,
                 "collect transactional materialized-view log maintenance",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::GrantTargetTable => (
+                "SELECT t.owner, t.table_name, t.partitioned, t.iot_type, t.cluster_name, t.temporary, \
+                   (SELECT COUNT(*) FROM SYS.ALL_EXTERNAL_TABLES e \
+                     WHERE e.owner = t.owner AND e.table_name = t.table_name) AS external_count \
+                 FROM SYS.ALL_TABLES t WHERE t.owner=:1 AND t.table_name=:2 AND ROWNUM <= :3",
+                TTI,
+                "prove a scoped-grant target is an ordinary local heap table",
                 InternalProof,
                 ReadPurity,
             ),

@@ -39,6 +39,7 @@
 //! **Redaction.** Raw predicate values never appear in `Debug`, `Display`,
 //! status serialization or error text; they are zeroized when dropped.
 
+pub mod admission;
 mod authorization;
 pub mod matcher;
 pub mod predicate;
