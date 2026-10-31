@@ -49,7 +49,8 @@ def _binding_digest(api, binding):
         "connection_failed runtime_state_required challenge_required repreview_required lease_required "
         "forbidden_statement busy session_busy at_capacity invalid_arguments policy_denied request_cancelled "
         "transient flashback_retention_exceeded flashback_definition_changed flashback_not_flashbackable "
-        "flashback_capability_unavailable snapshot_too_old internal").split()
+        "flashback_capability_unavailable snapshot_too_old internal "
+        "impact_decisive_unavailable impact_decisive_truncated not_collected").split()
     not_applicable = "not_dml no_object no_source no_effect level_below_required untrusted_triggers".split()
     action_fields = ("envelope object_identities object_status mutation_effect_closure rows edition "
         "current_schema profile_generation lane_generation dependents predicted_invalid_set ddl_effect_closure "
@@ -294,6 +295,24 @@ def binding_freshness_selftest(api):
                       "native_impact_facts": [checked]}
 
     before, left = fixture(1, "2026-10-31T12:00:00")
+    # Pinned by the guard's public Rust V1 encoder for this exact fixture.
+    # The display label does not change the wire reason's canonical byte tag.
+    for reason, expected in {
+        "impact_decisive_unavailable": "4e940bb40b1754187dcd94709dff6efe482b025e75c31e6a9b698b2929254b96",
+        "impact_decisive_truncated": "6d012aeec83edac7e5b74916fc43c8a978d9d80338fa2e904096b87cc65570f8",
+        "not_collected": "2dbf76e94b163d9e54e894d21146bcc9ccb564fa127d4223f8a7daddee6014fd",
+    }.items():
+        binding = copy.deepcopy(before["impact"]["binding"])
+        binding["decisive"]["engine_version"] = {"status": "unavailable", "reason": reason}
+        api.require(_binding_digest(api, binding).hex() == expected,
+                    f"public V1 reason tag changed: {reason}")
+    binding["decisive"]["engine_version"]["reason"] = "not_a_public_reason"
+    try:
+        _binding_digest(api, binding)
+    except api.DriverError:
+        pass
+    else:
+        raise api.DriverError("reference codec accepted an unknown public reason")
     after, right = fixture(2, "2026-10-31T12:00:01")
     verify_equivalent_runs(api, left, right, {})
     for path in ("envelope_digest", "dependency_hash", "native_timestamp"):
