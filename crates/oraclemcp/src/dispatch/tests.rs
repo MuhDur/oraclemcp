@@ -18899,3 +18899,117 @@ fn operator_edition_success_is_terminal_after_deadline() {
         &serde_json::json!({"status": "preview", "edition": "SYNTHETIC_CHILD"})
     ));
 }
+
+#[test]
+fn opted_in_edition_anti_bypass_refuses_before_any_oracle_connection_call() {
+    let cases = [
+        (
+            "oracle_execute",
+            json!({"sql":"ALTER SESSION SET EDITION = child"}),
+        ),
+        (
+            "oracle_execute",
+            json!({"sql":"ALTER/**/SESSION SET CURRENT_SCHEMA=APP EDITION=child"}),
+        ),
+        (
+            "oracle_execute",
+            json!({"sql":"CREATE OR REPLACE FUNCTION app.f RETURN NUMBER IS BEGIN RETURN 1; END;"}),
+        ),
+        ("oracle_execute", json!({"sql":"DROP VIEW app.v"})),
+        (
+            "oracle_execute",
+            json!({"sql":"ALTER PACKAGE app.p COMPILE BODY"}),
+        ),
+        (
+            "oracle_create_or_replace",
+            json!({"source_code":"CREATE OR REPLACE VIEW app.v AS SELECT 1 n FROM dual"}),
+        ),
+        (
+            "create_or_replace",
+            json!({"source_code":"CREATE OR REPLACE VIEW app.v AS SELECT 1 n FROM dual"}),
+        ),
+        ("deploy_ddl", json!({"ddl":"DROP PROCEDURE app.p"})),
+        (
+            "oracle_compile_object",
+            json!({"object_type":"PACKAGE","name":"P"}),
+        ),
+        (
+            "compile_with_warnings",
+            json!({"object_type":"PACKAGE","object_name":"P"}),
+        ),
+        (
+            "oracle_patch_source",
+            json!({"object_type":"PACKAGE BODY","name":"P","old_text":"old","new_text":"new"}),
+        ),
+        ("oracle_preview_sql", json!({"sql":"DROP TYPE app.t"})),
+        ("execute_approved", json!({"sql":"DROP SYNONYM app.s"})),
+        ("execute_approved", json!({"token":"edition-preview-token"})),
+        (
+            "execute_approved",
+            json!({"sql":"", "token":"edition-preview-token"}),
+        ),
+        ("app_replace_view", json!({})),
+    ];
+    for (tool, args) in cases {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let config = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name="edition-work"
+            connect_string="localhost:1521/fake"
+            max_level="DDL"
+            edition_change_requests=true
+        "#,
+        )
+        .unwrap();
+        let mut dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ZeroCallOracleConnection {
+                calls: calls.clone(),
+            }),
+            Some("edition-work".into()),
+            SessionLevelState::new(OperatingLevel::Ddl, false),
+        )
+        .with_profile_drain_state(ProfileDrainState::from_config(config));
+        let definitions = oraclemcp_core::parse_tools_file(
+            r#"
+            [[tool]]
+            name="app_replace_view"
+            description="Synthetic code replacement"
+            sql="CREATE OR REPLACE VIEW app.v AS SELECT 1 n FROM dual"
+        "#,
+        )
+        .unwrap();
+        let loaded =
+            oraclemcp_core::load_tools(&definitions, &DEFAULT_CLASSIFIER, OperatingLevel::Ddl)
+                .unwrap();
+        let state = dispatcher.state.get_mut().unwrap();
+        state.custom_catalog = ActiveCustomCatalog::new(1, CustomToolCatalog::new(loaded));
+        state.execute_approved_tokens.insert(
+            "edition-preview-token".into(),
+            ExecuteApprovedGrant {
+                sql: "DROP VIEW app.v".into(),
+                required_level: OperatingLevel::Ddl,
+                active_profile: Some("edition-work".into()),
+                expires_at: Instant::now() + Duration::from_secs(60),
+            },
+        );
+        let error = dispatcher.dispatch(tool, args).expect_err(tool);
+        assert_eq!(
+            error.error_class,
+            ErrorClass::ForbiddenStatement,
+            "{tool}: {error:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(&error).unwrap()["structured_reason"]["category"],
+            "USE_CHANGE_REQUEST",
+            "{tool}: {error:?}"
+        );
+        assert!(
+            error
+                .next_steps
+                .iter()
+                .any(|step| step.contains("oracle_change_request"))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "{tool} reached Oracle");
+    }
+}

@@ -189,6 +189,103 @@ pub fn is_allowed_alter_session(stmt: &str) -> bool {
     matches!(alter_session_policy(stmt), Some(true))
 }
 
+/// Apply the ordinary-session allowlist with the profile's change-request
+/// restriction. Staging authenticates into its edition; even staging code has
+/// no reason to switch an existing session with ALTER SESSION SET EDITION.
+#[must_use]
+pub fn is_allowed_alter_session_for_profile(stmt: &str, edition_change_requests: bool) -> bool {
+    is_allowed_alter_session(stmt) && !requires_change_request(stmt, edition_change_requests)
+}
+
+/// A tightening-only, pre-I/O restriction on ordinary agent tools. This does
+/// not authorize SQL: the full classifier and level gates must still run.
+/// Both editionable and explicitly NONEDITIONABLE declarations of these types
+/// are restricted, since either can replace the application's live code.
+#[must_use]
+pub fn requires_change_request(stmt: &str, edition_change_requests: bool) -> bool {
+    use sqlparser::{
+        dialect::OracleDialect,
+        tokenizer::{Token, Tokenizer},
+    };
+    if !edition_change_requests {
+        return false;
+    }
+    let tokens = match Tokenizer::new(&OracleDialect {}, stmt).tokenize() {
+        Ok(tokens) => tokens,
+        // Malformed DDL/session settings cannot establish a safe exception.
+        Err(_) => {
+            return take_leading_word(stmt).is_some_and(|(word, _)| {
+                ["CREATE", "ALTER", "DROP"]
+                    .iter()
+                    .any(|verb| word.eq_ignore_ascii_case(verb))
+            });
+        }
+    };
+    let significant: Vec<_> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .collect();
+    let word = |index: usize| match significant.get(index) {
+        Some(Token::Word(word)) if word.quote_style.is_none() => {
+            Some(word.value.to_ascii_uppercase())
+        }
+        _ => None,
+    };
+    let Some(verb) = word(0) else {
+        return false;
+    };
+    if verb == "ALTER" && word(1).as_deref() == Some("SESSION") {
+        return normalize_significant_tokens(stmt)
+            .and_then(|normalized| {
+                normalized
+                    .to_ascii_uppercase()
+                    .strip_prefix("ALTER SESSION SET ")
+                    .and_then(alter_session_params)
+            })
+            .is_none_or(|params| params.iter().any(|param| param == "EDITION"));
+    }
+    if !["CREATE", "ALTER", "DROP"].contains(&verb.as_str()) {
+        return false;
+    }
+    let mut index = 1;
+    if verb == "CREATE"
+        && word(index).as_deref() == Some("OR")
+        && word(index + 1).as_deref() == Some("REPLACE")
+    {
+        index += 2;
+    }
+    while word(index).is_some_and(|word| {
+        [
+            "EDITIONABLE",
+            "NONEDITIONABLE",
+            "EDITIONING",
+            "FORCE",
+            "NOFORCE",
+        ]
+        .contains(&word.as_str())
+    }) {
+        index += 1;
+    }
+    // Public synonyms are shared, noneditionable objects. They remain governed
+    // by the ordinary classifier/level path, like tables and materialized views.
+    word(index).is_some_and(|kind| {
+        [
+            "FUNCTION",
+            "PROCEDURE",
+            "PACKAGE",
+            "TRIGGER",
+            "TYPE",
+            "VIEW",
+            "SYNONYM",
+            "LIBRARY",
+        ]
+        .contains(&kind.as_str())
+            || (kind == "SQL"
+                && word(index + 1).as_deref() == Some("TRANSLATION")
+                && word(index + 2).as_deref() == Some("PROFILE"))
+    })
+}
+
 /// Parse the post-`ALTER SESSION SET ` remainder into the list of parameter
 /// names being assigned. String-literal-aware: a single-quoted value is opaque,
 /// so `=`/whitespace inside it never starts a new clause or parameter name.
@@ -294,6 +391,99 @@ fn alter_session_params(rest: &str) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anti_bypass_alter_session_edition_refused_on_opted_in_profile() {
+        for sql in [
+            "ALTER SESSION SET EDITION=child",
+            "/* agent */ ALTER/**/SESSION SET CURRENT_SCHEMA=HR EDITION=child",
+            "ALTER SESSION SET EDITION=\"Child Edition\"",
+        ] {
+            assert!(requires_change_request(sql, true), "{sql}");
+            assert!(!is_allowed_alter_session_for_profile(sql, true));
+        }
+        assert!(is_allowed_alter_session_for_profile(
+            "ALTER SESSION SET NLS_DATE_FORMAT='EDITION'",
+            true
+        ));
+    }
+
+    #[test]
+    fn anti_bypass_create_or_replace_editionable_refused_outside_staging() {
+        assert!(requires_change_request(
+            "CREATE OR REPLACE FORCE EDITIONING VIEW app.v AS SELECT x FROM app.t",
+            true
+        ));
+        for kind in [
+            "FUNCTION",
+            "PROCEDURE",
+            "PACKAGE",
+            "PACKAGE BODY",
+            "TRIGGER",
+            "TYPE",
+            "TYPE BODY",
+            "VIEW",
+            "SYNONYM",
+            "LIBRARY",
+            "SQL TRANSLATION PROFILE",
+        ] {
+            for prefix in [
+                "CREATE ",
+                "CREATE OR REPLACE ",
+                "CREATE OR REPLACE EDITIONABLE ",
+                "CREATE OR REPLACE NONEDITIONABLE ",
+                "/*x*/CREATE/**/OR/**/REPLACE/**/FORCE ",
+            ] {
+                let sql = format!("{prefix}{kind} app_unit");
+                assert!(requires_change_request(&sql, true), "{sql}");
+            }
+            assert!(requires_change_request(
+                &format!("ALTER {kind} app_unit COMPILE"),
+                true
+            ));
+        }
+        for sql in [
+            "CREATE TABLE t(x NUMBER)",
+            "CREATE MATERIALIZED VIEW v AS SELECT 1 n FROM dual",
+            "CREATE PUBLIC SYNONYM s FOR t",
+            "SELECT 'DROP VIEW v' FROM dual",
+        ] {
+            assert!(!requires_change_request(sql, true), "{sql}");
+        }
+    }
+
+    #[test]
+    fn anti_bypass_drop_editionable_refused_outside_staging() {
+        for kind in [
+            "FUNCTION",
+            "PROCEDURE",
+            "PACKAGE",
+            "TRIGGER",
+            "TYPE",
+            "VIEW",
+            "SYNONYM",
+            "LIBRARY",
+            "SQL TRANSLATION PROFILE",
+        ] {
+            assert!(requires_change_request(
+                &format!("DROP/*x*/ {kind} app_unit"),
+                true
+            ));
+        }
+    }
+
+    #[test]
+    fn non_opted_in_profile_keeps_alter_session_edition() {
+        let sql = "ALTER SESSION SET EDITION = app_release_v2";
+        assert!(is_allowed_alter_session_for_profile(sql, false));
+        for sql in [
+            sql,
+            "DROP VIEW v",
+            "CREATE OR REPLACE FUNCTION f RETURN NUMBER IS BEGIN RETURN 1; END;",
+        ] {
+            assert!(!requires_change_request(sql, false));
+        }
+    }
 
     #[test]
     fn read_only_level_sets_transaction_read_only() {

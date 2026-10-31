@@ -426,6 +426,8 @@ pub enum CatalogQueryId {
     SemanticSearchOnnxModel,
     /// Existing child of a named edition before creating another.
     EditionChildren,
+    /// Assert the current edition on a newly authenticated staging connection.
+    StagingCurrentEdition,
     /// Oracle server version used to label version-scoped catalog evidence.
     EditionsProbeServerVersion,
     /// Columns exposed for the supported EBR evidence views in this session.
@@ -584,7 +586,7 @@ pub enum ReadQueryProvenance {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 180] = [
+    pub const ALL: [Self; 181] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::PolicyObservationSessionContext,
@@ -683,6 +685,7 @@ impl CatalogQueryId {
         Self::SemanticSearchCompatible,
         Self::SemanticSearchOnnxModel,
         Self::EditionChildren,
+        Self::StagingCurrentEdition,
         Self::EditionsProbeServerVersion,
         Self::EditionsCatalogColumns,
         Self::EditionsEnabledOwnerSelf,
@@ -1814,6 +1817,13 @@ impl CatalogQueryId {
                 "select one visible local ONNX embedding model",
                 InternalProof,
                 Diagnostic,
+            ),
+            Self::StagingCurrentEdition => (
+                "SELECT SYS_CONTEXT('USERENV','CURRENT_EDITION_NAME') AS edition_name FROM dual",
+                EMPTY,
+                "prove the authenticated staging connection is in the requested child edition",
+                SessionContext,
+                ReadPurity,
             ),
             Self::EditionChildren => (
                 "SELECT edition_name FROM all_editions WHERE parent_edition_name = :1",

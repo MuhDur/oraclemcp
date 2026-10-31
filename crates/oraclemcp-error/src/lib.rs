@@ -390,6 +390,10 @@ pub enum ReasonCategory {
     /// schema and object type. The server never enables it on the caller's
     /// behalf. The wire value is `EDITIONS_NOT_ENABLED`.
     EditionsNotEnabled,
+    /// A separate authenticated staging connection could not be proven usable.
+    StagingLaneUnavailable,
+    /// Opted-in profiles must change editionable code through a change request.
+    UseChangeRequest,
     /// An Oracle Label Security policy applies to a relation being read.
     ProtectedByOls,
     /// A Real Application Security policy applies to a relation being read.
@@ -404,7 +408,7 @@ pub enum ReasonCategory {
 
 impl ReasonCategory {
     /// Every currently defined structured refusal category, in deterministic wire order.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 21] = [
         Self::BlockListed,
         Self::CostBudgetExceeded,
         Self::DynamicSql,
@@ -421,9 +425,11 @@ impl ReasonCategory {
         Self::ProtectedByRedaction,
         Self::RequiresHigherLevel,
         Self::SecurityFeatureVisibilityUnknown,
+        Self::StagingLaneUnavailable,
         Self::TransactionControl,
         Self::UnbalancedBlock,
         Self::UnprovenSideEffect,
+        Self::UseChangeRequest,
     ];
 
     /// Short operator-facing meaning for this structured refusal cause.
@@ -444,6 +450,8 @@ impl ReasonCategory {
             Self::OneChildEdition => "edition parent already has a child",
             Self::NotEditionable => "edition workflow targets shared table or data state",
             Self::EditionsNotEnabled => "edition support is not proven for object/schema",
+            Self::StagingLaneUnavailable => "a separate child-edition lane is unavailable",
+            Self::UseChangeRequest => "editionable code must use a change request",
             Self::ProtectedByOls => "Oracle Label Security policy protects the relation",
             Self::ProtectedByRas => "Real Application Security policy protects the relation",
             Self::ProtectedByRedaction => "Data Redaction policy protects the relation",
@@ -472,6 +480,12 @@ impl ReasonCategory {
             Self::OneChildEdition => "existing or in-flight child would cause ORA-38807",
             Self::NotEditionable => "table or data change was proposed for an edition",
             Self::EditionsNotEnabled => "schema/object EBR capability was not established",
+            Self::StagingLaneUnavailable => {
+                "capacity, authentication or the current-edition assertion failed"
+            }
+            Self::UseChangeRequest => {
+                "ordinary tools attempted edition selection or editionable DDL on an opted-in profile"
+            }
             Self::ProtectedByOls | Self::ProtectedByRas | Self::ProtectedByRedaction => {
                 "protected-relation access lacks an approved policy path"
             }
@@ -527,6 +541,12 @@ impl ReasonCategory {
             }
             Self::EditionsNotEnabled => {
                 "ask the database administrator to enable editions for the exact schema and object type"
+            }
+            Self::StagingLaneUnavailable => {
+                "resolve staging connection or capacity availability, then retry oracle_change_request"
+            }
+            Self::UseChangeRequest => {
+                "use oracle_change_request to stage and verify code in a dedicated child-edition lane"
             }
             Self::ProtectedByOls | Self::ProtectedByRas | Self::ProtectedByRedaction => {
                 "use a profile authorized for the protected relation or ask the policy owner for a safe access path"

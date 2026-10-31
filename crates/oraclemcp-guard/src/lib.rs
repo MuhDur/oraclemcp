@@ -47,7 +47,8 @@ pub use effective_dml_plan::{
     EffectiveDmlPlanV1,
 };
 pub use enforcement::{
-    SET_TRANSACTION_READ_ONLY, is_allowed_alter_session, read_only_setup_statements,
+    SET_TRANSACTION_READ_ONLY, is_allowed_alter_session, is_allowed_alter_session_for_profile,
+    read_only_setup_statements, requires_change_request,
 };
 
 pub use classifier::{

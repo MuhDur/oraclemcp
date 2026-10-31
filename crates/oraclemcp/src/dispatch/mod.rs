@@ -13170,6 +13170,61 @@ impl OracleDispatcher {
         validate_declared_args(name, &args)?;
         validate_json_array_arguments(name, &args)?;
         validate_enum_arguments(name, &args)?;
+        // An opted-in profile routes all code changes through the server-owned
+        // change-request staging capability. This preflight precedes even
+        // timeout getters, schema discovery, reconnect and audit DB evidence.
+        {
+            let state = self.state.lock(cx).await.map_err(|_| {
+                ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
+            })?;
+            let opted_in = state.profile_generation.as_ref().is_some_and(|lease| {
+                lease
+                    .config()
+                    .and_then(|config| config.profile(lease.profile()))
+                    .is_some_and(|profile| profile.edition_change_requests())
+            });
+            if opted_in {
+                let tool = canonical_tool_name(name);
+                let sql = args
+                    .get("sql")
+                    .or_else(|| args.get("source_code"))
+                    .or_else(|| args.get("ddl"))
+                    .and_then(Value::as_str)
+                    .filter(|sql| !sql.trim().is_empty())
+                    .or_else(|| {
+                        (tool == "execute_approved")
+                            .then(|| {
+                                args.get("token")
+                                    .and_then(Value::as_str)
+                                    .and_then(|token| state.execute_approved_tokens.get(token))
+                                    .map(|grant| grant.sql.as_str())
+                            })
+                            .flatten()
+                    });
+                let restricted = match tool {
+                    "oracle_compile_object" | "oracle_patch_source" => true,
+                    "oracle_execute"
+                    | "execute_approved"
+                    | "oracle_preview_sql"
+                    | "oracle_create_or_replace"
+                    | "deploy_ddl" => {
+                        sql.is_some_and(|sql| oraclemcp_guard::requires_change_request(sql, true))
+                    }
+                    _ => state
+                        .custom_catalog
+                        .catalog
+                        .get(tool)
+                        .and_then(|loaded| loaded.def.sql.as_deref())
+                        .is_some_and(|sql| oraclemcp_guard::requires_change_request(sql, true)),
+                };
+                if restricted {
+                    return Err(ErrorEnvelope::new(ErrorClass::ForbiddenStatement,
+                        "edition selection and editionable code changes require oracle_change_request on this profile")
+                        .with_structured_reason(StructuredReason::new(ReasonCategory::UseChangeRequest))
+                        .with_next_step("use oracle_change_request to stage and verify in a dedicated child-edition lane"));
+                }
+            }
+        }
         let mut request_budget = self.dispatch_request_budget(cx, context)?;
         if let Some(timeout) = explicit_timeout_duration(&args)? {
             request_budget = request_budget.tighten_timeout(timeout);

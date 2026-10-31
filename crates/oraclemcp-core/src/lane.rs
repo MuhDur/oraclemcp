@@ -50,7 +50,13 @@ use crate::server::{
     ToolDispatch, ToolStreamSender, recv_terminal_after_cancel,
 };
 
+mod edition_staging;
 mod runtime_lock;
+
+pub use edition_staging::{
+    EditionStagingContext, EditionStagingLanes, EditionStagingPurpose, EditionStagingRequest,
+    LanePurpose, assert_pinned_edition_unchanged, derived_staging_profile,
+};
 
 use runtime_lock::assert_no_lane_registry_lock;
 #[cfg(debug_assertions)]
