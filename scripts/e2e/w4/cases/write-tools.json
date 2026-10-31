@@ -1475,6 +1475,27 @@
     ],
     "audit_expect": [
       {
+        "tool": "impact_probe",
+        "danger_level": "READ_ONLY",
+        "decision": "ALLOWED",
+        "outcome": "PENDING",
+        "verdict_certificate": {
+          "level": "READ_ONLY",
+          "verdict": "SAFE"
+        }
+      },
+      {
+        "tool": "impact_probe",
+        "danger_level": "READ_ONLY",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 1,
+        "verdict_certificate": {
+          "level": "READ_ONLY",
+          "verdict": "SAFE"
+        }
+      },
+      {
         "tool": "oracle_execute",
         "decision": "ALLOWED",
         "outcome": "PENDING"
@@ -1543,6 +1564,27 @@
       }
     ],
     "audit_expect": [
+      {
+        "tool": "impact_probe",
+        "danger_level": "READ_ONLY",
+        "decision": "ALLOWED",
+        "outcome": "PENDING",
+        "verdict_certificate": {
+          "level": "READ_ONLY",
+          "verdict": "SAFE"
+        }
+      },
+      {
+        "tool": "impact_probe",
+        "danger_level": "READ_ONLY",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 1,
+        "verdict_certificate": {
+          "level": "READ_ONLY",
+          "verdict": "SAFE"
+        }
+      },
       {
         "tool": "oracle_execute",
         "decision": "ALLOWED",
@@ -2351,6 +2393,27 @@
         "decision": "ALLOWED",
         "outcome": "SUCCEEDED",
         "rows_affected": 1
+      },
+      {
+        "tool": "impact_probe",
+        "danger_level": "READ_ONLY",
+        "decision": "ALLOWED",
+        "outcome": "PENDING",
+        "verdict_certificate": {
+          "level": "READ_ONLY",
+          "verdict": "SAFE"
+        }
+      },
+      {
+        "tool": "impact_probe",
+        "danger_level": "READ_ONLY",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 1,
+        "verdict_certificate": {
+          "level": "READ_ONLY",
+          "verdict": "SAFE"
+        }
       },
       {
         "tool": "oracle_execute",

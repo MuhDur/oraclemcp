@@ -393,7 +393,130 @@ def verify_audit_records(expected, records, optional_prefix=None):
     for item, record in zip(expected, records):
         require(deep_subset(item, record),
                 f"wrong ordered audit record for {item.get('tool', 'unknown tool')}")
+    if any(item.get("tool") == "impact_probe" for item in expected):
+        verify_impact_probe_audit(records)
     return records
+
+
+def verify_impact_probe_audit(records):
+    """Require a signed, contiguous transcript and identity-bound read-probe pairs.
+
+    The real CLI verifies cryptographic signatures for the whole chain. These
+    checks additionally bind this case's exact slice and the probe's certificate.
+    """
+    digest = re.compile(r"sha256:[0-9a-f]{64}")
+    previous = None
+    for record in records:
+        require(type(record.get("seq")) is int and record["seq"] > 0
+                and all(isinstance(record.get(key), str) and digest.fullmatch(record[key])
+                        for key in ("entry_hash", "prev_hash"))
+                and isinstance(record.get("signature"), str)
+                and re.fullmatch(r"hmac-sha256:[0-9a-f]{64}", record["signature"])
+                and isinstance(record.get("key_id"), str) and record["key_id"],
+                "impact audit transcript needs signed sequence/hash identities")
+        if previous is not None:
+            require(record["seq"] == previous["seq"] + 1
+                    and record["prev_hash"] == previous["entry_hash"],
+                    "impact audit transcript is not one contiguous ordered chain")
+        previous = record
+    index = 0
+    while index < len(records):
+        pending = records[index]
+        if pending.get("tool") != "impact_probe":
+            index += 1
+            continue
+        require(index + 1 < len(records), "impact probe is missing its terminal audit")
+        terminal = records[index + 1]
+        require(pending.get("outcome") == "PENDING"
+                and terminal.get("tool") == "impact_probe"
+                and terminal.get("outcome") == "SUCCEEDED"
+                and type(terminal.get("rows_affected")) is int
+                and terminal.get("rows_affected") == 1,
+                "impact probe requires one pending/succeeded count-row pair")
+        for field in ("sql_sha256", "sql_normalized_sha256", "verdict_certificate_core_hash"):
+            require(isinstance(pending.get(field), str) and digest.fullmatch(pending[field])
+                    and terminal.get(field) == pending[field],
+                    f"impact probe pair has different or missing {field}")
+        require(type(pending.get("observed_scn")) is int and pending["observed_scn"] > 0
+                and terminal.get("observed_scn") == pending["observed_scn"],
+                "impact probe pair lost its observed SCN binding")
+        for record in (pending, terminal):
+            certificate = record.get("verdict_certificate", {})
+            require(record.get("danger_level") == "READ_ONLY"
+                    and record.get("decision") == "ALLOWED"
+                    and certificate.get("level") == "READ_ONLY"
+                    and certificate.get("verdict") == "SAFE"
+                    and certificate.get("stmt_digest") == record["sql_sha256"]
+                    and certificate.get("observed_scn") == str(record["observed_scn"])
+                    and certificate.get("bound_audit_hash") == record["entry_hash"],
+                    "impact probe certificate does not bind this read-only audit record")
+        index += 2
+
+
+def impact_probe_audit_selftest():
+    """Structural unit transcripts only; native runs verify actual signatures."""
+    cases = {case["case_id"]: case for case in load_cases()}
+    clone = lambda value: json.loads(json.dumps(value))
+    digest = lambda value: "sha256:" + hashlib.sha256(value.encode()).hexdigest()
+
+    def seal(templates):
+        records, previous = [], digest("unit previous record")
+        for index, template in enumerate(templates):
+            record = clone(template)
+            record.update(seq=index + 10, prev_hash=previous,
+                          entry_hash=digest(f"unit record {index}"), key_id="unit-key",
+                          signature="hmac-sha256:" + "a" * 64)
+            if record.get("tool") == "impact_probe":
+                record.update(sql_sha256=digest("unit count SQL"),
+                              sql_normalized_sha256=digest("unit normalized count SQL"),
+                              observed_scn=7, verdict_certificate_core_hash=digest("unit certificate"))
+                record["verdict_certificate"].update(
+                    stmt_digest=record["sql_sha256"], observed_scn="7",
+                    bound_audit_hash=record["entry_hash"])
+            records.append(record)
+            previous = record["entry_hash"]
+        return records
+
+    def rejected(expected, records, label, verified=True):
+        try:
+            verify_audit(expected, records, verified)
+        except DriverError:
+            return
+        raise DriverError(f"impact audit verifier accepted planted {label}")
+
+    for name in ("w4_execute_update_confirmed_commit", "w4_execute_token_replay_refused",
+                 "w4_backstop_elevated_write_succeeds"):
+        expected = cases[name]["audit_expect"]
+        require(sum(item.get("tool") == "impact_probe" for item in expected) == 2,
+                f"{name} must require the separate impact probe pair")
+        records = seal(expected)
+        verify_audit(expected, records, True)
+        # Keep the other structural invariants valid: count checks must catch
+        # a missing/extra signed record even if its remaining chain is linked.
+        for index in range(len(records)):
+            rejected(expected, seal(expected[:index] + expected[index + 1:]), "missing record")
+        rejected(expected, seal(expected + [expected[-1]]), "extra linked record")
+        probe = next(i for i, item in enumerate(expected) if item["tool"] == "impact_probe")
+        for label, index, field, value in (
+                ("wrong probe kind", probe, "danger_level", "GUARDED"),
+                ("wrong terminal kind", probe + 1, "tool", "oracle_execute"),
+                ("sequence gap", probe + 1, "seq", records[probe + 1]["seq"] + 1),
+                ("boolean sequence", probe, "seq", True),
+                ("broken predecessor", probe + 1, "prev_hash", digest("wrong predecessor")),
+                ("different SQL", probe + 1, "sql_sha256", digest("wrong SQL")),
+                ("different SCN", probe + 1, "observed_scn", 8),
+                ("unsigned record", probe, "signature", "")):
+            changed = clone(records)
+            changed[index][field] = value
+            rejected(expected, changed, label)
+        changed = clone(records)
+        changed[probe], changed[probe + 1] = changed[probe + 1], changed[probe]
+        rejected(expected, changed, "wrong probe order")
+        changed = clone(records)
+        changed[probe]["verdict_certificate"]["bound_audit_hash"] = digest("different audit record")
+        rejected(expected, changed, "unbound certificate")
+        rejected(expected, records, "unverified chain", verified=False)
+    print(compact({"selftest": "impact_probe_exact_kind_order_chain_and_count", "verdict": "pass"}))
 
 
 def view_commitment(domain, value):
@@ -2994,6 +3117,8 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         if case["audit_expect"]:
             records = audit_records(audit_path)[before:]
             verified = audit_verify(binary, audit_path, env)
+            row["audit"] = scrub(records)
+            row["audit_verified"] = verified
             records = verify_audit(case["audit_expect"], records, verified, case.get("audit_optional_prefix"))
             if case.get("view_proof_audit"):
                 row["view_proof_audit"] = verify_view_proof_audit(
@@ -5357,6 +5482,7 @@ def selftest():
     awr_unattested_probe_selftest()
     failed_results_selftest()
     killed_dml_audit_selftest()
+    impact_probe_audit_selftest()
     level_expiry_audit_selftest()
     independent_step_reread_selftest()
     killed_session_fixture_selftest()
