@@ -227,10 +227,6 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "db": {
-                  "description": "Alias for profile for compatibility with older clients. Prefer profile.",
-                  "type": "string"
-                },
                 "profile": {
                   "description": "Configured profile name from oracle_list_profiles.",
                   "type": "string"
@@ -239,7 +235,15 @@
               "required": [
                 "profile"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "db",
+                  "canonical": "profile",
+                  "note": "`db` is deprecated; use `profile`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_switch_profile",
             "outputSchema": {
@@ -382,10 +386,6 @@
                   "description": "Confirmation token returned by preview. Required when execute=true raises the level.",
                   "type": "string"
                 },
-                "confirmation_token": {
-                  "description": "Alias for confirm.",
-                  "type": "string"
-                },
                 "execute": {
                   "description": "Default false previews the level change and returns a confirmation token. Set true with confirm to apply elevation.",
                   "type": "boolean"
@@ -400,20 +400,6 @@
                   ],
                   "type": "string"
                 },
-                "target_level": {
-                  "description": "Alias for level.",
-                  "enum": [
-                    "READ_WRITE",
-                    "DDL",
-                    "ADMIN",
-                    "READ_ONLY"
-                  ],
-                  "type": "string"
-                },
-                "token": {
-                  "description": "Alias for confirm.",
-                  "type": "string"
-                },
                 "ttl_seconds": {
                   "description": "Temporary elevation window in seconds (default 900, hard cap 3600).",
                   "maximum": 3600,
@@ -424,7 +410,27 @@
               "required": [
                 "level"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "target_level",
+                  "canonical": "level",
+                  "note": "`target_level` is deprecated; use `level`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "token",
+                  "canonical": "confirm",
+                  "note": "`token` is deprecated; use `confirm`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "confirmation_token",
+                  "canonical": "confirm",
+                  "note": "`confirmation_token` is deprecated; use `confirm`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_set_session_level",
             "outputSchema": {
@@ -712,10 +718,6 @@
                   ],
                   "type": "string"
                 },
-                "export_to_resource": {
-                  "description": "Legacy alias for export.",
-                  "type": "boolean"
-                },
                 "format": {
                   "description": "Inline result format. json (default) returns rows; arrow returns base64 Arrow IPC in arrow_ipc_b64 after the identical masking and audit path. Arrow and export/streaming are mutually exclusive.",
                   "enum": [
@@ -723,12 +725,6 @@
                     "arrow"
                   ],
                   "type": "string"
-                },
-                "limit": {
-                  "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows.",
-                  "maximum": 5000,
-                  "minimum": 1,
-                  "type": "integer"
                 },
                 "max_blob_bytes": {
                   "description": "Maximum BLOB bytes to inline per cell as base64 (default 1048576).",
@@ -801,10 +797,6 @@
                   "description": "A single read-only SELECT. Use :1, :2 … for binds.",
                   "type": "string"
                 },
-                "stream": {
-                  "description": "Legacy alias for streaming.",
-                  "type": "boolean"
-                },
                 "streaming": {
                   "description": "Deliver the result incrementally instead of one inline page. Over HTTP/SSE, scalar/self-contained rowsets emit one `event: row` frame per row; LOB, BFILE, and REF CURSOR values fall back to ordered cursor `event: chunk` frames. Mutually exclusive with export and as_of. Never affects the read-only classifier.",
                   "type": "boolean"
@@ -819,7 +811,27 @@
               "required": [
                 "sql"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "limit",
+                  "canonical": "max_rows",
+                  "note": "`limit` is deprecated; use `max_rows`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "export_to_resource",
+                  "canonical": "export",
+                  "note": "`export_to_resource` is deprecated; use `export`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "stream",
+                  "canonical": "streaming",
+                  "note": "`stream` is deprecated; use `streaming`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_query",
             "outputSchema": {
@@ -1189,30 +1201,8 @@
                   "items": {},
                   "type": "array"
                 },
-                "db_a": {
-                  "description": "Alias for profile_a.",
-                  "type": "string"
-                },
-                "db_b": {
-                  "description": "Alias for profile_b.",
-                  "type": "string"
-                },
                 "key": {
                   "description": "Optional result-column names used to align rows and report changed[]. If omitted, oracle_diff infers a primary key only for a single resolved local table; otherwise it falls back to keyless add/remove.",
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "key_columns": {
-                  "description": "Alias for key.",
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "keys": {
-                  "description": "Alias for key.",
                   "items": {
                     "type": "string"
                   },
@@ -1302,7 +1292,33 @@
                 "scn_a",
                 "scn_b"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "db_a",
+                  "canonical": "profile_a",
+                  "note": "`db_a` is deprecated; use `profile_a`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "db_b",
+                  "canonical": "profile_b",
+                  "note": "`db_b` is deprecated; use `profile_b`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "keys",
+                  "canonical": "key",
+                  "note": "`keys` is deprecated; use `key`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "key_columns",
+                  "canonical": "key",
+                  "note": "`key_columns` is deprecated; use `key`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_diff",
             "outputSchema": {
@@ -1561,7 +1577,7 @@
               "openWorldHint": false,
               "readOnlyHint": true
             },
-            "description": "Classify SQL without executing it and bind the exact SQL, typed binds, commit/hold mode, output caps and timeout into any confirmation. Changing one requires a new preview.",
+            "description": "Classify SQL without executing the candidate and bind the exact SQL, typed binds, commit/hold mode, output caps and timeout into any confirmation. Changing one requires a new preview. Supported UPDATE/DELETE previews may run a separately audited, guarded COUNT read and return an advisory snapshot estimate with SCN bounds; unavailable rows never become zero. Admitted DDL previews include dependency closure and predicted invalidations, bounded to depth 10 and 1000 dependents; truncation and uncertainty are explicit, and unavailable observations do not change approval.",
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
@@ -1576,10 +1592,6 @@
                 },
                 "commit": {
                   "description": "The exact commit mode intended for oracle_execute. Default false; a later commit=true requires a new preview.",
-                  "type": "boolean"
-                },
-                "dbms_output": {
-                  "description": "Alias for capture_dbms_output.",
                   "type": "boolean"
                 },
                 "dbms_output_max_chars": {
@@ -1597,18 +1609,6 @@
                 "hold": {
                   "description": "The exact reversible-workspace hold mode intended for oracle_execute. Default false.",
                   "type": "boolean"
-                },
-                "max_dbms_output_chars": {
-                  "description": "Alias for dbms_output_max_chars.",
-                  "maximum": 1000000,
-                  "minimum": 1,
-                  "type": "integer"
-                },
-                "max_dbms_output_lines": {
-                  "description": "Alias for dbms_output_max_lines.",
-                  "maximum": 5000,
-                  "minimum": 1,
-                  "type": "integer"
                 },
                 "scoped_grant": {
                   "description": "Explicit scoped-grant reference intended for execution; its identity is bound into this preview.",
@@ -1628,7 +1628,27 @@
               "required": [
                 "sql"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "dbms_output",
+                  "canonical": "capture_dbms_output",
+                  "note": "`dbms_output` is deprecated; use `capture_dbms_output`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "max_dbms_output_lines",
+                  "canonical": "dbms_output_max_lines",
+                  "note": "`max_dbms_output_lines` is deprecated; use `dbms_output_max_lines`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "max_dbms_output_chars",
+                  "canonical": "dbms_output_max_chars",
+                  "note": "`max_dbms_output_chars` is deprecated; use `dbms_output_max_chars`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_preview_sql",
             "outputSchema": {
@@ -1859,12 +1879,6 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "limit": {
-                  "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows.",
-                  "maximum": 5000,
-                  "minimum": 1,
-                  "type": "integer"
-                },
                 "max_rows": {
                   "description": "Maximum schemas to return (default 200, hard cap 5000).",
                   "maximum": 5000,
@@ -1877,7 +1891,15 @@
                 }
               },
               "required": [],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "limit",
+                  "canonical": "max_rows",
+                  "note": "`limit` is deprecated; use `max_rows`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_list_schemas",
             "title": "Oracle List Schemas"
@@ -1896,12 +1918,6 @@
                 "cursor": {
                   "description": "Opaque pagination cursor from a prior truncated page.",
                   "type": "string"
-                },
-                "limit": {
-                  "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows.",
-                  "maximum": 5000,
-                  "minimum": 1,
-                  "type": "integer"
                 },
                 "max_rows": {
                   "description": "Maximum objects to return (default 500, hard cap 5000).",
@@ -1938,7 +1954,15 @@
                 }
               },
               "required": [],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "limit",
+                  "canonical": "max_rows",
+                  "note": "`limit` is deprecated; use `max_rows`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_schema_inspect",
             "title": "Oracle Schema Inspect"
@@ -1954,10 +1978,6 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "detail": {
-                  "description": "Alias for detail_level.",
-                  "type": "string"
-                },
                 "detail_level": {
                   "description": "Enrichment level. names=identifiers only; summary=+column count + comments + the optimizer ALL_TABLES.NUM_ROWS estimate (NOT COUNT(*)); standard (default)=+columns; full=+indexes.",
                   "enum": [
@@ -1972,12 +1992,6 @@
                   "description": "Search the egress-safe unified fleet catalog. Fleet mode requires detail_level=names, applies each profile's own result-masking policy before aggregation, and intentionally returns no profile roster or profile-count metadata.",
                   "type": "boolean"
                 },
-                "limit": {
-                  "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows.",
-                  "maximum": 5000,
-                  "minimum": 1,
-                  "type": "integer"
-                },
                 "max_rows": {
                   "description": "Maximum objects to return (default 100, hard cap 5000).",
                   "maximum": 5000,
@@ -1986,25 +2000,6 @@
                 },
                 "name_like": {
                   "description": "Optional SQL LIKE pattern for object_name, e.g. EMP%.",
-                  "type": "string"
-                },
-                "object_type": {
-                  "description": "Deprecated single-type filter; use object_types for one or more exact Oracle object types.",
-                  "enum": [
-                    "TABLE",
-                    "VIEW",
-                    "MATERIALIZED VIEW",
-                    "PACKAGE",
-                    "PACKAGE BODY",
-                    "PROCEDURE",
-                    "FUNCTION",
-                    "TRIGGER",
-                    "TYPE",
-                    "TYPE BODY",
-                    "SEQUENCE",
-                    "INDEX",
-                    "SYNONYM"
-                  ],
                   "type": "string"
                 },
                 "object_types": {
@@ -2037,7 +2032,27 @@
                 }
               },
               "required": [],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "object_type",
+                  "canonical": "object_types",
+                  "note": "`object_type` is deprecated; use `object_types`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "detail",
+                  "canonical": "detail_level",
+                  "note": "`detail` is deprecated; use `detail_level`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "limit",
+                  "canonical": "max_rows",
+                  "note": "`limit` is deprecated; use `max_rows`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_search_objects",
             "title": "Oracle Search Objects"
@@ -2075,12 +2090,6 @@
                   },
                   "type": "array"
                 },
-                "limit": {
-                  "description": "Alias for max_rows.",
-                  "maximum": 250,
-                  "minimum": 1,
-                  "type": "integer"
-                },
                 "max_rows": {
                   "description": "Maximum rows for each selected orientation list (default 100). The response sets truncated=true and returns next_cursor when another bounded page may exist.",
                   "maximum": 250,
@@ -2093,7 +2102,15 @@
                 }
               },
               "required": [],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "limit",
+                  "canonical": "max_rows",
+                  "note": "`limit` is deprecated; use `max_rows`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_orient",
             "title": "Oracle Orient"
@@ -2109,12 +2126,6 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "limit": {
-                  "description": "Alias for max_rows. Prefer max_rows.",
-                  "maximum": 5000,
-                  "minimum": 1,
-                  "type": "integer"
-                },
                 "max_rows": {
                   "description": "Maximum constraint rows to return (default 200, hard cap 5000).",
                   "maximum": 5000,
@@ -2122,26 +2133,38 @@
                   "type": "integer"
                 },
                 "name": {
-                  "description": "Runtime compatibility alias for table; schema clients should supply table.",
+                  "description": "Required table or view name. May be OWNER.TABLE.",
                   "type": "string"
                 },
                 "owner": {
                   "description": "Optional schema owner (case-insensitive). Defaults to current schema when available.",
                   "type": "string"
-                },
-                "table": {
-                  "description": "Required table or view name. May be OWNER.TABLE.",
-                  "type": "string"
-                },
-                "table_name": {
-                  "description": "Runtime compatibility alias for table; schema clients should supply table.",
-                  "type": "string"
                 }
               },
               "required": [
-                "table"
+                "name"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "table",
+                  "canonical": "name",
+                  "note": "`table` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "table_name",
+                  "canonical": "name",
+                  "note": "`table_name` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "limit",
+                  "canonical": "max_rows",
+                  "note": "`limit` is deprecated; use `max_rows`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_describe",
             "title": "Oracle Describe"
@@ -2157,10 +2180,6 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "index_name": {
-                  "description": "Runtime compatibility alias for name; schema clients should supply name.",
-                  "type": "string"
-                },
                 "name": {
                   "description": "Required index name (case-insensitive).",
                   "type": "string"
@@ -2173,7 +2192,15 @@
               "required": [
                 "name"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "index_name",
+                  "canonical": "name",
+                  "note": "`index_name` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_describe_index",
             "title": "Oracle Describe Index"
@@ -2196,16 +2223,20 @@
                 "owner": {
                   "description": "Optional schema owner (case-insensitive). Defaults to current schema when available.",
                   "type": "string"
-                },
-                "trigger_name": {
-                  "description": "Runtime compatibility alias for name; schema clients should supply name.",
-                  "type": "string"
                 }
               },
               "required": [
                 "name"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "trigger_name",
+                  "canonical": "name",
+                  "note": "`trigger_name` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_describe_trigger",
             "title": "Oracle Describe Trigger"
@@ -2228,16 +2259,20 @@
                 "owner": {
                   "description": "Optional schema owner (case-insensitive). Defaults to current schema when available.",
                   "type": "string"
-                },
-                "view_name": {
-                  "description": "Runtime compatibility alias for name; schema clients should supply name.",
-                  "type": "string"
                 }
               },
               "required": [
                 "name"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "view_name",
+                  "canonical": "name",
+                  "note": "`view_name` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_describe_view",
             "title": "Oracle Describe View"
@@ -2255,10 +2290,6 @@
               "properties": {
                 "name": {
                   "description": "Required object name. May be OWNER.NAME.",
-                  "type": "string"
-                },
-                "object_name": {
-                  "description": "Runtime compatibility alias for name; schema clients should supply name.",
                   "type": "string"
                 },
                 "object_type": {
@@ -2290,7 +2321,15 @@
                 "object_type",
                 "name"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "object_name",
+                  "canonical": "name",
+                  "note": "`object_name` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_get_ddl",
             "title": "Oracle Get DDL"
@@ -2318,10 +2357,6 @@
                 },
                 "name": {
                   "description": "Required object name. May be OWNER.NAME.",
-                  "type": "string"
-                },
-                "object_name": {
-                  "description": "Runtime compatibility alias for name; schema clients should supply name.",
                   "type": "string"
                 },
                 "object_type": {
@@ -2353,7 +2388,15 @@
               "required": [
                 "name"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "object_name",
+                  "canonical": "name",
+                  "note": "`object_name` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_get_source",
             "title": "Oracle Get Source"
@@ -2369,12 +2412,6 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "limit": {
-                  "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows.",
-                  "maximum": 1000,
-                  "minimum": 1,
-                  "type": "integer"
-                },
                 "max_rows": {
                   "description": "Maximum rows to return (default 50, hard cap 1000).",
                   "maximum": 1000,
@@ -2382,26 +2419,38 @@
                   "type": "integer"
                 },
                 "name": {
-                  "description": "Runtime compatibility alias for table; schema clients should supply table.",
+                  "description": "Required table or view name. May be OWNER.TABLE.",
                   "type": "string"
                 },
                 "owner": {
                   "description": "Optional schema owner (case-insensitive). Defaults to current schema when available.",
                   "type": "string"
-                },
-                "table": {
-                  "description": "Required table or view name. May be OWNER.TABLE.",
-                  "type": "string"
-                },
-                "table_name": {
-                  "description": "Runtime compatibility alias for table; schema clients should supply table.",
-                  "type": "string"
                 }
               },
               "required": [
-                "table"
+                "name"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "table",
+                  "canonical": "name",
+                  "note": "`table` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "table_name",
+                  "canonical": "name",
+                  "note": "`table_name` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "limit",
+                  "canonical": "max_rows",
+                  "note": "`limit` is deprecated; use `max_rows`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_sample_rows",
             "title": "Oracle Sample Rows"
@@ -2417,10 +2466,6 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "clob_col": {
-                  "description": "Runtime compatibility alias for clob_column; schema clients should supply clob_column.",
-                  "type": "string"
-                },
                 "clob_column": {
                   "description": "Required CLOB/NCLOB/text column name (case-insensitive).",
                   "type": "string"
@@ -2430,42 +2475,62 @@
                   "minimum": 1,
                   "type": "integer"
                 },
-                "owner": {
-                  "description": "Optional schema owner (case-insensitive). Defaults to current schema when available.",
+                "name": {
+                  "description": "Required table or view name. May be OWNER.TABLE.",
                   "type": "string"
                 },
-                "pk_col": {
-                  "description": "Runtime compatibility alias for pk_column; schema clients should supply pk_column.",
+                "owner": {
+                  "description": "Optional schema owner (case-insensitive). Defaults to current schema when available.",
                   "type": "string"
                 },
                 "pk_column": {
                   "description": "Required key column name (case-insensitive).",
                   "type": "string"
                 },
-                "pk_val": {
-                  "description": "Runtime compatibility alias for pk_value; schema clients should supply pk_value.",
-                  "type": "string"
-                },
                 "pk_value": {
                   "description": "Required key value bound as :1.",
-                  "type": "string"
-                },
-                "table": {
-                  "description": "Required table or view name. May be OWNER.TABLE.",
-                  "type": "string"
-                },
-                "table_name": {
-                  "description": "Runtime compatibility alias for table; schema clients should supply table.",
                   "type": "string"
                 }
               },
               "required": [
-                "table",
+                "name",
                 "clob_column",
                 "pk_column",
                 "pk_value"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "table",
+                  "canonical": "name",
+                  "note": "`table` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "table_name",
+                  "canonical": "name",
+                  "note": "`table_name` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "clob_col",
+                  "canonical": "clob_column",
+                  "note": "`clob_col` is deprecated; use `clob_column`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "pk_col",
+                  "canonical": "pk_column",
+                  "note": "`pk_col` is deprecated; use `pk_column`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "pk_val",
+                  "canonical": "pk_value",
+                  "note": "`pk_val` is deprecated; use `pk_value`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_read_clob",
             "title": "Oracle Read CLOB"
@@ -2481,12 +2546,6 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "limit": {
-                  "description": "Alias for max_rows. Prefer max_rows.",
-                  "maximum": 5000,
-                  "minimum": 1,
-                  "type": "integer"
-                },
                 "max_rows": {
                   "description": "Maximum compile errors to return (default 200, hard cap 5000).",
                   "maximum": 5000,
@@ -2497,17 +2556,27 @@
                   "description": "Optional object name. May be OWNER.NAME. Omit to list all compile errors for the owner/current schema.",
                   "type": "string"
                 },
-                "object_name": {
-                  "description": "Alias for name for compatibility with older clients. Prefer name.",
-                  "type": "string"
-                },
                 "owner": {
                   "description": "Optional schema owner (case-insensitive). Defaults to current schema when available.",
                   "type": "string"
                 }
               },
               "required": [],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "object_name",
+                  "canonical": "name",
+                  "note": "`object_name` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "limit",
+                  "canonical": "max_rows",
+                  "note": "`limit` is deprecated; use `max_rows`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_compile_errors",
             "title": "Oracle Compile Errors"
@@ -2523,12 +2592,6 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "limit": {
-                  "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows.",
-                  "maximum": 5000,
-                  "minimum": 1,
-                  "type": "integer"
-                },
                 "max_line_chars": {
                   "description": "Maximum characters retained from each matching source line (default 500). Longer lines end with an explicit truncation marker; use oracle_get_source with from_line/to_line for the exact source range.",
                   "maximum": 4000,
@@ -2572,7 +2635,15 @@
               "required": [
                 "needle"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "limit",
+                  "canonical": "max_rows",
+                  "note": "`limit` is deprecated; use `max_rows`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_search_source",
             "title": "Oracle Search Source"
@@ -2588,12 +2659,6 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "limit": {
-                  "description": "Alias for max_rows. Prefer max_rows.",
-                  "maximum": 5000,
-                  "minimum": 1,
-                  "type": "integer"
-                },
                 "max_rows": {
                   "description": "Maximum identifiers and SQL statements per array (default 200, hard cap 5000).",
                   "maximum": 5000,
@@ -2604,10 +2669,6 @@
                   "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied.",
                   "type": "string"
                 },
-                "object_name": {
-                  "description": "Alias for name for compatibility. Prefer name.",
-                  "type": "string"
-                },
                 "owner": {
                   "description": "Optional schema owner (case-insensitive). Defaults to current schema when available.",
                   "type": "string"
@@ -2616,7 +2677,21 @@
               "required": [
                 "name"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "object_name",
+                  "canonical": "name",
+                  "note": "`object_name` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "limit",
+                  "canonical": "max_rows",
+                  "note": "`limit` is deprecated; use `max_rows`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_plscope_inspect",
             "title": "Oracle PL/Scope Inspect"
@@ -2731,14 +2806,6 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "check": {
-                  "description": "Compatibility alias for health_type.",
-                  "type": "string"
-                },
-                "checks": {
-                  "description": "Compatibility alias for health_type.",
-                  "type": "string"
-                },
                 "health_type": {
                   "description": "Either 'all' (default) or a comma-separated list of subcheck names: invalid_objects, unusable_indexes, tablespace_undo, sequence_ceiling, disabled_constraints, buffer_cache_hit_ratio. Unknown names are reported, not fatal.",
                   "type": "string"
@@ -2751,7 +2818,21 @@
                 }
               },
               "required": [],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "checks",
+                  "canonical": "health_type",
+                  "note": "`checks` is deprecated; use `health_type`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "check",
+                  "canonical": "health_type",
+                  "note": "`check` is deprecated; use `health_type`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "oracle_db_health",
             "title": "Oracle Db Health"
@@ -2784,19 +2865,23 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "db": {
-                  "description": "Configured profile name. Alias for profile.",
-                  "type": "string"
-                },
                 "profile": {
                   "description": "Configured profile name from oracle_list_profiles.",
                   "type": "string"
                 }
               },
               "required": [
-                "db"
+                "profile"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "db",
+                  "canonical": "profile",
+                  "note": "`db` is deprecated; use `profile`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "switch_database",
             "title": "Switch Database"
@@ -2855,10 +2940,6 @@
                   ],
                   "type": "string"
                 },
-                "export_to_resource": {
-                  "description": "Legacy alias for export.",
-                  "type": "boolean"
-                },
                 "format": {
                   "description": "Inline result format.",
                   "enum": [
@@ -2866,12 +2947,6 @@
                     "arrow"
                   ],
                   "type": "string"
-                },
-                "limit": {
-                  "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows.",
-                  "maximum": 5000,
-                  "minimum": 1,
-                  "type": "integer"
                 },
                 "max_blob_bytes": {
                   "description": "Maximum BLOB bytes to inline per cell as base64.",
@@ -2944,10 +3019,6 @@
                   "description": "A single read-only SELECT. Use :1, :2 ... for binds.",
                   "type": "string"
                 },
-                "stream": {
-                  "description": "Legacy alias for streaming.",
-                  "type": "boolean"
-                },
                 "streaming": {
                   "description": "Deliver the result incrementally instead of one inline page. Over HTTP/SSE, scalar/self-contained rowsets emit one `event: row` frame per row; LOB, BFILE, and REF CURSOR values fall back to ordered cursor `event: chunk` frames. Mutually exclusive with export and as_of. Never affects the read-only classifier.",
                   "type": "boolean"
@@ -2962,7 +3033,27 @@
               "required": [
                 "sql"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "limit",
+                  "canonical": "max_rows",
+                  "note": "`limit` is deprecated; use `max_rows`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "export_to_resource",
+                  "canonical": "export",
+                  "note": "`export_to_resource` is deprecated; use `export`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "stream",
+                  "canonical": "streaming",
+                  "note": "`stream` is deprecated; use `streaming`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "query",
             "outputSchema": {
@@ -3098,10 +3189,6 @@
                   "description": "The exact commit mode intended for oracle_execute. Default false; a later commit=true requires a new preview.",
                   "type": "boolean"
                 },
-                "dbms_output": {
-                  "description": "Alias for capture_dbms_output.",
-                  "type": "boolean"
-                },
                 "dbms_output_max_chars": {
                   "description": "Maximum DBMS_OUTPUT characters to return when capture_dbms_output=true (default 200000).",
                   "maximum": 1000000,
@@ -3117,18 +3204,6 @@
                 "hold": {
                   "description": "The exact reversible-workspace hold mode intended for oracle_execute. Default false.",
                   "type": "boolean"
-                },
-                "max_dbms_output_chars": {
-                  "description": "Alias for dbms_output_max_chars.",
-                  "maximum": 1000000,
-                  "minimum": 1,
-                  "type": "integer"
-                },
-                "max_dbms_output_lines": {
-                  "description": "Alias for dbms_output_max_lines.",
-                  "maximum": 5000,
-                  "minimum": 1,
-                  "type": "integer"
                 },
                 "scoped_grant": {
                   "description": "Explicit scoped-grant reference intended for execution; its identity is bound into this preview.",
@@ -3148,7 +3223,27 @@
               "required": [
                 "sql"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "dbms_output",
+                  "canonical": "capture_dbms_output",
+                  "note": "`dbms_output` is deprecated; use `capture_dbms_output`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "max_dbms_output_lines",
+                  "canonical": "dbms_output_max_lines",
+                  "note": "`max_dbms_output_lines` is deprecated; use `dbms_output_max_lines`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "max_dbms_output_chars",
+                  "canonical": "dbms_output_max_chars",
+                  "note": "`max_dbms_output_chars` is deprecated; use `dbms_output_max_chars`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "preview_sql",
             "outputSchema": {
@@ -3388,14 +3483,18 @@
                 "name": {
                   "description": "Optional object name to inspect. If omitted, lists remembered patch previews for the active profile.",
                   "type": "string"
-                },
-                "object_name": {
-                  "description": "Alias for name.",
-                  "type": "string"
                 }
               },
               "required": [],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "object_name",
+                  "canonical": "name",
+                  "note": "`object_name` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "read_patch_preview",
             "title": "Read Patch Preview"
@@ -3411,14 +3510,8 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "limit": {
-                  "description": "Maximum objects to return.",
-                  "maximum": 5000,
-                  "minimum": 1,
-                  "type": "integer"
-                },
                 "max_rows": {
-                  "description": "Alias for limit.",
+                  "description": "Maximum objects to return.",
                   "maximum": 5000,
                   "minimum": 1,
                   "type": "integer"
@@ -3452,7 +3545,15 @@
                 }
               },
               "required": [],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "limit",
+                  "canonical": "max_rows",
+                  "note": "`limit` is deprecated; use `max_rows`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "list_objects",
             "title": "List Objects"
@@ -3468,12 +3569,6 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "limit": {
-                  "description": "Alias for max_rows.",
-                  "maximum": 5000,
-                  "minimum": 1,
-                  "type": "integer"
-                },
                 "max_rows": {
                   "description": "Maximum schemas to return.",
                   "maximum": 5000,
@@ -3486,7 +3581,15 @@
                 }
               },
               "required": [],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "limit",
+                  "canonical": "max_rows",
+                  "note": "`limit` is deprecated; use `max_rows`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "list_schemas",
             "title": "List Schemas"
@@ -3506,14 +3609,8 @@
                   "description": "Opaque continuation cursor returned by a truncated get_schema page.",
                   "type": "string"
                 },
-                "limit": {
-                  "description": "Maximum objects to return (default 100, hard cap 250).",
-                  "maximum": 250,
-                  "minimum": 1,
-                  "type": "integer"
-                },
                 "max_rows": {
-                  "description": "Alias for limit.",
+                  "description": "Maximum objects to return (default 100, hard cap 250).",
                   "maximum": 250,
                   "minimum": 1,
                   "type": "integer"
@@ -3547,7 +3644,15 @@
                 }
               },
               "required": [],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "limit",
+                  "canonical": "max_rows",
+                  "note": "`limit` is deprecated; use `max_rows`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "get_schema",
             "title": "Get Schema"
@@ -3563,37 +3668,44 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "limit": {
-                  "description": "Alias for max_rows.",
-                  "minimum": 1,
-                  "type": "integer"
-                },
                 "max_rows": {
                   "description": "Maximum columns and constraints returned.",
                   "minimum": 1,
                   "type": "integer"
                 },
                 "name": {
-                  "description": "Alias for table_name.",
+                  "description": "Table or view name. May be OWNER.TABLE.",
                   "type": "string"
                 },
                 "owner": {
                   "description": "Optional schema owner; defaults to current schema.",
                   "type": "string"
-                },
-                "table": {
-                  "description": "Alias for table_name.",
-                  "type": "string"
-                },
-                "table_name": {
-                  "description": "Table or view name. May be OWNER.TABLE.",
-                  "type": "string"
                 }
               },
               "required": [
-                "table_name"
+                "name"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "table",
+                  "canonical": "name",
+                  "note": "`table` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "table_name",
+                  "canonical": "name",
+                  "note": "`table_name` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "limit",
+                  "canonical": "max_rows",
+                  "note": "`limit` is deprecated; use `max_rows`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "describe_table",
             "title": "Describe Table"
@@ -3609,12 +3721,8 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "index_name": {
-                  "description": "Index name. May be OWNER.INDEX_NAME.",
-                  "type": "string"
-                },
                 "name": {
-                  "description": "Alias for index_name.",
+                  "description": "Index name. May be OWNER.INDEX_NAME.",
                   "type": "string"
                 },
                 "owner": {
@@ -3623,9 +3731,17 @@
                 }
               },
               "required": [
-                "index_name"
+                "name"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "index_name",
+                  "canonical": "name",
+                  "note": "`index_name` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "describe_index",
             "title": "Describe Index"
@@ -3642,22 +3758,26 @@
               "additionalProperties": false,
               "properties": {
                 "name": {
-                  "description": "Alias for trigger_name.",
+                  "description": "Trigger name. May be OWNER.TRIGGER_NAME.",
                   "type": "string"
                 },
                 "owner": {
                   "description": "Optional schema owner; defaults to current schema.",
                   "type": "string"
-                },
-                "trigger_name": {
-                  "description": "Trigger name. May be OWNER.TRIGGER_NAME.",
-                  "type": "string"
                 }
               },
               "required": [
-                "trigger_name"
+                "name"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "trigger_name",
+                  "canonical": "name",
+                  "note": "`trigger_name` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "describe_trigger",
             "title": "Describe Trigger"
@@ -3674,22 +3794,26 @@
               "additionalProperties": false,
               "properties": {
                 "name": {
-                  "description": "Alias for view_name.",
+                  "description": "View name. May be OWNER.VIEW_NAME.",
                   "type": "string"
                 },
                 "owner": {
                   "description": "Optional schema owner; defaults to current schema.",
                   "type": "string"
-                },
-                "view_name": {
-                  "description": "View name. May be OWNER.VIEW_NAME.",
-                  "type": "string"
                 }
               },
               "required": [
-                "view_name"
+                "name"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "view_name",
+                  "canonical": "name",
+                  "note": "`view_name` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "describe_view",
             "title": "Describe View"
@@ -3706,10 +3830,6 @@
               "additionalProperties": false,
               "properties": {
                 "name": {
-                  "description": "Alias for object_name.",
-                  "type": "string"
-                },
-                "object_name": {
                   "description": "Object name. May be OWNER.NAME.",
                   "type": "string"
                 },
@@ -3740,9 +3860,17 @@
               },
               "required": [
                 "object_type",
-                "object_name"
+                "name"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "object_name",
+                  "canonical": "name",
+                  "note": "`object_name` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "get_ddl",
             "title": "Get DDL"
@@ -3764,10 +3892,6 @@
                   "type": "integer"
                 },
                 "name": {
-                  "description": "Alias for object_name.",
-                  "type": "string"
-                },
-                "object_name": {
                   "description": "Object name. May be OWNER.NAME.",
                   "type": "string"
                 },
@@ -3793,9 +3917,17 @@
                 }
               },
               "required": [
-                "object_name"
+                "name"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "object_name",
+                  "canonical": "name",
+                  "note": "`object_name` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "get_object_source",
             "title": "Get Object Source"
@@ -3811,21 +3943,12 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "limit": {
-                  "description": "Alias for max_rows.",
-                  "minimum": 1,
-                  "type": "integer"
-                },
                 "max_rows": {
                   "description": "Maximum compiler diagnostics returned.",
                   "minimum": 1,
                   "type": "integer"
                 },
                 "name": {
-                  "description": "Alias for object_name.",
-                  "type": "string"
-                },
-                "object_name": {
                   "description": "Optional object name. May be OWNER.NAME.",
                   "type": "string"
                 },
@@ -3835,7 +3958,21 @@
                 }
               },
               "required": [],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "object_name",
+                  "canonical": "name",
+                  "note": "`object_name` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "limit",
+                  "canonical": "max_rows",
+                  "note": "`limit` is deprecated; use `max_rows`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "get_errors",
             "title": "Get Errors"
@@ -3851,12 +3988,8 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "clob_col": {
-                  "description": "CLOB/NCLOB/text column name.",
-                  "type": "string"
-                },
                 "clob_column": {
-                  "description": "Alias for clob_col.",
+                  "description": "CLOB/NCLOB/text column name.",
                   "type": "string"
                 },
                 "max_chars": {
@@ -3864,42 +3997,62 @@
                   "minimum": 1,
                   "type": "integer"
                 },
+                "name": {
+                  "description": "Table or view name. May be OWNER.TABLE.",
+                  "type": "string"
+                },
                 "owner": {
                   "description": "Optional schema owner; defaults to current schema.",
                   "type": "string"
                 },
-                "pk_col": {
+                "pk_column": {
                   "description": "Key column name.",
                   "type": "string"
                 },
-                "pk_column": {
-                  "description": "Alias for pk_col.",
-                  "type": "string"
-                },
-                "pk_val": {
-                  "description": "Key value bound as :1.",
-                  "type": "string"
-                },
                 "pk_value": {
-                  "description": "Alias for pk_val.",
-                  "type": "string"
-                },
-                "table": {
-                  "description": "Table or view name. May be OWNER.TABLE.",
-                  "type": "string"
-                },
-                "table_name": {
-                  "description": "Alias for table.",
+                  "description": "Key value bound as :1.",
                   "type": "string"
                 }
               },
               "required": [
-                "table",
-                "clob_col",
-                "pk_col",
-                "pk_val"
+                "name",
+                "clob_column",
+                "pk_column",
+                "pk_value"
               ],
-              "type": "object"
+              "type": "object",
+              "x-deprecated-aliases": [
+                {
+                  "argument": "table",
+                  "canonical": "name",
+                  "note": "`table` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "table_name",
+                  "canonical": "name",
+                  "note": "`table_name` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "clob_col",
+                  "canonical": "clob_column",
+                  "note": "`clob_col` is deprecated; use `clob_column`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "pk_col",
+                  "canonical": "pk_column",
+                  "note": "`pk_col` is deprecated; use `pk_column`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                },
+                {
+                  "argument": "pk_val",
+                  "canonical": "pk_value",
+                  "note": "`pk_val` is deprecated; use `pk_value`. It will be removed in oraclemcp 0.14.0.",
+                  "removal": "0.14.0"
+                }
+              ]
             },
             "name": "get_clob",
             "title": "Get CLOB"
