@@ -29,6 +29,8 @@ pub enum UnavailableReason {
     Timeout,
     Truncated,
     NotWired,
+    CatalogUnavailable,
+    UnresolvedDependency,
 }
 
 impl UnavailableReason {
@@ -46,6 +48,8 @@ impl UnavailableReason {
             Self::Timeout => 10,
             Self::Truncated => 11,
             Self::NotWired => 12,
+            Self::CatalogUnavailable => 13,
+            Self::UnresolvedDependency => 14,
         }
     }
 }

@@ -3,10 +3,12 @@
 
 use asupersync::Cx;
 use oraclemcp_db::{
-    CatalogQueryId, DbError, HardParseEffectClosureV1, OracleBind, OracleCatalogResolverCache,
-    OracleConnection, PlanStatementId, QuarantineOutcome, explain_plan, plan_cost_estimate,
-    prove_hard_parse_effect_closure, resolve_plan_table, run_catalog_query,
+    CatalogQueryId, DbError, DependentObject, HardParseEffectClosureV1, OracleBind,
+    OracleCatalogResolverCache, OracleConnection, PlanStatementId, QuarantineOutcome, explain_plan,
+    plan_cost_estimate, prove_hard_parse_effect_closure, resolve_plan_table, run_catalog_query,
 };
+#[cfg(feature = "plsql-intelligence")]
+use oraclemcp_db::{DepCaps, DependentsError, probe_dependents_transitive};
 use oraclemcp_guard::{
     CatalogObjectKind, CatalogResolver, FieldStatus, ImpactV1, NotApplicableReason, OperatingLevel,
     RawName, RawNamePart, Resolution, ResolvedObject, StatementScope, SyntacticRole,
@@ -15,6 +17,239 @@ use oraclemcp_guard::{
 use serde_json::{Value, json};
 
 const MAX_IMPACT_SQL_BYTES: usize = 64 * 1024;
+
+fn preview_dependency_root(response: &Value) -> Option<DependentObject> {
+    let fields = response
+        .get("detected_object")
+        .filter(|value| value.is_object())
+        .unwrap_or(response);
+    Some(DependentObject {
+        owner: fields.get("owner")?.as_str()?.to_owned(),
+        name: fields.get("name")?.as_str()?.to_owned(),
+        object_type: fields.get("object_type")?.as_str()?.to_owned(),
+    })
+}
+
+fn dependency_target_prefix(sql: &str) -> Option<(Option<String>, String, String)> {
+    use sqlparser::{
+        dialect::OracleDialect,
+        tokenizer::{Token, Tokenizer},
+    };
+    if sql.is_empty() || sql.len() > MAX_IMPACT_SQL_BYTES {
+        return None;
+    }
+    let tokens = Tokenizer::new(&OracleDialect {}, sql).tokenize().ok()?;
+    // A second DDL verb cannot be silently reduced to the first target. String
+    // literals and quoted identifiers never count as statement verbs.
+    let ddl_verbs = tokens.iter().filter(|token| matches!(token, Token::Word(word)
+        if word.quote_style.is_none() && ["CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME", "GRANT", "REVOKE"]
+            .iter().any(|verb| word.value.eq_ignore_ascii_case(verb)))).count();
+    if ddl_verbs != 1 {
+        return None;
+    }
+    let mut cursor = SqlPrefix::new(sql);
+    let verb = cursor.word().ok()??.to_ascii_uppercase();
+    if !matches!(verb.as_str(), "CREATE" | "ALTER" | "DROP" | "TRUNCATE") {
+        return None;
+    }
+    if verb == "CREATE"
+        && cursor.consume_word("OR").ok()?
+        && !cursor.consume_word("REPLACE").ok()?
+    {
+        return None;
+    }
+    while cursor.consume_word("EDITIONABLE").ok()?
+        || cursor.consume_word("NONEDITIONABLE").ok()?
+        || cursor.consume_word("FORCE").ok()?
+        || cursor.consume_word("NOFORCE").ok()?
+    {}
+    let mut kind = cursor.word().ok()??.to_ascii_uppercase();
+    if matches!(kind.as_str(), "PACKAGE" | "TYPE") && cursor.consume_word("BODY").ok()? {
+        kind.push_str(" BODY");
+    }
+    if kind == "MATERIALIZED" {
+        if !cursor.consume_word("VIEW").ok()? {
+            return None;
+        }
+        kind.push_str(" VIEW");
+    }
+    if !matches!(
+        kind.as_str(),
+        "TABLE"
+            | "VIEW"
+            | "PACKAGE"
+            | "PACKAGE BODY"
+            | "TYPE"
+            | "TYPE BODY"
+            | "PROCEDURE"
+            | "FUNCTION"
+            | "TRIGGER"
+            | "SEQUENCE"
+            | "SYNONYM"
+            | "MATERIALIZED VIEW"
+            | "INDEX"
+    ) {
+        return None;
+    }
+    let canonical = |part: RawNamePart| match part.quoting {
+        oraclemcp_guard::QuoteSemantics::Quoted => part.text,
+        oraclemcp_guard::QuoteSemantics::Unquoted => part.text.to_ascii_uppercase(),
+    };
+    let first = canonical(cursor.identifier().ok()?);
+    let (owner, name) = if cursor.consume_punct(b'.').ok()? {
+        (Some(first), canonical(cursor.identifier().ok()?))
+    } else {
+        (None, first)
+    };
+    if cursor.consume_punct(b'.').ok()? || cursor.consume_punct(b'@').ok()? {
+        return None;
+    }
+    Some((owner, name, kind))
+}
+
+pub(super) async fn compute_dependents_impact(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    quarantine: &std::sync::Mutex<Option<super::ConnectionQuarantine>>,
+    roots: &[DependentObject],
+) -> FieldStatus<Value> {
+    #[cfg(not(feature = "plsql-intelligence"))]
+    {
+        let _ = (cx, conn, quarantine, roots);
+        FieldStatus::Unavailable {
+            reason: UnavailableReason::EngineNotWired,
+        }
+    }
+    #[cfg(feature = "plsql-intelligence")]
+    {
+        let closure = match probe_dependents_transitive(cx, conn, roots, DepCaps::default()).await {
+            Ok(closure) => closure,
+            Err(DependentsError::NoPrivilege) => {
+                return FieldStatus::Unavailable {
+                    reason: UnavailableReason::NoPrivilege,
+                };
+            }
+            Err(DependentsError::Database(error)) => {
+                quarantine_dependency_observation(quarantine, &error);
+                return FieldStatus::Unavailable {
+                    reason: UnavailableReason::CatalogUnavailable,
+                };
+            }
+            Err(_) => {
+                return FieldStatus::Unavailable {
+                    reason: UnavailableReason::CatalogUnavailable,
+                };
+            }
+        };
+        let prediction = match crate::plsql_tools::predict_invalid_set(&closure) {
+            Ok(prediction) => prediction,
+            Err(_) => {
+                return FieldStatus::Unavailable {
+                    reason: UnavailableReason::CatalogUnavailable,
+                };
+            }
+        };
+        let Ok(mut value) = serde_json::to_value(&closure) else {
+            return FieldStatus::Unavailable {
+                reason: UnavailableReason::CatalogUnavailable,
+            };
+        };
+        if let Some(fields) = value.as_object_mut() {
+            fields.insert("prediction_mode".into(), prediction["mode"].clone());
+            fields.insert(
+                "predicted_invalid_set".into(),
+                prediction["objects"].clone(),
+            );
+            fields.insert(
+                "predicted_invalid_count".into(),
+                prediction["count"].clone(),
+            );
+            fields.insert("uncertainties".into(), prediction["uncertainties"].clone());
+        }
+        FieldStatus::Estimated { value }
+    }
+}
+
+fn quarantine_dependency_observation(
+    quarantine: &std::sync::Mutex<Option<super::ConnectionQuarantine>>,
+    error: &DbError,
+) {
+    if error.is_uncertain_session_state() {
+        // R36 preserves the advisory preview, but a failed observation must
+        // not silently put an unsynchronized wire back into circulation.
+        let _ = super::mark_connection_quarantined(
+            quarantine,
+            oraclemcp_audit::AuditOutcome::UnknownDiscarded,
+            "dependency observation lost a synchronized Oracle session".to_owned(),
+        );
+    }
+}
+
+/// Dependency observations never alter a preview's admission or confirmation.
+pub(super) async fn enrich_dependents_preview(
+    response: &mut Value,
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    sql: &str,
+    required_level: Option<OperatingLevel>,
+    quarantine: &std::sync::Mutex<Option<super::ConnectionQuarantine>>,
+) {
+    if !is_confirmation_preview(response) {
+        return;
+    }
+    let dependents = if !required_level.is_some_and(|level| level >= OperatingLevel::Ddl) {
+        FieldStatus::NotApplicable {
+            reason: NotApplicableReason::NoEffect,
+        }
+    } else if !response
+        .as_object()
+        .is_some_and(|fields| preview_admits_effect_probes(fields, required_level))
+    {
+        FieldStatus::Unavailable {
+            reason: UnavailableReason::LevelBelowRequired,
+        }
+    } else {
+        let root = if response.get("detected_object").is_none()
+            && preview_dependency_root(response).is_some()
+        {
+            preview_dependency_root(response)
+        } else if let Some((owner, name, kind)) = dependency_target_prefix(sql) {
+            let owner = match owner {
+                Some(owner) => Some(owner),
+                None => match conn.describe(cx).await {
+                    Ok(info) => info.current_schema.or(info.session_user),
+                    Err(error) => {
+                        quarantine_dependency_observation(quarantine, &error);
+                        None
+                    }
+                },
+            };
+            owner.map(|owner| DependentObject {
+                owner,
+                name,
+                object_type: kind,
+            })
+        } else {
+            None
+        };
+        match root {
+            Some(root) => compute_dependents_impact(cx, conn, quarantine, &[root]).await,
+            None => FieldStatus::Unavailable {
+                reason: UnavailableReason::UnresolvedDependency,
+            },
+        }
+    };
+    if let Some(fields) = response.as_object_mut() {
+        let mut impact = fields
+            .get("impact")
+            .and_then(|value| serde_json::from_value::<ImpactV1>(value.clone()).ok())
+            .unwrap_or_default();
+        impact.dependents = dependents;
+        if let Ok(value) = serde_json::to_value(impact) {
+            fields.insert("impact".into(), value);
+        }
+    }
+}
 
 /// Resolve the one local DML target for which this impact slice can make a
 /// closed optimizer claim. Complex/multi-source DML remains explicitly
@@ -631,6 +866,7 @@ pub(super) async fn enrich_preview_impact(
     if !is_confirmation_preview(response) {
         return Ok(());
     }
+    enrich_dependents_preview(response, cx, conn, sql, required_level, quarantine).await;
     let Some(fields) = response.as_object_mut() else {
         return Ok(());
     };
@@ -863,6 +1099,43 @@ mod tests {
             let cx = Cx::current().expect("block_on installs a current Cx");
             body(cx).await
         })
+    }
+
+    #[test]
+    fn dependents_target_prefix_preserves_exact_quoted_identity() {
+        assert_eq!(
+            dependency_target_prefix(
+                "/* CREATE */ CREATE OR REPLACE EDITIONABLE PACKAGE BODY \"MiX\".\"P.K\"\"G\" AS PROCEDURE p IS BEGIN NULL; END; END;"
+            ),
+            Some((Some("MiX".into()), "P.K\"G".into(), "PACKAGE BODY".into()))
+        );
+        assert_eq!(
+            dependency_target_prefix(
+                "CREATE OR REPLACE VIEW app.v AS SELECT 'CREATE TABLE' txt FROM dual"
+            ),
+            Some((Some("APP".into()), "V".into(), "VIEW".into()))
+        );
+        assert_eq!(
+            dependency_target_prefix("ALTER TABLE t ADD x NUMBER"),
+            Some((None, "T".into(), "TABLE".into()))
+        );
+    }
+
+    #[test]
+    fn dependents_target_prefix_refuses_batches_remote_and_unknown_targets() {
+        for sql in [
+            "CREATE TABLE a(x NUMBER); DROP TABLE b",
+            "ALTER TABLE app.t@remote ADD x NUMBER",
+            "ALTER TABLE pdb.app.t ADD x NUMBER",
+            "GRANT SELECT ON app.t TO other",
+            "BEGIN NULL; END;",
+            "CREATE OR REPLACE PACKAGE \"unterminated AS END;",
+        ] {
+            assert!(
+                dependency_target_prefix(sql).is_none(),
+                "partial target for {sql}"
+            );
+        }
     }
 
     #[test]
@@ -1286,6 +1559,183 @@ mod tests {
 
         fn test_name(lane: &str) -> String {
             format!("impact_cost_live_{lane}")
+        }
+
+        #[cfg(feature = "plsql-intelligence")]
+        async fn live_dependency_preview(
+            cx: &Cx,
+            connect: OracleConnectOptions,
+            source: &str,
+        ) -> Result<Value, String> {
+            use super::super::super::{DispatchContext, OracleDispatcher};
+            let conn = RustOracleConnection::connect(cx, connect)
+                .await
+                .map_err(|error| format!("dependency preview connection: {error}"))?;
+            let mut level = oraclemcp_guard::SessionLevelState::new(OperatingLevel::Ddl, false);
+            level
+                .set_current_level(OperatingLevel::Ddl)
+                .map_err(|error| error.to_string())?;
+            let dispatcher = OracleDispatcher::new_with_profile_level(
+                Box::new(conn),
+                Some("live-dependents".into()),
+                level,
+            );
+            let refusal_recorded = std::cell::Cell::new(false);
+            let result = dispatcher
+                .dispatch_with_cx_inner(
+                    cx,
+                    DispatchContext::default(),
+                    "oracle_create_or_replace",
+                    json!({"source_code":source}),
+                    &refusal_recorded,
+                )
+                .await
+                .map_err(|error| format!("dependency preview: {}", error.message));
+            let state = dispatcher
+                .state
+                .lock(cx)
+                .await
+                .map_err(|_| "dependency state lock".to_owned())?;
+            state
+                .conn
+                .close(cx)
+                .await
+                .map_err(|error| format!("preview connection close: {error}"))?;
+            result
+        }
+
+        /// A native Oracle observation, not a mocked invalidation oracle. The
+        /// three expected dependents are declared before the spec is changed.
+        #[cfg(feature = "plsql-intelligence")]
+        #[test]
+        fn impact_dependents_live_three_dependents_predicted_equals_observed() {
+            if std::env::var("ORACLEMCP_LIVE_XE").as_deref() != Ok("1") {
+                eprintln!("live FREE23 dependents disabled; set ORACLEMCP_LIVE_XE=1");
+                return;
+            }
+            run_with_cx(|cx| async move {
+                let connect = options("FREE23");
+                let conn = RustOracleConnection::connect(&cx, connect.clone()).await
+                    .map_err(|error| format!("fixture connection: {error}"))?;
+                let rows = conn.query_rows(&cx, "SELECT USER AS OWNER FROM DUAL", &[]).await
+                    .map_err(|error| error.to_string())?;
+                let owner = rows.first().and_then(|row| row.text("OWNER"))
+                    .filter(|owner| is_plan_table_identifier(owner)).ok_or("fixture owner missing")?.to_owned();
+                let id = PlanStatementId::generate().map_err(|error| error.to_string())?;
+                let suffix = &id.as_str()[5..13];
+                let package = format!("OMCPI_{suffix}_PKG");
+                let p1 = format!("OMCPI_{suffix}_P1");
+                let p2 = format!("OMCPI_{suffix}_P2");
+                let qualified = |name: &str| format!("\"{owner}\".\"{name}\"");
+                let spec = format!("CREATE OR REPLACE PACKAGE {} AS PROCEDURE p(x NUMBER); END;",qualified(&package));
+                let replacement = format!("CREATE OR REPLACE PACKAGE {} AS PROCEDURE p(x VARCHAR2); END;",qualified(&package));
+                conn.execute(&cx,&spec,&[]).await.map_err(|error| error.to_string())?;
+                let outcome = async {
+                    let fixtures = [
+                        format!("CREATE OR REPLACE PACKAGE BODY {} AS PROCEDURE p(x NUMBER) IS BEGIN NULL; END; END;",qualified(&package)),
+                        format!("CREATE OR REPLACE PROCEDURE {} AS BEGIN {}.p(1); END;",qualified(&p1),qualified(&package)),
+                        // Both direct and transitive edges are present by
+                        // design. Unit tests separately prove a pure chain.
+                        format!("CREATE OR REPLACE PROCEDURE {} AS BEGIN {}; {}.p(2); END;",qualified(&p2),qualified(&p1),qualified(&package)),
+                    ];
+                    for sql in fixtures { conn.execute(&cx,&sql,&[]).await.map_err(|error| error.to_string())?; }
+                    let status_sql = "SELECT OBJECT_NAME, OBJECT_TYPE, STATUS FROM SYS.ALL_OBJECTS WHERE OWNER=:1 AND OBJECT_NAME IN (:2,:3,:4) AND SUBOBJECT_NAME IS NULL";
+                    let binds = [OracleBind::String(owner.clone()),OracleBind::String(package.clone()),
+                        OracleBind::String(p1.clone()),OracleBind::String(p2.clone())];
+                    let initial = conn.query_rows(&cx,status_sql,&binds).await.map_err(|error| error.to_string())?;
+                    if initial.len()!=4 || initial.iter().any(|row| row.text("STATUS")!=Some("VALID")) {
+                        return Err(format!("fixture was not four VALID objects: {initial:?}"));
+                    }
+                    let expected = std::collections::BTreeSet::from([
+                        (owner.clone(),package.clone(),"PACKAGE BODY".to_owned()),
+                        (owner.clone(),p1.clone(),"PROCEDURE".to_owned()),
+                        (owner.clone(),p2.clone(),"PROCEDURE".to_owned()),
+                    ]);
+                    let preview = live_dependency_preview(&cx,connect,&replacement).await?;
+                    let value = &preview["impact"]["dependents"]["value"];
+                    if preview["impact"]["dependents"]["status"]!="estimated" {
+                        return Err(format!("privileged closure unavailable: {}",preview["impact"]["dependents"]));
+                    }
+                    if value["truncated"]!=false || value["prediction_mode"]!="LiveSnapshot"
+                        || !preview["confirmation"]["confirm"].is_string() {
+                        return Err(format!("incomplete native dependency preview: {value}"));
+                    }
+                    let gaps=value["uncertainties"].as_array().ok_or("uncertainties absent")?;
+                    // FREE23 can expose SYS_STUB_FOR_PURITY_ANALYSIS edges
+                    // without a local object ID, even to SYSTEM. Keep that
+                    // observation unknown; it must never turn into a total.
+                    if gaps.is_empty() {
+                        if value["predicted_invalid_count"]!=3 { return Err("complete native prediction omitted its exact total".into()); }
+                    } else if !value["predicted_invalid_count"].is_null() {
+                        return Err("unresolved native dependency became a numeric total".into());
+                    }
+                    let predicted = value["predicted_invalid_set"].as_array().ok_or("predicted set absent")?
+                        .iter().map(|item| Ok((item["owner"].as_str().ok_or("predicted owner")?.to_owned(),
+                            item["name"].as_str().ok_or("predicted name")?.to_owned(),
+                            item["object_type"].as_str().ok_or("predicted type")?.to_owned())))
+                        .collect::<Result<std::collections::BTreeSet<_>,String>>()?;
+                    if predicted!=expected { return Err(format!("prediction differs from predeclared set: {predicted:?}")); }
+                    // Applying through the fixture connection tests Oracle's
+                    // invalidation, not token drift/revalidation (.16.7).
+                    conn.execute(&cx,&replacement,&[]).await.map_err(|error| error.to_string())?;
+                    let after = conn.query_rows(&cx,status_sql,&binds).await.map_err(|error| error.to_string())?;
+                    let observed = after.iter().filter(|row| row.text("STATUS")==Some("INVALID"))
+                        .map(|row| Ok((owner.clone(),row.text("OBJECT_NAME").ok_or("observed name")?.to_owned(),
+                            row.text("OBJECT_TYPE").ok_or("observed type")?.to_owned())))
+                        .collect::<Result<std::collections::BTreeSet<_>,String>>()?;
+                    if predicted!=observed { return Err(format!("predicted {predicted:?}, Oracle INVALID {observed:?}")); }
+                    println!("FREE23 native prediction equals observed INVALID set: 3 dependents; bounded closure; LiveSnapshot; {} explicit uncertainties",gaps.len());
+                    Ok::<(),String>(())
+                }.await;
+                let cleanup = async {
+                    for (kind,name) in [("PROCEDURE",&p2),("PROCEDURE",&p1),("PACKAGE",&package)] {
+                        let result = conn.execute(&cx,&format!("DROP {kind} {}",qualified(name)),&[]).await;
+                        if let Err(error)=result && !error.to_string().contains("ORA-04043") { return Err(format!("fixture cleanup: {error}")); }
+                    }
+                    conn.close(&cx).await.map_err(|error| error.to_string())
+                }.await;
+                cleanup?;
+                outcome
+            }).unwrap();
+        }
+
+        #[cfg(feature = "plsql-intelligence")]
+        #[test]
+        fn impact_dependents_live_no_privilege_preserves_confirmation() {
+            if std::env::var("ORACLEMCP_LIVE_XE").as_deref() != Ok("1") {
+                eprintln!("live FREE23 privilege boundary disabled; set ORACLEMCP_LIVE_XE=1");
+                return;
+            }
+            run_with_cx(|cx| async move {
+                let admin_options=options("FREE23");
+                let admin=RustOracleConnection::connect(&cx,admin_options.clone()).await.map_err(|error|error.to_string())?;
+                let id=PlanStatementId::generate().map_err(|error|error.to_string())?;
+                let suffix=&id.as_str()[5..13];
+                let user=format!("OMCPI_{suffix}");
+                let password=format!("D{suffix}a9Zq");
+                admin.execute(&cx,&format!("CREATE USER {user} IDENTIFIED BY \"{password}\""),&[]).await.map_err(|error|error.to_string())?;
+                let outcome=async {
+                    // These are fixture-only grants. The product performs no
+                    // privilege provisioning for its observation query.
+                    admin.execute(&cx,&format!("GRANT CREATE SESSION, CREATE PROCEDURE TO {user}"),&[]).await.map_err(|error|error.to_string())?;
+                    let connect=OracleConnectOptions{username:Some(user.clone()),password:Some(password),..admin_options};
+                    let conn=RustOracleConnection::connect(&cx,connect.clone()).await.map_err(|error|error.to_string())?;
+                    let source=format!("CREATE OR REPLACE PACKAGE {user}.PKG AS PROCEDURE p; END;");
+                    conn.execute(&cx,&source,&[]).await.map_err(|error|error.to_string())?;
+                    conn.close(&cx).await.map_err(|error|error.to_string())?;
+                    let preview=live_dependency_preview(&cx,connect,&source).await?;
+                    if preview["impact"]["dependents"]["status"]!="unavailable"
+                        || preview["impact"]["dependents"]["reason"]!="no_privilege"
+                        || preview["gate_decision"]!="allow" || !preview["confirmation"]["confirm"].is_string() {
+                        return Err(format!("R36 visibility observation suppressed working preview: {preview}"));
+                    }
+                    println!("FREE23 native low-privilege preview: unavailable(no_privilege), confirmation preserved");
+                    Ok::<(),String>(())
+                }.await;
+                admin.execute(&cx,&format!("DROP USER {user} CASCADE"),&[]).await.map_err(|error|format!("fixture user cleanup: {error}"))?;
+                admin.close(&cx).await.map_err(|error|error.to_string())?;
+                outcome
+            }).unwrap();
         }
 
         async fn assert_live_cost(lane: &str) -> Result<(), String> {

@@ -2121,6 +2121,7 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::impact_binding::ScnBounds where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::impact_binding::ScnBounds::vzip(self) -> V
 pub enum oraclemcp_guard::impact_binding::UnavailableReason
+pub oraclemcp_guard::impact_binding::UnavailableReason::CatalogUnavailable
 pub oraclemcp_guard::impact_binding::UnavailableReason::EngineNotWired
 pub oraclemcp_guard::impact_binding::UnavailableReason::HardParseCallbacks
 pub oraclemcp_guard::impact_binding::UnavailableReason::LevelBelowRequired
@@ -2130,6 +2131,7 @@ pub oraclemcp_guard::impact_binding::UnavailableReason::PlanTableUnverified
 pub oraclemcp_guard::impact_binding::UnavailableReason::ReadOnlyTxn
 pub oraclemcp_guard::impact_binding::UnavailableReason::Timeout
 pub oraclemcp_guard::impact_binding::UnavailableReason::Truncated
+pub oraclemcp_guard::impact_binding::UnavailableReason::UnresolvedDependency
 pub oraclemcp_guard::impact_binding::UnavailableReason::UnsupportedDmlShape
 pub oraclemcp_guard::impact_binding::UnavailableReason::UntrustedTriggers
 pub oraclemcp_guard::impact_binding::UnavailableReason::Vpd
@@ -15128,6 +15130,7 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::resolver::SyntacticRole where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::resolver::SyntacticRole::vzip(self) -> V
 pub enum oraclemcp_guard::UnavailableReason
+pub oraclemcp_guard::UnavailableReason::CatalogUnavailable
 pub oraclemcp_guard::UnavailableReason::EngineNotWired
 pub oraclemcp_guard::UnavailableReason::HardParseCallbacks
 pub oraclemcp_guard::UnavailableReason::LevelBelowRequired
@@ -15137,6 +15140,7 @@ pub oraclemcp_guard::UnavailableReason::PlanTableUnverified
 pub oraclemcp_guard::UnavailableReason::ReadOnlyTxn
 pub oraclemcp_guard::UnavailableReason::Timeout
 pub oraclemcp_guard::UnavailableReason::Truncated
+pub oraclemcp_guard::UnavailableReason::UnresolvedDependency
 pub oraclemcp_guard::UnavailableReason::UnsupportedDmlShape
 pub oraclemcp_guard::UnavailableReason::UntrustedTriggers
 pub oraclemcp_guard::UnavailableReason::Vpd

@@ -10,7 +10,7 @@
 //! identifier positions (schema/table/type in `DBMS_METADATA`, the sampled
 //! table) are validated as simple identifiers, never interpolated raw.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::sync::{Mutex, OnceLock};
 
@@ -22,6 +22,7 @@ use crate::error::DbError;
 use crate::query::QueryResponse;
 use crate::types::{OracleBind, OracleCell, OracleRow};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// A simple unquoted Oracle identifier (≤ 30 chars). Rejects injection.
 #[must_use]
@@ -1721,12 +1722,8 @@ pub async fn list_schemas(
     .await
 }
 
-/// One direct dependent of a target object, read from `ALL_DEPENDENCIES`.
-///
-/// A dependent is an object that *references* the target (the target is its
-/// `REFERENCED_*`). This is the "blast radius" shape used by the DDL previews:
-/// who a CREATE OR REPLACE of the target might touch.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// An exact dictionary object identity in the approval dependency closure.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct DependentObject {
     /// Owner (schema) of the dependent object.
     pub owner: String,
@@ -1736,104 +1733,1088 @@ pub struct DependentObject {
     pub object_type: String,
 }
 
-impl DependentObject {
-    /// Whether replacing the referenced object typically marks this dependent
-    /// `INVALID`. Best-effort static heuristic: PL/SQL stored code (procedures,
-    /// functions, packages and their bodies, types and their bodies, triggers),
-    /// views, and materialized views are recompilation-dependent on their
-    /// referenced objects; tables, sequences, and synonyms are not invalidated
-    /// by a source replace. This is a preview estimate, not a guarantee — Oracle
-    /// may fine-grain-invalidate differently at apply time.
-    #[must_use]
-    pub fn is_invalidatable(&self) -> bool {
-        matches!(
-            self.object_type.to_ascii_uppercase().as_str(),
-            "VIEW"
-                | "PROCEDURE"
-                | "FUNCTION"
-                | "PACKAGE"
-                | "PACKAGE BODY"
-                | "TYPE"
-                | "TYPE BODY"
-                | "TRIGGER"
-                | "MATERIALIZED VIEW"
-        )
+/// Fixed ceilings for approval dependency observations in 0.12.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DepCaps {
+    /// Maximum dependent distance, at most ten; roots have distance zero.
+    pub max_depth: usize,
+    /// Maximum dependent objects, excluding the requested roots, at most 1000.
+    pub max_count: usize,
+}
+
+impl Default for DepCaps {
+    fn default() -> Self {
+        Self {
+            max_depth: 10,
+            max_count: 1000,
+        }
     }
 }
 
-/// Outcome of a direct-dependents (blast-radius) probe over `ALL_DEPENDENCIES`.
-///
-/// The probe never surfaces an error to its caller: the dependents block is a
-/// purely additive, observational enrichment of a DDL preview, so a privilege
-/// gap or dictionary error degrades to [`DependentsProbe::Unavailable`] rather
-/// than failing the preview.
+const MAX_DEPENDENT_EDGES: usize = 8000;
+const MAX_DEPENDENT_SOURCE_LINES: usize = 4096;
+const MAX_DEPENDENT_SOURCE_BYTES: usize = 1_048_576;
+
+/// Why a dependency observation cannot establish a complete result.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyUncertaintyKind {
+    /// A requested root was not visible as an exact dictionary object.
+    UnresolvedRoot,
+    /// A dependent's identity, status or modification facts were missing.
+    UnresolvedObject,
+    /// A dependency target could not be resolved locally.
+    UnresolvedTarget,
+    /// A database link prevents observing the referenced object locally.
+    RemoteDependency,
+    /// The dictionary dependency strength was not recognized.
+    UnknownStrength,
+    /// A returned row did not satisfy the closed projection.
+    MalformedRow,
+    /// Stored source required for a fingerprint could not be read.
+    SourceUnavailable,
+    /// The source observation was incomplete or exceeded a bound.
+    SourceTruncated,
+    /// Repeated observations disagreed during collection.
+    ChangedDuringObservation,
+}
+
+/// One explicit gap; absence of a total is never an assertion of zero.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub struct DependencyUncertainty {
+    /// Closed reason for the gap.
+    pub reason: DependencyUncertaintyKind,
+    /// Exact affected object, when the row supplied one.
+    pub object: Option<DependentObject>,
+}
+
+/// A hard resource ceiling that prevented a complete observation.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyTruncation {
+    /// Another dependent exists beyond the maximum distance.
+    Depth,
+    /// The dependent object count was exhausted.
+    Count,
+    /// The bounded edge projection was exhausted.
+    Edges,
+    /// The source line budget was exhausted.
+    SourceLines,
+    /// The source byte budget or a complete view-text projection was exhausted.
+    SourceBytes,
+    /// The bound JSON frontier would exceed the SQL bind budget.
+    FrontierBytes,
+}
+
+/// Whether current stored source contributed a trustworthy content hash.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum DependentsProbe {
-    /// The dictionary query ran. `direct` holds the one-hop dependents visible
-    /// to this session (possibly empty).
-    Available {
-        /// Direct (one-hop) dependents referencing the target object.
-        direct: Vec<DependentObject>,
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum DependencySourceHash {
+    /// SHA-256 over complete source in dictionary line order.
+    Computed {
+        /// Content digest, independent of LAST_DDL_TIME precision.
+        sha256: [u8; 32],
     },
-    /// `ALL_DEPENDENCIES` was not accessible (privilege gap or dictionary
-    /// error); the preview proceeds without the dependents block.
+    /// This object class has no stored source representation.
+    NotApplicable,
+    /// Missing or incomplete source never receives an empty-source hash.
     Unavailable {
-        /// Sanitized reason the probe degraded.
-        reason: String,
+        /// Closed reason no hash could be established.
+        reason: DependencyUncertaintyKind,
     },
 }
 
-/// Build a [`DependentObject`] from one `ALL_DEPENDENCIES` row, skipping rows
-/// missing the owner/name/type triple. Pure — factored out for offline tests.
-#[must_use]
-pub fn dependent_from_row(row: &OracleRow) -> Option<DependentObject> {
-    let owner = row.text("OWNER")?.trim();
-    let name = row.text("NAME")?.trim();
-    let object_type = row.text("TYPE")?.trim();
+/// Exact object facts at one distance in a dependency observation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DependentNode {
+    /// Owner, name and object type, preserving dictionary case.
+    pub object: DependentObject,
+    /// Minimum observed distance from any requested root.
+    pub depth: usize,
+    /// Oracle object identity; missing identity is uncertain, not object zero.
+    pub object_id: Option<u64>,
+    /// Observed ALL_OBJECTS status.
+    pub status: Option<String>,
+    /// Canonical observed modification timestamp.
+    pub last_ddl_time: Option<String>,
+    /// Current content fingerprint or a typed missing/not-applicable status.
+    pub source_hash: DependencySourceHash,
+}
+
+/// One observed dictionary edge, including unresolved and remote evidence.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub struct DependencyEdge {
+    /// Referencing object.
+    pub dependent: DependentObject,
+    /// Referenced identity, when complete enough to name.
+    pub referenced: Option<DependentObject>,
+    /// Locally observed target identity; absent for remote or unresolved edges.
+    pub referenced_object_id: Option<u64>,
+    /// A remote link is evidence of uncertainty, never a local graph edge.
+    pub referenced_link_name: Option<String>,
+    /// HARD, REF, EXTENDED or an explicitly unknown dictionary strength.
+    pub dependency_type: Option<String>,
+}
+
+/// One bounded, cycle-safe dictionary observation. An incomplete observation
+/// retains its known nodes and explicit gaps; callers must not render it as 0.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DependentsClosure {
+    /// Original exact roots, including ones whose metadata was unavailable.
+    pub requested_roots: Vec<DependentObject>,
+    /// Observed facts for the requested roots.
+    pub roots: Vec<DependentNode>,
+    /// Bounded transitive dependents with minimum distances.
+    pub nodes: Vec<DependentNode>,
+    /// Bounded incoming/outgoing evidence collected at the visited frontiers.
+    pub edges: Vec<DependencyEdge>,
+    /// Active depth and object ceilings.
+    pub caps: DepCaps,
+    /// At least one hard bound prevented completing the observation.
+    pub truncated: bool,
+    /// Every hard bound encountered.
+    pub truncation: Vec<DependencyTruncation>,
+    /// Every observed gap that prevents asserting an exact total.
+    pub uncertainties: Vec<DependencyUncertainty>,
+    /// Domain-separated SHA-256 binding sorted node facts, source hashes,
+    /// edges, roots, gaps and truncation; collection timing is excluded.
+    pub dependency_hash: [u8; 32],
+    #[serde(skip)]
+    query_count: usize,
+}
+
+impl DependentsClosure {
+    /// Number of frontier queries, bounded by max_depth + 1.
+    #[must_use]
+    pub fn query_count(&self) -> usize {
+        self.query_count
+    }
+}
+
+/// Typed failure to obtain a dependency observation.
+#[derive(Debug, thiserror::Error)]
+pub enum DependentsError {
+    /// Caller-supplied roots or ceilings exceeded the closed API contract.
+    #[error("dependency closure caps or roots are invalid")]
+    InvalidCaps,
+    /// The dictionary comparison was denied or exposed hidden dependencies.
+    #[error("dependency dictionary visibility could not be established")]
+    NoPrivilege,
+    /// The underlying database operation failed.
+    #[error(transparent)]
+    Database(#[from] DbError),
+}
+
+#[derive(Default)]
+struct DependencySources {
+    expected: Option<usize>,
+    lines: BTreeMap<usize, String>,
+    incomplete: bool,
+}
+
+fn dependency_identity(row: &OracleRow, columns: [&str; 3]) -> Option<DependentObject> {
+    let [owner, name, object_type] = columns.map(|column| row.text(column));
+    let (owner, name, object_type) = (owner?, name?, object_type?);
     if owner.is_empty() || name.is_empty() || object_type.is_empty() {
         return None;
     }
     Some(DependentObject {
-        owner: owner.to_owned(),
-        name: name.to_owned(),
-        object_type: object_type.to_owned(),
+        owner: owner.into(),
+        name: name.into(),
+        object_type: object_type.into(),
     })
 }
 
-/// Probe the *direct* (one-hop) dependents of a target object via
-/// `ALL_DEPENDENCIES` — the objects that reference `owner.name` and would be
-/// candidates for invalidation if it were replaced.
-///
-/// This is a **read-only** dictionary query, gated by nothing new: it never
-/// touches the SQL classifier, the DDL gate, or the operating-level ladder. It
-/// binds owner/name (never interpolates) and self-excludes the target. Only
-/// direct dependents are returned; the transitive closure and dynamic-SQL
-/// (`EXECUTE IMMEDIATE`) references are intentionally out of scope, and objects
-/// outside this session's dictionary visibility are not shown. On any driver /
-/// privilege error the probe degrades to [`DependentsProbe::Unavailable`] so a
-/// preview is never failed by a missing-privilege dependents lookup.
-pub async fn probe_dependents(
+fn dependency_source_required(kind: &str) -> bool {
+    matches!(
+        kind,
+        "PACKAGE"
+            | "PACKAGE BODY"
+            | "PROCEDURE"
+            | "FUNCTION"
+            | "TRIGGER"
+            | "TYPE"
+            | "TYPE BODY"
+            | "JAVA SOURCE"
+            | "VIEW"
+            | "MATERIALIZED VIEW"
+    )
+}
+
+fn dependency_node(row: &OracleRow, depth: usize) -> Option<DependentNode> {
+    let object = dependency_identity(row, ["OWNER", "NAME", "TYPE"])?;
+    let source_hash = if dependency_source_required(&object.object_type) {
+        DependencySourceHash::Unavailable {
+            reason: DependencyUncertaintyKind::SourceUnavailable,
+        }
+    } else {
+        DependencySourceHash::NotApplicable
+    };
+    Some(DependentNode {
+        object,
+        depth,
+        object_id: row
+            .text("OBJECT_ID")
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|id| *id > 0),
+        status: row
+            .text("STATUS")
+            .filter(|status| !status.is_empty())
+            .map(str::to_owned),
+        last_ddl_time: row
+            .text("LAST_DDL_TIME")
+            .filter(|time| !time.is_empty())
+            .map(str::to_owned),
+        source_hash,
+    })
+}
+
+/// Read at most one statement per depth level, including the boundary probe
+/// that distinguishes a leaf at the depth cap from a silently omitted child.
+/// Values are bound as a bounded JSON frontier; stored object IDs keep a
+/// 1000-object frontier below Oracle's VARCHAR2 bind ceiling. Source is hashed
+/// and discarded, never returned in the approval payload.
+pub async fn probe_dependents_transitive(
     cx: &Cx,
     conn: &dyn OracleConnection,
-    owner: &str,
-    name: &str,
-    max_rows: usize,
-) -> DependentsProbe {
-    // Mirror the `list_objects` idiom: bind each value once through a `WITH
-    // args` CTE and reference it by alias, so a repeated predicate does not
-    // depend on repeating a positional placeholder.
-    let binds = [
-        OracleBind::from(owner.to_ascii_uppercase()),
-        OracleBind::from(name.to_ascii_uppercase()),
-        OracleBind::from(max_rows as i64),
-    ];
-    match run_catalog_query(cx, conn, CatalogQueryId::Dependents, &binds).await {
-        Ok(rows) => DependentsProbe::Available {
-            direct: rows.iter().filter_map(dependent_from_row).collect(),
-        },
-        Err(err) => DependentsProbe::Unavailable {
-            reason: format!("ALL_DEPENDENCIES not accessible: {err}"),
-        },
+    roots: &[DependentObject],
+    caps: DepCaps,
+) -> Result<DependentsClosure, DependentsError> {
+    if caps.max_depth == 0
+        || caps.max_depth > 10
+        || caps.max_count == 0
+        || caps.max_count > 1000
+        || roots.is_empty()
+        || roots.len() > 32
+        || roots.iter().any(|root| {
+            root.owner.is_empty()
+                || root.name.is_empty()
+                || root.object_type.is_empty()
+                || root.owner.len() > 128
+                || root.name.len() > 128
+                || root.object_type.len() > 30
+        })
+    {
+        return Err(DependentsError::InvalidCaps);
+    }
+    let root_keys: BTreeSet<_> = roots.iter().cloned().collect();
+    let mut frontier = root_keys.clone();
+    let mut nodes: BTreeMap<DependentObject, DependentNode> = BTreeMap::new();
+    let mut edges = BTreeSet::new();
+    let mut uncertainties = BTreeSet::new();
+    let mut truncation = BTreeSet::new();
+    let mut sources: BTreeMap<DependentObject, DependencySources> = BTreeMap::new();
+    let mut source_bytes = 0usize;
+    let mut source_lines = 0usize;
+    let mut query_count = 0;
+    for depth in 0..=caps.max_depth {
+        if frontier.is_empty() {
+            break;
+        }
+        let request: Vec<_> = frontier.iter().map(|object| {
+            nodes.get(object).and_then(|node| node.object_id).map_or_else(
+                || serde_json::json!({"owner":object.owner,"name":object.name,"type":object.object_type}),
+                |id| serde_json::json!({"id":id}))
+        }).collect();
+        let json = serde_json::to_string(&request).map_err(|_| DependentsError::InvalidCaps)?;
+        if json.len() > 32767 {
+            truncation.insert(DependencyTruncation::FrontierBytes);
+            break;
+        }
+        query_count += 1;
+        let rows = match run_catalog_query(
+            cx,
+            conn,
+            CatalogQueryId::DependentsTransitive,
+            &[
+                OracleBind::from(json),
+                OracleBind::I64((MAX_DEPENDENT_EDGES + 1) as i64),
+                OracleBind::I64((MAX_DEPENDENT_SOURCE_LINES + 1) as i64),
+            ],
+        )
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error)
+                if error.to_string().contains("ORA-00942")
+                    || error.to_string().contains("ORA-01031") =>
+            {
+                return Err(DependentsError::NoPrivilege);
+            }
+            Err(error) => return Err(DependentsError::Database(error)),
+        };
+        if rows
+            .iter()
+            .any(|row| row.text("ROW_KIND") == Some("visibility_gap"))
+        {
+            return Err(DependentsError::NoPrivilege);
+        }
+        if rows.iter().any(|row| {
+            !matches!(
+                row.text("ROW_KIND"),
+                Some("object" | "dependency" | "source")
+            )
+        }) {
+            uncertainties.insert(DependencyUncertainty {
+                reason: DependencyUncertaintyKind::MalformedRow,
+                object: None,
+            });
+        }
+        let mut headers = BTreeMap::new();
+        for row in rows
+            .iter()
+            .filter(|row| row.text("ROW_KIND") == Some("object"))
+        {
+            let Some(node) = dependency_node(row, depth) else {
+                uncertainties.insert(DependencyUncertainty {
+                    reason: DependencyUncertaintyKind::MalformedRow,
+                    object: None,
+                });
+                continue;
+            };
+            if let Some(previous) = headers.insert(node.object.clone(), node.clone())
+                && previous != node
+            {
+                uncertainties.insert(DependencyUncertainty {
+                    reason: DependencyUncertaintyKind::MalformedRow,
+                    object: Some(node.object),
+                });
+            }
+        }
+        for key in &frontier {
+            if let Some(header) = headers.get(key) {
+                if let Some(previous) = nodes.get(key) {
+                    if previous.object_id != header.object_id
+                        || previous.status != header.status
+                        || previous.last_ddl_time != header.last_ddl_time
+                    {
+                        uncertainties.insert(DependencyUncertainty {
+                            reason: DependencyUncertaintyKind::ChangedDuringObservation,
+                            object: Some(key.clone()),
+                        });
+                    }
+                } else {
+                    nodes.insert(key.clone(), header.clone());
+                }
+            } else {
+                uncertainties.insert(DependencyUncertainty {
+                    reason: DependencyUncertaintyKind::UnresolvedRoot,
+                    object: Some(key.clone()),
+                });
+            }
+        }
+        let dependency_rows: Vec<_> = rows
+            .iter()
+            .filter(|row| row.text("ROW_KIND") == Some("dependency"))
+            .collect();
+        if dependency_rows.len() > MAX_DEPENDENT_EDGES {
+            truncation.insert(DependencyTruncation::Edges);
+        }
+        let mut next = BTreeSet::new();
+        for row in dependency_rows {
+            let Some(dependent) = dependency_identity(row, ["OWNER", "NAME", "TYPE"]) else {
+                uncertainties.insert(DependencyUncertainty {
+                    reason: DependencyUncertaintyKind::MalformedRow,
+                    object: None,
+                });
+                continue;
+            };
+            let edge = DependencyEdge {
+                dependent: dependent.clone(),
+                referenced: dependency_identity(
+                    row,
+                    ["REFERENCED_OWNER", "REFERENCED_NAME", "REFERENCED_TYPE"],
+                ),
+                referenced_object_id: row
+                    .text("REFERENCED_OBJECT_ID")
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .filter(|id| *id > 0),
+                referenced_link_name: row
+                    .text("REFERENCED_LINK_NAME")
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
+                dependency_type: row.text("DEPENDENCY_TYPE").map(str::to_owned),
+            };
+            if row.cell("REFERENCED_LINK_NAME").is_none() {
+                uncertainties.insert(DependencyUncertainty {
+                    reason: DependencyUncertaintyKind::MalformedRow,
+                    object: Some(dependent.clone()),
+                });
+            }
+            if edge.referenced_link_name.is_some() {
+                uncertainties.insert(DependencyUncertainty {
+                    reason: DependencyUncertaintyKind::RemoteDependency,
+                    object: Some(dependent.clone()),
+                });
+            } else if edge.referenced.is_none() || edge.referenced_object_id.is_none() {
+                uncertainties.insert(DependencyUncertainty {
+                    reason: DependencyUncertaintyKind::UnresolvedTarget,
+                    object: Some(dependent.clone()),
+                });
+            }
+            if !matches!(
+                edge.dependency_type.as_deref(),
+                Some("HARD" | "REF" | "EXTENDED")
+            ) {
+                uncertainties.insert(DependencyUncertainty {
+                    reason: DependencyUncertaintyKind::UnknownStrength,
+                    object: Some(dependent.clone()),
+                });
+            }
+            let incoming = edge
+                .referenced
+                .as_ref()
+                .is_some_and(|target| frontier.contains(target))
+                && edge.referenced_link_name.is_none();
+            if !edges.contains(&edge) && edges.len() >= MAX_DEPENDENT_EDGES {
+                truncation.insert(DependencyTruncation::Edges);
+            } else {
+                edges.insert(edge);
+            }
+            if !incoming || nodes.contains_key(&dependent) {
+                continue;
+            }
+            if depth >= caps.max_depth {
+                truncation.insert(DependencyTruncation::Depth);
+                continue;
+            }
+            if nodes.keys().filter(|key| !root_keys.contains(*key)).count() >= caps.max_count {
+                truncation.insert(DependencyTruncation::Count);
+                continue;
+            }
+            let node = headers.get(&dependent).cloned().map(|mut node| {
+                node.depth = depth + 1;
+                node
+            });
+            if let Some(node) = node {
+                if node.object_id.is_some() {
+                    next.insert(dependent.clone());
+                }
+                nodes.insert(dependent, node);
+            } else {
+                uncertainties.insert(DependencyUncertainty {
+                    reason: DependencyUncertaintyKind::UnresolvedObject,
+                    object: Some(dependent),
+                });
+            }
+        }
+        let source_rows: Vec<_> = rows
+            .iter()
+            .filter(|row| row.text("ROW_KIND") == Some("source"))
+            .collect();
+        if source_rows.len() > MAX_DEPENDENT_SOURCE_LINES {
+            truncation.insert(DependencyTruncation::SourceLines);
+        }
+        for row in source_rows {
+            let Some(key) = dependency_identity(row, ["OWNER", "NAME", "TYPE"]) else {
+                uncertainties.insert(DependencyUncertainty {
+                    reason: DependencyUncertaintyKind::MalformedRow,
+                    object: None,
+                });
+                continue;
+            };
+            if !nodes.contains_key(&key) {
+                continue;
+            }
+            let source = sources.entry(key.clone()).or_default();
+            let expected = row
+                .text("SOURCE_LINES")
+                .and_then(|s| s.parse::<usize>().ok());
+            if source.expected.is_some() && source.expected != expected {
+                source.incomplete = true;
+            }
+            source.expected = expected;
+            let Some((line, text)) = row
+                .text("LINE")
+                .and_then(|s| s.parse::<usize>().ok())
+                .zip(row.text("TEXT"))
+            else {
+                source.incomplete = true;
+                continue;
+            };
+            if line == 0 {
+                source.incomplete = true;
+                continue;
+            }
+            if row
+                .text("SOURCE_LENGTH")
+                .and_then(|s| s.parse::<usize>().ok())
+                != Some(text.len())
+            {
+                source.incomplete = true;
+                truncation.insert(DependencyTruncation::SourceBytes);
+            }
+            if let Some(previous) = source.lines.get(&line) {
+                if previous != text {
+                    source.incomplete = true;
+                    uncertainties.insert(DependencyUncertainty {
+                        reason: DependencyUncertaintyKind::ChangedDuringObservation,
+                        object: Some(key),
+                    });
+                }
+                continue;
+            }
+            if source_lines >= MAX_DEPENDENT_SOURCE_LINES {
+                truncation.insert(DependencyTruncation::SourceLines);
+                source.incomplete = true;
+                continue;
+            }
+            if source_bytes.saturating_add(text.len()) > MAX_DEPENDENT_SOURCE_BYTES {
+                truncation.insert(DependencyTruncation::SourceBytes);
+                source.incomplete = true;
+                continue;
+            }
+            source_lines += 1;
+            source_bytes += text.len();
+            source.lines.insert(line, text.to_owned());
+        }
+        frontier = next;
+        if truncation.contains(&DependencyTruncation::Count)
+            || truncation.contains(&DependencyTruncation::Edges)
+        {
+            break;
+        }
+    }
+    for (key, node) in &mut nodes {
+        if node.object_id.is_none() || node.status.is_none() || node.last_ddl_time.is_none() {
+            uncertainties.insert(DependencyUncertainty {
+                reason: DependencyUncertaintyKind::UnresolvedObject,
+                object: Some(key.clone()),
+            });
+        }
+        if !dependency_source_required(&key.object_type) {
+            continue;
+        }
+        if let Some(source) = sources.get(key)
+            && !source.incomplete
+            && !source.lines.is_empty()
+            && source.expected == Some(source.lines.len())
+            && source.lines.keys().copied().eq(1..=source.lines.len())
+        {
+            let mut hash = Sha256::new();
+            for text in source.lines.values() {
+                hash.update(text.as_bytes());
+            }
+            node.source_hash = DependencySourceHash::Computed {
+                sha256: hash.finalize().into(),
+            };
+        } else {
+            let reason = if sources
+                .get(key)
+                .is_some_and(|source| source.incomplete || !source.lines.is_empty())
+            {
+                DependencyUncertaintyKind::SourceTruncated
+            } else {
+                DependencyUncertaintyKind::SourceUnavailable
+            };
+            node.source_hash = DependencySourceHash::Unavailable { reason };
+            uncertainties.insert(DependencyUncertainty {
+                reason,
+                object: Some(key.clone()),
+            });
+        }
+    }
+    let (roots, nodes): (Vec<_>, Vec<_>) = nodes
+        .into_values()
+        .partition(|node| root_keys.contains(&node.object));
+    let mut closure = DependentsClosure {
+        requested_roots: root_keys.into_iter().collect(),
+        roots,
+        nodes,
+        edges: edges.into_iter().collect(),
+        caps,
+        truncated: !truncation.is_empty(),
+        truncation: truncation.into_iter().collect(),
+        uncertainties: uncertainties.into_iter().collect(),
+        dependency_hash: [0; 32],
+        query_count,
+    };
+    let canonical = serde_json::to_vec(&closure)
+        .map_err(|error| DependentsError::Database(DbError::Internal(error.to_string())))?;
+    let mut hash = Sha256::new();
+    hash.update(b"omcp/dependents-closure/v1\0");
+    hash.update(canonical);
+    closure.dependency_hash = hash.finalize().into();
+    Ok(closure)
+}
+
+#[cfg(test)]
+mod transitive_dependents_tests {
+    use super::*;
+    use crate::{OracleBackend, OracleConnectionInfo};
+    use asupersync::runtime::RuntimeBuilder;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct GraphConnection {
+        objects: BTreeMap<u64, DependentObject>,
+        edges: Vec<(u64, u64, bool)>,
+        calls: AtomicUsize,
+        denied: bool,
+        source: String,
+        transform: fn(&mut Vec<OracleRow>),
+    }
+
+    impl GraphConnection {
+        fn new(edges: &[(u64, u64)]) -> Self {
+            let ids = edges
+                .iter()
+                .flat_map(|(from, to)| [*from, *to])
+                .chain([1])
+                .collect::<BTreeSet<_>>();
+            Self {
+                objects: ids
+                    .into_iter()
+                    .map(|id| {
+                        (
+                            id,
+                            DependentObject {
+                                owner: "APP".into(),
+                                name: format!("P{id}"),
+                                object_type: "PROCEDURE".into(),
+                            },
+                        )
+                    })
+                    .collect(),
+                edges: edges.iter().map(|(from, to)| (*from, *to, false)).collect(),
+                calls: AtomicUsize::new(0),
+                denied: false,
+                source: "PROCEDURE P AS BEGIN NULL; END;\n".into(),
+                transform: |_| {},
+            }
+        }
+
+        fn row(&self, kind: &str, id: u64) -> OracleRow {
+            let object = &self.objects[&id];
+            let fields = [
+                ("ROW_KIND", kind.to_owned()),
+                ("OWNER", object.owner.clone()),
+                ("NAME", object.name.clone()),
+                ("TYPE", object.object_type.clone()),
+                ("OBJECT_ID", id.to_string()),
+                ("STATUS", "VALID".into()),
+                ("LAST_DDL_TIME", "2026-10-31T00:00:00".into()),
+            ];
+            OracleRow {
+                columns: fields
+                    .into_iter()
+                    .map(|(key, value)| (key.to_owned(), OracleCell::new("VARCHAR2", Some(value))))
+                    .collect(),
+            }
+        }
+
+        fn root(&self) -> Vec<DependentObject> {
+            vec![self.objects[&1].clone()]
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for GraphConnection {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+        async fn close(&self, _: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn ping(&self, _: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn describe(&self, _: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+        async fn execute(&self, _: &Cx, _: &str, _: &[OracleBind]) -> Result<u64, DbError> {
+            panic!("dependency observation executed SQL")
+        }
+        async fn commit(&self, _: &Cx) -> Result<(), DbError> {
+            panic!("dependency observation committed")
+        }
+        async fn rollback(&self, _: &Cx) -> Result<(), DbError> {
+            panic!("dependency observation rolled back")
+        }
+        async fn query_rows(
+            &self,
+            _: &Cx,
+            sql: &str,
+            binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            assert_eq!(sql, CatalogQueryId::DependentsTransitive.spec().sql);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.denied {
+                return Err(DbError::Query(
+                    "ORA-00942: table or view does not exist".into(),
+                ));
+            }
+            let OracleBind::String(json) = &binds[0] else {
+                panic!("JSON frontier bind")
+            };
+            assert!(json.len() <= 32767);
+            let request: serde_json::Value = serde_json::from_str(json).unwrap();
+            let frontier = request
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|item| {
+                    item["id"].as_u64().or_else(|| {
+                        self.objects
+                            .iter()
+                            .find(|(_, object)| {
+                                item["owner"] == object.owner
+                                    && item["name"] == object.name
+                                    && item["type"] == object.object_type
+                            })
+                            .map(|(id, _)| *id)
+                    })
+                })
+                .collect::<BTreeSet<_>>();
+            let selected = self
+                .edges
+                .iter()
+                .filter(|(from, to, _)| frontier.contains(from) || frontier.contains(to))
+                .collect::<Vec<_>>();
+            let mut object_ids = frontier.clone();
+            object_ids.extend(
+                selected
+                    .iter()
+                    .filter(|(_, to, remote)| frontier.contains(to) && !remote)
+                    .map(|(from, _, _)| *from),
+            );
+            let mut rows = object_ids
+                .iter()
+                .map(|id| self.row("object", *id))
+                .collect::<Vec<_>>();
+            for (from, to, remote) in selected {
+                let mut row = self.row("dependency", *from);
+                let target = &self.objects[to];
+                for (key, value) in [
+                    ("REFERENCED_OWNER", Some(target.owner.clone())),
+                    ("REFERENCED_NAME", Some(target.name.clone())),
+                    ("REFERENCED_TYPE", Some(target.object_type.clone())),
+                    ("REFERENCED_LINK_NAME", remote.then(|| "REMOTE_DB".into())),
+                    ("DEPENDENCY_TYPE", Some("HARD".into())),
+                    ("REFERENCED_OBJECT_ID", (!remote).then(|| to.to_string())),
+                ] {
+                    row.columns
+                        .push((key.into(), OracleCell::new("VARCHAR2", value)));
+                }
+                rows.push(row);
+            }
+            for id in object_ids {
+                let mut row = self.row("source", id);
+                for (key, value) in [
+                    ("LINE", "1".into()),
+                    ("TEXT", self.source.clone()),
+                    ("SOURCE_LINES", "1".into()),
+                    ("SOURCE_LENGTH", self.source.len().to_string()),
+                ] {
+                    row.columns
+                        .push((key.into(), OracleCell::new("VARCHAR2", Some(value))));
+                }
+                rows.push(row);
+            }
+            (self.transform)(&mut rows);
+            Ok(rows)
+        }
+    }
+
+    fn run<F: Future<Output = ()>>(body: impl FnOnce(Cx) -> F) {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        runtime.block_on(async { body(Cx::current().unwrap()).await });
+    }
+
+    use std::future::Future;
+
+    #[test]
+    fn dependents_transitive_depth_cap_truncated() {
+        run(|cx| async move {
+            let conn = GraphConnection::new(&[(2, 1), (3, 2), (4, 3)]);
+            let result = probe_dependents_transitive(
+                &cx,
+                &conn,
+                &conn.root(),
+                DepCaps {
+                    max_depth: 2,
+                    max_count: 100,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                result
+                    .nodes
+                    .iter()
+                    .map(|node| node.depth)
+                    .collect::<Vec<_>>(),
+                vec![1, 2]
+            );
+            assert!(result.truncated && result.truncation.contains(&DependencyTruncation::Depth));
+            assert_eq!(result.query_count(), 3);
+        });
+    }
+
+    #[test]
+    fn dependents_count_cap_truncated() {
+        run(|cx| async move {
+            let conn = GraphConnection::new(&[(2, 1), (3, 1), (4, 1)]);
+            let result = probe_dependents_transitive(
+                &cx,
+                &conn,
+                &conn.root(),
+                DepCaps {
+                    max_depth: 10,
+                    max_count: 2,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.nodes.len(), 2);
+            assert!(result.truncated && result.truncation.contains(&DependencyTruncation::Count));
+            assert_eq!(result.query_count(), 1);
+        });
+    }
+
+    #[test]
+    fn dependents_cycle_terminates() {
+        run(|cx| async move {
+            let conn = GraphConnection::new(&[(2, 1), (1, 2), (3, 2)]);
+            let result = probe_dependents_transitive(&cx, &conn, &conn.root(), DepCaps::default())
+                .await
+                .unwrap();
+            assert_eq!(result.nodes.len(), 2);
+            assert_eq!(result.query_count(), 3);
+            assert!(!result.truncated);
+        });
+    }
+
+    #[test]
+    fn dependents_batched_one_query_per_level() {
+        run(|cx| async move {
+            let conn = GraphConnection::new(&[(2, 1), (3, 1), (4, 2), (5, 3)]);
+            let result = probe_dependents_transitive(&cx, &conn, &conn.root(), DepCaps::default())
+                .await
+                .unwrap();
+            assert_eq!(result.nodes.len(), 4);
+            assert_eq!(result.query_count(), 3);
+            assert_eq!(
+                conn.calls.load(Ordering::SeqCst),
+                3,
+                "width must not multiply queries"
+            );
+            assert!(result.uncertainties.is_empty() && !result.truncated);
+        });
+    }
+
+    #[test]
+    fn dependents_remote_edges_are_uncertain() {
+        run(|cx| async move {
+            let mut conn = GraphConnection::new(&[(2, 1)]);
+            conn.edges[0].2 = true;
+            let result = probe_dependents_transitive(&cx, &conn, &conn.root(), DepCaps::default())
+                .await
+                .unwrap();
+            assert!(result.nodes.is_empty());
+            assert!(
+                result
+                    .uncertainties
+                    .iter()
+                    .any(|item| item.reason == DependencyUncertaintyKind::RemoteDependency)
+            );
+            assert_eq!(result.edges.len(), 1, "remote evidence must not disappear");
+        });
+    }
+
+    #[test]
+    fn dependents_no_privilege_is_typed() {
+        run(|cx| async move {
+            let mut conn = GraphConnection::new(&[]);
+            conn.denied = true;
+            assert!(matches!(
+                probe_dependents_transitive(&cx, &conn, &conn.root(), DepCaps::default()).await,
+                Err(DependentsError::NoPrivilege)
+            ));
+        });
+    }
+
+    #[test]
+    fn dependents_hash_binds_source_with_unchanged_last_ddl_time() {
+        run(|cx| async move {
+            let mut conn = GraphConnection::new(&[(2, 1)]);
+            let first = probe_dependents_transitive(&cx, &conn, &conn.root(), DepCaps::default())
+                .await
+                .unwrap();
+            conn.source = "PROCEDURE P AS BEGIN RAISE NO_DATA_FOUND; END;\n".into();
+            let changed = probe_dependents_transitive(&cx, &conn, &conn.root(), DepCaps::default())
+                .await
+                .unwrap();
+            assert_eq!(first.nodes[0].last_ddl_time, changed.nodes[0].last_ddl_time);
+            assert_ne!(first.nodes[0].source_hash, changed.nodes[0].source_hash);
+            assert_ne!(first.dependency_hash, changed.dependency_hash);
+        });
+    }
+
+    #[test]
+    fn dependents_leaf_at_depth_cap_is_complete() {
+        run(|cx| async move {
+            let conn = GraphConnection::new(&[(2, 1), (3, 2)]);
+            let result = probe_dependents_transitive(
+                &cx,
+                &conn,
+                &conn.root(),
+                DepCaps {
+                    max_depth: 2,
+                    max_count: 10,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.nodes.len(), 2);
+            assert_eq!(result.query_count(), 3);
+            assert!(!result.truncated);
+        });
+    }
+
+    #[test]
+    fn dependents_detected_hidden_rows_are_no_privilege() {
+        run(|cx| async move {
+            let mut conn = GraphConnection::new(&[]);
+            conn.transform = |rows| {
+                rows.push(OracleRow {
+                    columns: vec![(
+                        "ROW_KIND".into(),
+                        OracleCell::new("VARCHAR2", Some("visibility_gap".into())),
+                    )],
+                })
+            };
+            assert!(matches!(
+                probe_dependents_transitive(&cx, &conn, &conn.root(), DepCaps::default()).await,
+                Err(DependentsError::NoPrivilege)
+            ));
+        });
+    }
+
+    #[test]
+    fn dependents_unresolved_native_identity_is_uncertain() {
+        run(|cx| async move {
+            let mut conn = GraphConnection::new(&[(2, 1)]);
+            conn.transform = |rows| {
+                for row in rows
+                    .iter_mut()
+                    .filter(|row| row.text("ROW_KIND") == Some("dependency"))
+                {
+                    row.columns.retain(|(key, _)| {
+                        key != "REFERENCED_OBJECT_ID" && key != "REFERENCED_LINK_NAME"
+                    });
+                }
+            };
+            let result = probe_dependents_transitive(&cx, &conn, &conn.root(), DepCaps::default())
+                .await
+                .unwrap();
+            assert_eq!(
+                result.nodes.len(),
+                1,
+                "retain known incoming identities alongside the gap"
+            );
+            for reason in [
+                DependencyUncertaintyKind::UnresolvedTarget,
+                DependencyUncertaintyKind::MalformedRow,
+            ] {
+                assert!(
+                    result
+                        .uncertainties
+                        .iter()
+                        .any(|item| item.reason == reason)
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn dependents_source_budget_is_typed_truncation() {
+        run(|cx| async move {
+            let edges = (2..=260).map(|id| (id, 1)).collect::<Vec<_>>();
+            let mut conn = GraphConnection::new(&edges);
+            conn.source = "x".repeat(4096);
+            let result = probe_dependents_transitive(&cx, &conn, &conn.root(), DepCaps::default())
+                .await
+                .unwrap();
+            assert!(
+                result.truncated
+                    && result
+                        .truncation
+                        .contains(&DependencyTruncation::SourceBytes)
+            );
+            assert!(
+                result.nodes.iter().any(|node| matches!(
+                    node.source_hash,
+                    DependencySourceHash::Unavailable { .. }
+                ))
+            );
+        });
+    }
+
+    #[test]
+    fn dependents_missing_source_never_has_an_empty_computed_hash() {
+        run(|cx| async move {
+            let mut conn = GraphConnection::new(&[(2, 1)]);
+            conn.transform = |rows| rows.retain(|row| row.text("ROW_KIND") != Some("source"));
+            let result = probe_dependents_transitive(&cx, &conn, &conn.root(), DepCaps::default())
+                .await
+                .unwrap();
+            assert!(
+                result
+                    .roots
+                    .iter()
+                    .chain(&result.nodes)
+                    .all(|node| matches!(
+                        node.source_hash,
+                        DependencySourceHash::Unavailable {
+                            reason: DependencyUncertaintyKind::SourceUnavailable
+                        }
+                    ))
+            );
+            assert_eq!(result.uncertainties.len(), 2);
+        });
+    }
+
+    #[test]
+    fn dependents_frontier_ids_preserve_the_full_count_cap_in_one_batch() {
+        run(|cx| async move {
+            let edges = (2..=1001).map(|id| (id, 1)).collect::<Vec<_>>();
+            let conn = GraphConnection::new(&edges);
+            let result = probe_dependents_transitive(&cx, &conn, &conn.root(), DepCaps::default())
+                .await
+                .unwrap();
+            assert_eq!(result.nodes.len(), 1000);
+            assert_eq!(result.query_count(), 2);
+            assert!(!result.truncated);
+        });
+    }
+
+    #[test]
+    fn dependents_quoted_identity_is_exact_and_caps_fail_before_io() {
+        run(|cx| async move {
+            let mut conn = GraphConnection::new(&[(2, 1)]);
+            let root = conn.objects.get_mut(&1).unwrap();
+            root.owner = "MiX".into();
+            root.name = "Dotted.Name\"Quoted".into();
+            let result = probe_dependents_transitive(&cx, &conn, &conn.root(), DepCaps::default())
+                .await
+                .unwrap();
+            assert_eq!(result.roots[0].object, conn.root()[0]);
+            let before = conn.calls.load(Ordering::SeqCst);
+            assert!(matches!(
+                probe_dependents_transitive(
+                    &cx,
+                    &conn,
+                    &conn.root(),
+                    DepCaps {
+                        max_depth: 11,
+                        max_count: 1000
+                    }
+                )
+                .await,
+                Err(DependentsError::InvalidCaps)
+            ));
+            assert_eq!(conn.calls.load(Ordering::SeqCst), before);
+        });
     }
 }
 
@@ -5119,219 +6100,5 @@ mod tests {
         assert!(assemble_cost_estimate(&rows).is_none());
         // Empty PLAN_TABLE read → no block.
         assert!(assemble_cost_estimate(&[]).is_none());
-    }
-
-    fn dependency_row(owner: &str, name: &str, object_type: &str) -> OracleRow {
-        OracleRow {
-            columns: vec![
-                (
-                    "OWNER".to_owned(),
-                    OracleCell::new("VARCHAR2", Some(owner.to_owned())),
-                ),
-                (
-                    "NAME".to_owned(),
-                    OracleCell::new("VARCHAR2", Some(name.to_owned())),
-                ),
-                (
-                    "TYPE".to_owned(),
-                    OracleCell::new("VARCHAR2", Some(object_type.to_owned())),
-                ),
-            ],
-        }
-    }
-
-    struct DependentsMock {
-        rows: Vec<OracleRow>,
-        fail: bool,
-        calls: std::sync::Mutex<Vec<(String, Vec<OracleBind>)>>,
-    }
-
-    impl DependentsMock {
-        fn returning(rows: Vec<OracleRow>) -> Self {
-            Self {
-                rows,
-                fail: false,
-                calls: std::sync::Mutex::new(Vec::new()),
-            }
-        }
-
-        fn failing() -> Self {
-            Self {
-                rows: Vec::new(),
-                fail: true,
-                calls: std::sync::Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    #[async_trait::async_trait(?Send)]
-    impl OracleConnection for DependentsMock {
-        fn backend(&self) -> OracleBackend {
-            OracleBackend::RustOracle
-        }
-
-        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
-            Ok(())
-        }
-
-        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
-            Ok(())
-        }
-
-        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
-            Ok(OracleConnectionInfo::default())
-        }
-
-        async fn query_rows(
-            &self,
-            _cx: &Cx,
-            sql: &str,
-            binds: &[OracleBind],
-        ) -> Result<Vec<OracleRow>, DbError> {
-            self.calls
-                .lock()
-                .expect("call log")
-                .push((sql.to_owned(), binds.to_vec()));
-            if self.fail {
-                return Err(DbError::Query(
-                    "ORA-00942: table or view does not exist".to_owned(),
-                ));
-            }
-            Ok(self.rows.clone())
-        }
-
-        async fn execute(
-            &self,
-            _cx: &Cx,
-            _sql: &str,
-            _binds: &[OracleBind],
-        ) -> Result<u64, DbError> {
-            Ok(0)
-        }
-
-        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
-            Ok(())
-        }
-
-        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn dependent_object_invalidatable_classification() {
-        for kind in [
-            "VIEW",
-            "PROCEDURE",
-            "FUNCTION",
-            "PACKAGE",
-            "PACKAGE BODY",
-            "TYPE",
-            "TYPE BODY",
-            "TRIGGER",
-            "MATERIALIZED VIEW",
-            // case-insensitive
-            "view",
-        ] {
-            let dep = DependentObject {
-                owner: "APP".to_owned(),
-                name: "X".to_owned(),
-                object_type: kind.to_owned(),
-            };
-            assert!(dep.is_invalidatable(), "{kind} should be invalidatable");
-        }
-        for kind in ["TABLE", "SEQUENCE", "SYNONYM", "INDEX"] {
-            let dep = DependentObject {
-                owner: "APP".to_owned(),
-                name: "X".to_owned(),
-                object_type: kind.to_owned(),
-            };
-            assert!(
-                !dep.is_invalidatable(),
-                "{kind} should not be invalidatable"
-            );
-        }
-    }
-
-    #[test]
-    fn dependent_from_row_skips_incomplete_rows() {
-        assert_eq!(
-            dependent_from_row(&dependency_row("APP", "V_ORDERS", "VIEW")),
-            Some(DependentObject {
-                owner: "APP".to_owned(),
-                name: "V_ORDERS".to_owned(),
-                object_type: "VIEW".to_owned(),
-            })
-        );
-        // Missing NAME column → skipped.
-        let partial = OracleRow {
-            columns: vec![(
-                "OWNER".to_owned(),
-                OracleCell::new("VARCHAR2", Some("APP".to_owned())),
-            )],
-        };
-        assert_eq!(dependent_from_row(&partial), None);
-        // Blank TYPE → skipped.
-        assert_eq!(dependent_from_row(&dependency_row("APP", "X", "  ")), None);
-    }
-
-    #[test]
-    fn probe_dependents_binds_uppercased_and_self_excludes() {
-        let conn = DependentsMock::returning(vec![
-            dependency_row("APP", "V_DEP", "VIEW"),
-            dependency_row("APP", "P_DEP", "PROCEDURE"),
-        ]);
-        let conn_ref = &conn;
-        let probe = run_with_cx(|cx| async move {
-            probe_dependents(&cx, conn_ref, "app", "pkg_target", 100).await
-        });
-        let (sql, binds) = conn
-            .calls
-            .lock()
-            .expect("calls")
-            .first()
-            .cloned()
-            .expect("one call");
-        // Owner/name are bound (never interpolated) and normalized to uppercase.
-        assert_eq!(
-            binds,
-            vec![
-                OracleBind::String("APP".to_owned()),
-                OracleBind::String("PKG_TARGET".to_owned()),
-                OracleBind::I64(100),
-            ]
-        );
-        assert!(sql.contains("all_dependencies"), "queries ALL_DEPENDENCIES");
-        assert!(
-            sql.contains("referenced_owner") && sql.contains("referenced_name"),
-            "filters on the referenced object"
-        );
-        assert!(sql.contains("NOT (d.owner"), "self-excludes the target");
-        match probe {
-            DependentsProbe::Available { direct } => {
-                assert_eq!(direct.len(), 2);
-                assert_eq!(direct[0].name, "V_DEP");
-                assert!(direct.iter().all(DependentObject::is_invalidatable));
-            }
-            DependentsProbe::Unavailable { reason } => panic!("expected Available, got {reason}"),
-        }
-    }
-
-    #[test]
-    fn probe_dependents_degrades_on_dictionary_error() {
-        let conn = DependentsMock::failing();
-        let conn_ref = &conn;
-        let probe = run_with_cx(|cx| async move {
-            probe_dependents(&cx, conn_ref, "APP", "PKG_TARGET", 100).await
-        });
-        match probe {
-            DependentsProbe::Unavailable { reason } => {
-                assert!(
-                    reason.contains("ALL_DEPENDENCIES not accessible"),
-                    "reason: {reason}"
-                );
-            }
-            DependentsProbe::Available { .. } => panic!("expected Unavailable on error"),
-        }
     }
 }

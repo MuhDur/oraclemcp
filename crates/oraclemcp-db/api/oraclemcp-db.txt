@@ -1280,7 +1280,7 @@ pub oraclemcp_db::CatalogQueryId::ColumnPathType
 pub oraclemcp_db::CatalogQueryId::CompileErrors
 pub oraclemcp_db::CatalogQueryId::CurrentScn
 pub oraclemcp_db::CatalogQueryId::DbaObjectsProbe
-pub oraclemcp_db::CatalogQueryId::Dependents
+pub oraclemcp_db::CatalogQueryId::DependentsTransitive
 pub oraclemcp_db::CatalogQueryId::DescribeColumns
 pub oraclemcp_db::CatalogQueryId::DescribeColumnsLegacy
 pub oraclemcp_db::CatalogQueryId::DescribeConstraints
@@ -1962,6 +1962,8 @@ pub fn oraclemcp_db::DbError::retry_action(&self) -> oraclemcp_error::OracleRetr
 pub fn oraclemcp_db::DbError::server_sql_origin(self) -> Self
 impl core::clone::Clone for oraclemcp_db::DbError
 pub fn oraclemcp_db::DbError::clone(&self) -> oraclemcp_db::DbError
+impl core::convert::From<oraclemcp_db::DbError> for oraclemcp_db::DependentsError
+pub fn oraclemcp_db::DependentsError::from(oraclemcp_db::DbError) -> Self
 impl core::convert::From<oraclemcp_db::DbError> for oraclemcp_db::NativeRedactionApplyError
 pub fn oraclemcp_db::NativeRedactionApplyError::from(oraclemcp_db::DbError) -> Self
 impl core::convert::From<oraclemcp_db::RelationSecurityProofError> for oraclemcp_db::DbError
@@ -2015,68 +2017,264 @@ pub type oraclemcp_db::DbError::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DbError where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::DbError where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::DbError::vzip(self) -> V
-pub enum oraclemcp_db::DependentsProbe
-pub oraclemcp_db::DependentsProbe::Available
-pub oraclemcp_db::DependentsProbe::Available::direct: alloc::vec::Vec<oraclemcp_db::DependentObject>
-pub oraclemcp_db::DependentsProbe::Unavailable
-pub oraclemcp_db::DependentsProbe::Unavailable::reason: alloc::string::String
-impl core::clone::Clone for oraclemcp_db::DependentsProbe
-pub fn oraclemcp_db::DependentsProbe::clone(&self) -> oraclemcp_db::DependentsProbe
-impl core::cmp::Eq for oraclemcp_db::DependentsProbe
-impl core::cmp::PartialEq for oraclemcp_db::DependentsProbe
-pub fn oraclemcp_db::DependentsProbe::eq(&self, &oraclemcp_db::DependentsProbe) -> bool
-impl core::fmt::Debug for oraclemcp_db::DependentsProbe
-pub fn oraclemcp_db::DependentsProbe::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for oraclemcp_db::DependentsProbe
-impl serde_core::ser::Serialize for oraclemcp_db::DependentsProbe
-pub fn oraclemcp_db::DependentsProbe::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::DependentsProbe
-pub fn oraclemcp_db::DependentsProbe::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for oraclemcp_db::DependentsProbe
-impl core::marker::Send for oraclemcp_db::DependentsProbe
-impl core::marker::Sync for oraclemcp_db::DependentsProbe
-impl core::marker::Unpin for oraclemcp_db::DependentsProbe
-impl core::marker::UnsafeUnpin for oraclemcp_db::DependentsProbe
-impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::DependentsProbe
-impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::DependentsProbe
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::DependentsProbe where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::DependentsProbe where T: 'a
-impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::DependentsProbe where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn oraclemcp_db::DependentsProbe::equivalent(&self, &K) -> bool
-impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::DependentsProbe where ST: ?core::marker::Sized, DT: ?core::marker::Sized
-impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::DependentsProbe where ST: ?core::marker::Sized, DT: ?core::marker::Sized
-impl<T, U> core::convert::Into<U> for oraclemcp_db::DependentsProbe where U: core::convert::From<T>
-pub fn oraclemcp_db::DependentsProbe::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::DependentsProbe where U: core::convert::Into<T>
-pub type oraclemcp_db::DependentsProbe::Error = core::convert::Infallible
-pub fn oraclemcp_db::DependentsProbe::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for oraclemcp_db::DependentsProbe where U: core::convert::TryFrom<T>
-pub type oraclemcp_db::DependentsProbe::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn oraclemcp_db::DependentsProbe::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for oraclemcp_db::DependentsProbe where T: core::clone::Clone
-pub type oraclemcp_db::DependentsProbe::Owned = T
-pub fn oraclemcp_db::DependentsProbe::clone_into(&self, &mut T)
-pub fn oraclemcp_db::DependentsProbe::to_owned(&self) -> T
-impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::DependentsProbe
-impl<T> core::any::Any for oraclemcp_db::DependentsProbe where T: 'static + ?core::marker::Sized
-pub fn oraclemcp_db::DependentsProbe::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for oraclemcp_db::DependentsProbe where T: ?core::marker::Sized
-pub fn oraclemcp_db::DependentsProbe::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::DependentsProbe where T: ?core::marker::Sized
-pub fn oraclemcp_db::DependentsProbe::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for oraclemcp_db::DependentsProbe where T: core::clone::Clone
-pub unsafe fn oraclemcp_db::DependentsProbe::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for oraclemcp_db::DependentsProbe
-pub fn oraclemcp_db::DependentsProbe::from(T) -> T
-impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::DependentsProbe
-impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::DependentsProbe where T: for<'de> serde_core::de::Deserialize<'de>
-impl<T> tracing::instrument::Instrument for oraclemcp_db::DependentsProbe
-impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::DependentsProbe
-impl<T> typenum::type_operators::Same for oraclemcp_db::DependentsProbe
-pub type oraclemcp_db::DependentsProbe::Output = T
-impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DependentsProbe where T: ?core::marker::Sized
-impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::DependentsProbe where V: ppv_lite86::types::MultiLane<T>
-pub fn oraclemcp_db::DependentsProbe::vzip(self) -> V
+pub enum oraclemcp_db::DependencySourceHash
+pub oraclemcp_db::DependencySourceHash::Computed
+pub oraclemcp_db::DependencySourceHash::Computed::sha256: [u8; 32]
+pub oraclemcp_db::DependencySourceHash::NotApplicable
+pub oraclemcp_db::DependencySourceHash::Unavailable
+pub oraclemcp_db::DependencySourceHash::Unavailable::reason: oraclemcp_db::DependencyUncertaintyKind
+impl core::clone::Clone for oraclemcp_db::DependencySourceHash
+pub fn oraclemcp_db::DependencySourceHash::clone(&self) -> oraclemcp_db::DependencySourceHash
+impl core::cmp::Eq for oraclemcp_db::DependencySourceHash
+impl core::cmp::PartialEq for oraclemcp_db::DependencySourceHash
+pub fn oraclemcp_db::DependencySourceHash::eq(&self, &oraclemcp_db::DependencySourceHash) -> bool
+impl core::fmt::Debug for oraclemcp_db::DependencySourceHash
+pub fn oraclemcp_db::DependencySourceHash::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::DependencySourceHash
+impl serde_core::ser::Serialize for oraclemcp_db::DependencySourceHash
+pub fn oraclemcp_db::DependencySourceHash::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::DependencySourceHash
+pub fn oraclemcp_db::DependencySourceHash::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::DependencySourceHash
+impl core::marker::Send for oraclemcp_db::DependencySourceHash
+impl core::marker::Sync for oraclemcp_db::DependencySourceHash
+impl core::marker::Unpin for oraclemcp_db::DependencySourceHash
+impl core::marker::UnsafeUnpin for oraclemcp_db::DependencySourceHash
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::DependencySourceHash
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::DependencySourceHash
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::DependencySourceHash where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::DependencySourceHash where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::DependencySourceHash where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::DependencySourceHash::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::DependencySourceHash where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::DependencySourceHash where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::DependencySourceHash where U: core::convert::From<T>
+pub fn oraclemcp_db::DependencySourceHash::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::DependencySourceHash where U: core::convert::Into<T>
+pub type oraclemcp_db::DependencySourceHash::Error = core::convert::Infallible
+pub fn oraclemcp_db::DependencySourceHash::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::DependencySourceHash where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::DependencySourceHash::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::DependencySourceHash::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::DependencySourceHash where T: core::clone::Clone
+pub type oraclemcp_db::DependencySourceHash::Owned = T
+pub fn oraclemcp_db::DependencySourceHash::clone_into(&self, &mut T)
+pub fn oraclemcp_db::DependencySourceHash::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::DependencySourceHash
+impl<T> core::any::Any for oraclemcp_db::DependencySourceHash where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::DependencySourceHash::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::DependencySourceHash where T: ?core::marker::Sized
+pub fn oraclemcp_db::DependencySourceHash::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::DependencySourceHash where T: ?core::marker::Sized
+pub fn oraclemcp_db::DependencySourceHash::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::DependencySourceHash where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::DependencySourceHash::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::DependencySourceHash
+pub fn oraclemcp_db::DependencySourceHash::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::DependencySourceHash
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::DependencySourceHash where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::DependencySourceHash
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::DependencySourceHash
+impl<T> typenum::type_operators::Same for oraclemcp_db::DependencySourceHash
+pub type oraclemcp_db::DependencySourceHash::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DependencySourceHash where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::DependencySourceHash where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::DependencySourceHash::vzip(self) -> V
+pub enum oraclemcp_db::DependencyTruncation
+pub oraclemcp_db::DependencyTruncation::Count
+pub oraclemcp_db::DependencyTruncation::Depth
+pub oraclemcp_db::DependencyTruncation::Edges
+pub oraclemcp_db::DependencyTruncation::FrontierBytes
+pub oraclemcp_db::DependencyTruncation::SourceBytes
+pub oraclemcp_db::DependencyTruncation::SourceLines
+impl core::clone::Clone for oraclemcp_db::DependencyTruncation
+pub fn oraclemcp_db::DependencyTruncation::clone(&self) -> oraclemcp_db::DependencyTruncation
+impl core::cmp::Eq for oraclemcp_db::DependencyTruncation
+impl core::cmp::Ord for oraclemcp_db::DependencyTruncation
+pub fn oraclemcp_db::DependencyTruncation::cmp(&self, &oraclemcp_db::DependencyTruncation) -> core::cmp::Ordering
+impl core::cmp::PartialEq for oraclemcp_db::DependencyTruncation
+pub fn oraclemcp_db::DependencyTruncation::eq(&self, &oraclemcp_db::DependencyTruncation) -> bool
+impl core::cmp::PartialOrd for oraclemcp_db::DependencyTruncation
+pub fn oraclemcp_db::DependencyTruncation::partial_cmp(&self, &oraclemcp_db::DependencyTruncation) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for oraclemcp_db::DependencyTruncation
+pub fn oraclemcp_db::DependencyTruncation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::DependencyTruncation
+impl core::marker::StructuralPartialEq for oraclemcp_db::DependencyTruncation
+impl serde_core::ser::Serialize for oraclemcp_db::DependencyTruncation
+pub fn oraclemcp_db::DependencyTruncation::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::DependencyTruncation
+pub fn oraclemcp_db::DependencyTruncation::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::DependencyTruncation
+impl core::marker::Send for oraclemcp_db::DependencyTruncation
+impl core::marker::Sync for oraclemcp_db::DependencyTruncation
+impl core::marker::Unpin for oraclemcp_db::DependencyTruncation
+impl core::marker::UnsafeUnpin for oraclemcp_db::DependencyTruncation
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::DependencyTruncation
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::DependencyTruncation
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::DependencyTruncation where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::DependencyTruncation where T: 'a
+impl<Q, K> equivalent::Comparable<K> for oraclemcp_db::DependencyTruncation where Q: core::cmp::Ord + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::DependencyTruncation::compare(&self, &K) -> core::cmp::Ordering
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::DependencyTruncation where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::DependencyTruncation::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::DependencyTruncation where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::DependencyTruncation where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::DependencyTruncation where U: core::convert::From<T>
+pub fn oraclemcp_db::DependencyTruncation::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::DependencyTruncation where U: core::convert::Into<T>
+pub type oraclemcp_db::DependencyTruncation::Error = core::convert::Infallible
+pub fn oraclemcp_db::DependencyTruncation::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::DependencyTruncation where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::DependencyTruncation::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::DependencyTruncation::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::DependencyTruncation where T: core::clone::Clone
+pub type oraclemcp_db::DependencyTruncation::Owned = T
+pub fn oraclemcp_db::DependencyTruncation::clone_into(&self, &mut T)
+pub fn oraclemcp_db::DependencyTruncation::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::DependencyTruncation
+impl<T> core::any::Any for oraclemcp_db::DependencyTruncation where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::DependencyTruncation::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::DependencyTruncation where T: ?core::marker::Sized
+pub fn oraclemcp_db::DependencyTruncation::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::DependencyTruncation where T: ?core::marker::Sized
+pub fn oraclemcp_db::DependencyTruncation::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::DependencyTruncation where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::DependencyTruncation::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::DependencyTruncation
+pub fn oraclemcp_db::DependencyTruncation::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::DependencyTruncation
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::DependencyTruncation where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::DependencyTruncation
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::DependencyTruncation
+impl<T> typenum::type_operators::Same for oraclemcp_db::DependencyTruncation
+pub type oraclemcp_db::DependencyTruncation::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DependencyTruncation where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::DependencyTruncation where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::DependencyTruncation::vzip(self) -> V
+pub enum oraclemcp_db::DependencyUncertaintyKind
+pub oraclemcp_db::DependencyUncertaintyKind::ChangedDuringObservation
+pub oraclemcp_db::DependencyUncertaintyKind::MalformedRow
+pub oraclemcp_db::DependencyUncertaintyKind::RemoteDependency
+pub oraclemcp_db::DependencyUncertaintyKind::SourceTruncated
+pub oraclemcp_db::DependencyUncertaintyKind::SourceUnavailable
+pub oraclemcp_db::DependencyUncertaintyKind::UnknownStrength
+pub oraclemcp_db::DependencyUncertaintyKind::UnresolvedObject
+pub oraclemcp_db::DependencyUncertaintyKind::UnresolvedRoot
+pub oraclemcp_db::DependencyUncertaintyKind::UnresolvedTarget
+impl core::clone::Clone for oraclemcp_db::DependencyUncertaintyKind
+pub fn oraclemcp_db::DependencyUncertaintyKind::clone(&self) -> oraclemcp_db::DependencyUncertaintyKind
+impl core::cmp::Eq for oraclemcp_db::DependencyUncertaintyKind
+impl core::cmp::Ord for oraclemcp_db::DependencyUncertaintyKind
+pub fn oraclemcp_db::DependencyUncertaintyKind::cmp(&self, &oraclemcp_db::DependencyUncertaintyKind) -> core::cmp::Ordering
+impl core::cmp::PartialEq for oraclemcp_db::DependencyUncertaintyKind
+pub fn oraclemcp_db::DependencyUncertaintyKind::eq(&self, &oraclemcp_db::DependencyUncertaintyKind) -> bool
+impl core::cmp::PartialOrd for oraclemcp_db::DependencyUncertaintyKind
+pub fn oraclemcp_db::DependencyUncertaintyKind::partial_cmp(&self, &oraclemcp_db::DependencyUncertaintyKind) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for oraclemcp_db::DependencyUncertaintyKind
+pub fn oraclemcp_db::DependencyUncertaintyKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::DependencyUncertaintyKind
+impl core::marker::StructuralPartialEq for oraclemcp_db::DependencyUncertaintyKind
+impl serde_core::ser::Serialize for oraclemcp_db::DependencyUncertaintyKind
+pub fn oraclemcp_db::DependencyUncertaintyKind::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::DependencyUncertaintyKind
+pub fn oraclemcp_db::DependencyUncertaintyKind::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::DependencyUncertaintyKind
+impl core::marker::Send for oraclemcp_db::DependencyUncertaintyKind
+impl core::marker::Sync for oraclemcp_db::DependencyUncertaintyKind
+impl core::marker::Unpin for oraclemcp_db::DependencyUncertaintyKind
+impl core::marker::UnsafeUnpin for oraclemcp_db::DependencyUncertaintyKind
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::DependencyUncertaintyKind
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::DependencyUncertaintyKind
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::DependencyUncertaintyKind where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::DependencyUncertaintyKind where T: 'a
+impl<Q, K> equivalent::Comparable<K> for oraclemcp_db::DependencyUncertaintyKind where Q: core::cmp::Ord + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::DependencyUncertaintyKind::compare(&self, &K) -> core::cmp::Ordering
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::DependencyUncertaintyKind where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::DependencyUncertaintyKind::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::DependencyUncertaintyKind where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::DependencyUncertaintyKind where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::DependencyUncertaintyKind where U: core::convert::From<T>
+pub fn oraclemcp_db::DependencyUncertaintyKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::DependencyUncertaintyKind where U: core::convert::Into<T>
+pub type oraclemcp_db::DependencyUncertaintyKind::Error = core::convert::Infallible
+pub fn oraclemcp_db::DependencyUncertaintyKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::DependencyUncertaintyKind where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::DependencyUncertaintyKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::DependencyUncertaintyKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::DependencyUncertaintyKind where T: core::clone::Clone
+pub type oraclemcp_db::DependencyUncertaintyKind::Owned = T
+pub fn oraclemcp_db::DependencyUncertaintyKind::clone_into(&self, &mut T)
+pub fn oraclemcp_db::DependencyUncertaintyKind::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::DependencyUncertaintyKind
+impl<T> core::any::Any for oraclemcp_db::DependencyUncertaintyKind where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::DependencyUncertaintyKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::DependencyUncertaintyKind where T: ?core::marker::Sized
+pub fn oraclemcp_db::DependencyUncertaintyKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::DependencyUncertaintyKind where T: ?core::marker::Sized
+pub fn oraclemcp_db::DependencyUncertaintyKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::DependencyUncertaintyKind where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::DependencyUncertaintyKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::DependencyUncertaintyKind
+pub fn oraclemcp_db::DependencyUncertaintyKind::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::DependencyUncertaintyKind
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::DependencyUncertaintyKind where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::DependencyUncertaintyKind
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::DependencyUncertaintyKind
+impl<T> typenum::type_operators::Same for oraclemcp_db::DependencyUncertaintyKind
+pub type oraclemcp_db::DependencyUncertaintyKind::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DependencyUncertaintyKind where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::DependencyUncertaintyKind where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::DependencyUncertaintyKind::vzip(self) -> V
+pub enum oraclemcp_db::DependentsError
+pub oraclemcp_db::DependentsError::Database(oraclemcp_db::DbError)
+pub oraclemcp_db::DependentsError::InvalidCaps
+pub oraclemcp_db::DependentsError::NoPrivilege
+impl core::convert::From<oraclemcp_db::DbError> for oraclemcp_db::DependentsError
+pub fn oraclemcp_db::DependentsError::from(oraclemcp_db::DbError) -> Self
+impl core::error::Error for oraclemcp_db::DependentsError
+pub fn oraclemcp_db::DependentsError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for oraclemcp_db::DependentsError
+pub fn oraclemcp_db::DependentsError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oraclemcp_db::DependentsError
+pub fn oraclemcp_db::DependentsError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for oraclemcp_db::DependentsError
+impl core::marker::Send for oraclemcp_db::DependentsError
+impl core::marker::Sync for oraclemcp_db::DependentsError
+impl core::marker::Unpin for oraclemcp_db::DependentsError
+impl core::marker::UnsafeUnpin for oraclemcp_db::DependentsError
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::DependentsError
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::DependentsError
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::DependentsError where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::DependentsError where T: 'a
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::DependentsError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::DependentsError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::DependentsError where U: core::convert::From<T>
+pub fn oraclemcp_db::DependentsError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::DependentsError where U: core::convert::Into<T>
+pub type oraclemcp_db::DependentsError::Error = core::convert::Infallible
+pub fn oraclemcp_db::DependentsError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::DependentsError where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::DependentsError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::DependentsError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for oraclemcp_db::DependentsError where T: core::fmt::Display + ?core::marker::Sized
+pub fn oraclemcp_db::DependentsError::to_string(&self) -> alloc::string::String
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::DependentsError
+impl<T> core::any::Any for oraclemcp_db::DependentsError where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::DependentsError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::DependentsError where T: ?core::marker::Sized
+pub fn oraclemcp_db::DependentsError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::DependentsError where T: ?core::marker::Sized
+pub fn oraclemcp_db::DependentsError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for oraclemcp_db::DependentsError
+pub fn oraclemcp_db::DependentsError::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::DependentsError
+impl<T> tracing::instrument::Instrument for oraclemcp_db::DependentsError
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::DependentsError
+impl<T> typenum::type_operators::Same for oraclemcp_db::DependentsError
+pub type oraclemcp_db::DependentsError::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DependentsError where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::DependentsError where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::DependentsError::vzip(self) -> V
 pub enum oraclemcp_db::DiagnosticsSource
 pub oraclemcp_db::DiagnosticsSource::AwrAsh
 pub oraclemcp_db::DiagnosticsSource::LiveCursor
@@ -3860,7 +4058,7 @@ pub oraclemcp_db::QueryRowStreamStart::Fallback
 pub oraclemcp_db::QueryRowStreamStart::Fallback::reason: alloc::string::String
 pub oraclemcp_db::QueryRowStreamStart::Stream(oraclemcp_db::QueryRowStream)
 impl core::marker::Freeze for oraclemcp_db::QueryRowStreamStart
-impl !core::marker::Send for oraclemcp_db::QueryRowStreamStart
+impl core::marker::Send for oraclemcp_db::QueryRowStreamStart
 impl !core::marker::Sync for oraclemcp_db::QueryRowStreamStart
 impl core::marker::Unpin for oraclemcp_db::QueryRowStreamStart
 impl core::marker::UnsafeUnpin for oraclemcp_db::QueryRowStreamStart
@@ -6640,6 +6838,138 @@ pub type oraclemcp_db::DdlText::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DdlText where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::DdlText where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::DdlText::vzip(self) -> V
+pub struct oraclemcp_db::DepCaps
+pub oraclemcp_db::DepCaps::max_count: usize
+pub oraclemcp_db::DepCaps::max_depth: usize
+impl core::clone::Clone for oraclemcp_db::DepCaps
+pub fn oraclemcp_db::DepCaps::clone(&self) -> oraclemcp_db::DepCaps
+impl core::cmp::Eq for oraclemcp_db::DepCaps
+impl core::cmp::PartialEq for oraclemcp_db::DepCaps
+pub fn oraclemcp_db::DepCaps::eq(&self, &oraclemcp_db::DepCaps) -> bool
+impl core::default::Default for oraclemcp_db::DepCaps
+pub fn oraclemcp_db::DepCaps::default() -> Self
+impl core::fmt::Debug for oraclemcp_db::DepCaps
+pub fn oraclemcp_db::DepCaps::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::DepCaps
+impl core::marker::StructuralPartialEq for oraclemcp_db::DepCaps
+impl serde_core::ser::Serialize for oraclemcp_db::DepCaps
+pub fn oraclemcp_db::DepCaps::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::DepCaps
+pub fn oraclemcp_db::DepCaps::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::DepCaps
+impl core::marker::Send for oraclemcp_db::DepCaps
+impl core::marker::Sync for oraclemcp_db::DepCaps
+impl core::marker::Unpin for oraclemcp_db::DepCaps
+impl core::marker::UnsafeUnpin for oraclemcp_db::DepCaps
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::DepCaps
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::DepCaps
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::DepCaps where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::DepCaps where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::DepCaps where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::DepCaps::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::DepCaps where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::DepCaps where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::DepCaps where U: core::convert::From<T>
+pub fn oraclemcp_db::DepCaps::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::DepCaps where U: core::convert::Into<T>
+pub type oraclemcp_db::DepCaps::Error = core::convert::Infallible
+pub fn oraclemcp_db::DepCaps::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::DepCaps where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::DepCaps::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::DepCaps::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::DepCaps where T: core::clone::Clone
+pub type oraclemcp_db::DepCaps::Owned = T
+pub fn oraclemcp_db::DepCaps::clone_into(&self, &mut T)
+pub fn oraclemcp_db::DepCaps::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::DepCaps
+impl<T> core::any::Any for oraclemcp_db::DepCaps where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::DepCaps::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::DepCaps where T: ?core::marker::Sized
+pub fn oraclemcp_db::DepCaps::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::DepCaps where T: ?core::marker::Sized
+pub fn oraclemcp_db::DepCaps::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::DepCaps where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::DepCaps::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::DepCaps
+pub fn oraclemcp_db::DepCaps::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::DepCaps
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::DepCaps where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::DepCaps
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::DepCaps
+impl<T> typenum::type_operators::Same for oraclemcp_db::DepCaps
+pub type oraclemcp_db::DepCaps::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DepCaps where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::DepCaps where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::DepCaps::vzip(self) -> V
+pub struct oraclemcp_db::DependencyEdge
+pub oraclemcp_db::DependencyEdge::dependency_type: core::option::Option<alloc::string::String>
+pub oraclemcp_db::DependencyEdge::dependent: oraclemcp_db::DependentObject
+pub oraclemcp_db::DependencyEdge::referenced: core::option::Option<oraclemcp_db::DependentObject>
+pub oraclemcp_db::DependencyEdge::referenced_link_name: core::option::Option<alloc::string::String>
+pub oraclemcp_db::DependencyEdge::referenced_object_id: core::option::Option<u64>
+impl core::clone::Clone for oraclemcp_db::DependencyEdge
+pub fn oraclemcp_db::DependencyEdge::clone(&self) -> oraclemcp_db::DependencyEdge
+impl core::cmp::Eq for oraclemcp_db::DependencyEdge
+impl core::cmp::Ord for oraclemcp_db::DependencyEdge
+pub fn oraclemcp_db::DependencyEdge::cmp(&self, &oraclemcp_db::DependencyEdge) -> core::cmp::Ordering
+impl core::cmp::PartialEq for oraclemcp_db::DependencyEdge
+pub fn oraclemcp_db::DependencyEdge::eq(&self, &oraclemcp_db::DependencyEdge) -> bool
+impl core::cmp::PartialOrd for oraclemcp_db::DependencyEdge
+pub fn oraclemcp_db::DependencyEdge::partial_cmp(&self, &oraclemcp_db::DependencyEdge) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for oraclemcp_db::DependencyEdge
+pub fn oraclemcp_db::DependencyEdge::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::DependencyEdge
+impl serde_core::ser::Serialize for oraclemcp_db::DependencyEdge
+pub fn oraclemcp_db::DependencyEdge::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::DependencyEdge
+pub fn oraclemcp_db::DependencyEdge::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::DependencyEdge
+impl core::marker::Send for oraclemcp_db::DependencyEdge
+impl core::marker::Sync for oraclemcp_db::DependencyEdge
+impl core::marker::Unpin for oraclemcp_db::DependencyEdge
+impl core::marker::UnsafeUnpin for oraclemcp_db::DependencyEdge
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::DependencyEdge
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::DependencyEdge
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::DependencyEdge where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::DependencyEdge where T: 'a
+impl<Q, K> equivalent::Comparable<K> for oraclemcp_db::DependencyEdge where Q: core::cmp::Ord + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::DependencyEdge::compare(&self, &K) -> core::cmp::Ordering
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::DependencyEdge where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::DependencyEdge::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::DependencyEdge where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::DependencyEdge where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::DependencyEdge where U: core::convert::From<T>
+pub fn oraclemcp_db::DependencyEdge::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::DependencyEdge where U: core::convert::Into<T>
+pub type oraclemcp_db::DependencyEdge::Error = core::convert::Infallible
+pub fn oraclemcp_db::DependencyEdge::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::DependencyEdge where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::DependencyEdge::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::DependencyEdge::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::DependencyEdge where T: core::clone::Clone
+pub type oraclemcp_db::DependencyEdge::Owned = T
+pub fn oraclemcp_db::DependencyEdge::clone_into(&self, &mut T)
+pub fn oraclemcp_db::DependencyEdge::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::DependencyEdge
+impl<T> core::any::Any for oraclemcp_db::DependencyEdge where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::DependencyEdge::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::DependencyEdge where T: ?core::marker::Sized
+pub fn oraclemcp_db::DependencyEdge::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::DependencyEdge where T: ?core::marker::Sized
+pub fn oraclemcp_db::DependencyEdge::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::DependencyEdge where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::DependencyEdge::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::DependencyEdge
+pub fn oraclemcp_db::DependencyEdge::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::DependencyEdge
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::DependencyEdge where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::DependencyEdge
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::DependencyEdge
+impl<T> typenum::type_operators::Same for oraclemcp_db::DependencyEdge
+pub type oraclemcp_db::DependencyEdge::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DependencyEdge where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::DependencyEdge where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::DependencyEdge::vzip(self) -> V
 pub struct oraclemcp_db::DependencyFact
 pub oraclemcp_db::DependencyFact::dependency_type: alloc::string::String
 pub oraclemcp_db::DependencyFact::last_ddl_time: alloc::string::String
@@ -6706,17 +7036,149 @@ pub type oraclemcp_db::catalog_facts::DependencyFact::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::catalog_facts::DependencyFact where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::catalog_facts::DependencyFact where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::catalog_facts::DependencyFact::vzip(self) -> V
+pub struct oraclemcp_db::DependencyUncertainty
+pub oraclemcp_db::DependencyUncertainty::object: core::option::Option<oraclemcp_db::DependentObject>
+pub oraclemcp_db::DependencyUncertainty::reason: oraclemcp_db::DependencyUncertaintyKind
+impl core::clone::Clone for oraclemcp_db::DependencyUncertainty
+pub fn oraclemcp_db::DependencyUncertainty::clone(&self) -> oraclemcp_db::DependencyUncertainty
+impl core::cmp::Eq for oraclemcp_db::DependencyUncertainty
+impl core::cmp::Ord for oraclemcp_db::DependencyUncertainty
+pub fn oraclemcp_db::DependencyUncertainty::cmp(&self, &oraclemcp_db::DependencyUncertainty) -> core::cmp::Ordering
+impl core::cmp::PartialEq for oraclemcp_db::DependencyUncertainty
+pub fn oraclemcp_db::DependencyUncertainty::eq(&self, &oraclemcp_db::DependencyUncertainty) -> bool
+impl core::cmp::PartialOrd for oraclemcp_db::DependencyUncertainty
+pub fn oraclemcp_db::DependencyUncertainty::partial_cmp(&self, &oraclemcp_db::DependencyUncertainty) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for oraclemcp_db::DependencyUncertainty
+pub fn oraclemcp_db::DependencyUncertainty::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::DependencyUncertainty
+impl serde_core::ser::Serialize for oraclemcp_db::DependencyUncertainty
+pub fn oraclemcp_db::DependencyUncertainty::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::DependencyUncertainty
+pub fn oraclemcp_db::DependencyUncertainty::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::DependencyUncertainty
+impl core::marker::Send for oraclemcp_db::DependencyUncertainty
+impl core::marker::Sync for oraclemcp_db::DependencyUncertainty
+impl core::marker::Unpin for oraclemcp_db::DependencyUncertainty
+impl core::marker::UnsafeUnpin for oraclemcp_db::DependencyUncertainty
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::DependencyUncertainty
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::DependencyUncertainty
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::DependencyUncertainty where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::DependencyUncertainty where T: 'a
+impl<Q, K> equivalent::Comparable<K> for oraclemcp_db::DependencyUncertainty where Q: core::cmp::Ord + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::DependencyUncertainty::compare(&self, &K) -> core::cmp::Ordering
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::DependencyUncertainty where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::DependencyUncertainty::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::DependencyUncertainty where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::DependencyUncertainty where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::DependencyUncertainty where U: core::convert::From<T>
+pub fn oraclemcp_db::DependencyUncertainty::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::DependencyUncertainty where U: core::convert::Into<T>
+pub type oraclemcp_db::DependencyUncertainty::Error = core::convert::Infallible
+pub fn oraclemcp_db::DependencyUncertainty::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::DependencyUncertainty where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::DependencyUncertainty::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::DependencyUncertainty::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::DependencyUncertainty where T: core::clone::Clone
+pub type oraclemcp_db::DependencyUncertainty::Owned = T
+pub fn oraclemcp_db::DependencyUncertainty::clone_into(&self, &mut T)
+pub fn oraclemcp_db::DependencyUncertainty::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::DependencyUncertainty
+impl<T> core::any::Any for oraclemcp_db::DependencyUncertainty where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::DependencyUncertainty::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::DependencyUncertainty where T: ?core::marker::Sized
+pub fn oraclemcp_db::DependencyUncertainty::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::DependencyUncertainty where T: ?core::marker::Sized
+pub fn oraclemcp_db::DependencyUncertainty::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::DependencyUncertainty where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::DependencyUncertainty::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::DependencyUncertainty
+pub fn oraclemcp_db::DependencyUncertainty::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::DependencyUncertainty
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::DependencyUncertainty where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::DependencyUncertainty
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::DependencyUncertainty
+impl<T> typenum::type_operators::Same for oraclemcp_db::DependencyUncertainty
+pub type oraclemcp_db::DependencyUncertainty::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DependencyUncertainty where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::DependencyUncertainty where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::DependencyUncertainty::vzip(self) -> V
+pub struct oraclemcp_db::DependentNode
+pub oraclemcp_db::DependentNode::depth: usize
+pub oraclemcp_db::DependentNode::last_ddl_time: core::option::Option<alloc::string::String>
+pub oraclemcp_db::DependentNode::object: oraclemcp_db::DependentObject
+pub oraclemcp_db::DependentNode::object_id: core::option::Option<u64>
+pub oraclemcp_db::DependentNode::source_hash: oraclemcp_db::DependencySourceHash
+pub oraclemcp_db::DependentNode::status: core::option::Option<alloc::string::String>
+impl core::clone::Clone for oraclemcp_db::DependentNode
+pub fn oraclemcp_db::DependentNode::clone(&self) -> oraclemcp_db::DependentNode
+impl core::cmp::Eq for oraclemcp_db::DependentNode
+impl core::cmp::PartialEq for oraclemcp_db::DependentNode
+pub fn oraclemcp_db::DependentNode::eq(&self, &oraclemcp_db::DependentNode) -> bool
+impl core::fmt::Debug for oraclemcp_db::DependentNode
+pub fn oraclemcp_db::DependentNode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::DependentNode
+impl serde_core::ser::Serialize for oraclemcp_db::DependentNode
+pub fn oraclemcp_db::DependentNode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::DependentNode
+pub fn oraclemcp_db::DependentNode::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::DependentNode
+impl core::marker::Send for oraclemcp_db::DependentNode
+impl core::marker::Sync for oraclemcp_db::DependentNode
+impl core::marker::Unpin for oraclemcp_db::DependentNode
+impl core::marker::UnsafeUnpin for oraclemcp_db::DependentNode
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::DependentNode
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::DependentNode
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::DependentNode where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::DependentNode where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::DependentNode where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::DependentNode::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::DependentNode where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::DependentNode where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::DependentNode where U: core::convert::From<T>
+pub fn oraclemcp_db::DependentNode::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::DependentNode where U: core::convert::Into<T>
+pub type oraclemcp_db::DependentNode::Error = core::convert::Infallible
+pub fn oraclemcp_db::DependentNode::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::DependentNode where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::DependentNode::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::DependentNode::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::DependentNode where T: core::clone::Clone
+pub type oraclemcp_db::DependentNode::Owned = T
+pub fn oraclemcp_db::DependentNode::clone_into(&self, &mut T)
+pub fn oraclemcp_db::DependentNode::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::DependentNode
+impl<T> core::any::Any for oraclemcp_db::DependentNode where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::DependentNode::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::DependentNode where T: ?core::marker::Sized
+pub fn oraclemcp_db::DependentNode::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::DependentNode where T: ?core::marker::Sized
+pub fn oraclemcp_db::DependentNode::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::DependentNode where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::DependentNode::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::DependentNode
+pub fn oraclemcp_db::DependentNode::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::DependentNode
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::DependentNode where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::DependentNode
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::DependentNode
+impl<T> typenum::type_operators::Same for oraclemcp_db::DependentNode
+pub type oraclemcp_db::DependentNode::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DependentNode where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::DependentNode where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::DependentNode::vzip(self) -> V
 pub struct oraclemcp_db::DependentObject
 pub oraclemcp_db::DependentObject::name: alloc::string::String
 pub oraclemcp_db::DependentObject::object_type: alloc::string::String
 pub oraclemcp_db::DependentObject::owner: alloc::string::String
-impl oraclemcp_db::DependentObject
-pub fn oraclemcp_db::DependentObject::is_invalidatable(&self) -> bool
 impl core::clone::Clone for oraclemcp_db::DependentObject
 pub fn oraclemcp_db::DependentObject::clone(&self) -> oraclemcp_db::DependentObject
 impl core::cmp::Eq for oraclemcp_db::DependentObject
+impl core::cmp::Ord for oraclemcp_db::DependentObject
+pub fn oraclemcp_db::DependentObject::cmp(&self, &oraclemcp_db::DependentObject) -> core::cmp::Ordering
 impl core::cmp::PartialEq for oraclemcp_db::DependentObject
 pub fn oraclemcp_db::DependentObject::eq(&self, &oraclemcp_db::DependentObject) -> bool
+impl core::cmp::PartialOrd for oraclemcp_db::DependentObject
+pub fn oraclemcp_db::DependentObject::partial_cmp(&self, &oraclemcp_db::DependentObject) -> core::option::Option<core::cmp::Ordering>
 impl core::fmt::Debug for oraclemcp_db::DependentObject
 pub fn oraclemcp_db::DependentObject::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oraclemcp_db::DependentObject
@@ -6733,6 +7195,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::DependentObject
 impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::DependentObject
 impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::DependentObject where T: 'a
 impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::DependentObject where T: 'a
+impl<Q, K> equivalent::Comparable<K> for oraclemcp_db::DependentObject where Q: core::cmp::Ord + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::DependentObject::compare(&self, &K) -> core::cmp::Ordering
 impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::DependentObject where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
 pub fn oraclemcp_db::DependentObject::equivalent(&self, &K) -> bool
 impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::DependentObject where ST: ?core::marker::Sized, DT: ?core::marker::Sized
@@ -6769,6 +7233,75 @@ pub type oraclemcp_db::DependentObject::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DependentObject where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::DependentObject where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::DependentObject::vzip(self) -> V
+pub struct oraclemcp_db::DependentsClosure
+pub oraclemcp_db::DependentsClosure::caps: oraclemcp_db::DepCaps
+pub oraclemcp_db::DependentsClosure::dependency_hash: [u8; 32]
+pub oraclemcp_db::DependentsClosure::edges: alloc::vec::Vec<oraclemcp_db::DependencyEdge>
+pub oraclemcp_db::DependentsClosure::nodes: alloc::vec::Vec<oraclemcp_db::DependentNode>
+pub oraclemcp_db::DependentsClosure::requested_roots: alloc::vec::Vec<oraclemcp_db::DependentObject>
+pub oraclemcp_db::DependentsClosure::roots: alloc::vec::Vec<oraclemcp_db::DependentNode>
+pub oraclemcp_db::DependentsClosure::truncated: bool
+pub oraclemcp_db::DependentsClosure::truncation: alloc::vec::Vec<oraclemcp_db::DependencyTruncation>
+pub oraclemcp_db::DependentsClosure::uncertainties: alloc::vec::Vec<oraclemcp_db::DependencyUncertainty>
+impl oraclemcp_db::DependentsClosure
+pub fn oraclemcp_db::DependentsClosure::query_count(&self) -> usize
+impl core::clone::Clone for oraclemcp_db::DependentsClosure
+pub fn oraclemcp_db::DependentsClosure::clone(&self) -> oraclemcp_db::DependentsClosure
+impl core::cmp::Eq for oraclemcp_db::DependentsClosure
+impl core::cmp::PartialEq for oraclemcp_db::DependentsClosure
+pub fn oraclemcp_db::DependentsClosure::eq(&self, &oraclemcp_db::DependentsClosure) -> bool
+impl core::fmt::Debug for oraclemcp_db::DependentsClosure
+pub fn oraclemcp_db::DependentsClosure::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::DependentsClosure
+impl serde_core::ser::Serialize for oraclemcp_db::DependentsClosure
+pub fn oraclemcp_db::DependentsClosure::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::DependentsClosure
+pub fn oraclemcp_db::DependentsClosure::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::DependentsClosure
+impl core::marker::Send for oraclemcp_db::DependentsClosure
+impl core::marker::Sync for oraclemcp_db::DependentsClosure
+impl core::marker::Unpin for oraclemcp_db::DependentsClosure
+impl core::marker::UnsafeUnpin for oraclemcp_db::DependentsClosure
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::DependentsClosure
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::DependentsClosure
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::DependentsClosure where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::DependentsClosure where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::DependentsClosure where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::DependentsClosure::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::DependentsClosure where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::DependentsClosure where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::DependentsClosure where U: core::convert::From<T>
+pub fn oraclemcp_db::DependentsClosure::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::DependentsClosure where U: core::convert::Into<T>
+pub type oraclemcp_db::DependentsClosure::Error = core::convert::Infallible
+pub fn oraclemcp_db::DependentsClosure::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::DependentsClosure where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::DependentsClosure::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::DependentsClosure::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::DependentsClosure where T: core::clone::Clone
+pub type oraclemcp_db::DependentsClosure::Owned = T
+pub fn oraclemcp_db::DependentsClosure::clone_into(&self, &mut T)
+pub fn oraclemcp_db::DependentsClosure::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::DependentsClosure
+impl<T> core::any::Any for oraclemcp_db::DependentsClosure where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::DependentsClosure::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::DependentsClosure where T: ?core::marker::Sized
+pub fn oraclemcp_db::DependentsClosure::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::DependentsClosure where T: ?core::marker::Sized
+pub fn oraclemcp_db::DependentsClosure::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::DependentsClosure where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::DependentsClosure::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::DependentsClosure
+pub fn oraclemcp_db::DependentsClosure::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::DependentsClosure
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::DependentsClosure where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::DependentsClosure
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::DependentsClosure
+impl<T> typenum::type_operators::Same for oraclemcp_db::DependentsClosure
+pub type oraclemcp_db::DependentsClosure::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DependentsClosure where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::DependentsClosure where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::DependentsClosure::vzip(self) -> V
 pub struct oraclemcp_db::DerivedVersionCapabilities
 pub oraclemcp_db::DerivedVersionCapabilities::supports_boolean: bool
 pub oraclemcp_db::DerivedVersionCapabilities::supports_json: bool
@@ -10800,7 +11333,7 @@ pub fn oraclemcp_db::QueryRowStream::columns(&self) -> &[alloc::string::String]
 pub async fn oraclemcp_db::QueryRowStream::next_row(&mut self, &asupersync::cx::cx::Cx) -> core::result::Result<core::option::Option<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::QueryRowStream::recover(self, &asupersync::cx::cx::Cx) -> core::result::Result<(), oraclemcp_db::DbError>
 impl core::marker::Freeze for oraclemcp_db::QueryRowStream
-impl !core::marker::Send for oraclemcp_db::QueryRowStream
+impl core::marker::Send for oraclemcp_db::QueryRowStream
 impl !core::marker::Sync for oraclemcp_db::QueryRowStream
 impl core::marker::Unpin for oraclemcp_db::QueryRowStream
 impl core::marker::UnsafeUnpin for oraclemcp_db::QueryRowStream
@@ -13773,7 +14306,6 @@ pub async fn oraclemcp_db::connect_oracle(&asupersync::cx::cx::Cx, oraclemcp_db:
 pub const fn oraclemcp_db::connection_backend_registry() -> &'static [oraclemcp_db::OracleBackendRegistration]
 pub fn oraclemcp_db::cursor_to_offset(core::option::Option<&str>) -> usize
 pub const fn oraclemcp_db::ddl_object_types() -> &'static [&'static str]
-pub fn oraclemcp_db::dependent_from_row(&oraclemcp_db::OracleRow) -> core::option::Option<oraclemcp_db::DependentObject>
 pub fn oraclemcp_db::derive_version_capabilities(u8) -> oraclemcp_db::DerivedVersionCapabilities
 pub async fn oraclemcp_db::describe_columns(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::describe_constraints(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
@@ -13841,7 +14373,7 @@ pub async fn oraclemcp_db::plscope_identifiers(&asupersync::cx::cx::Cx, &dyn ora
 pub async fn oraclemcp_db::plscope_statements(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::PlscopeStatement>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::preflight(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<oraclemcp_db::PreflightReport, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::primary_key_columns(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_db::DbError>
-pub async fn oraclemcp_db::probe_dependents(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, usize) -> oraclemcp_db::DependentsProbe
+pub async fn oraclemcp_db::probe_dependents_transitive(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &[oraclemcp_db::DependentObject], oraclemcp_db::DepCaps) -> core::result::Result<oraclemcp_db::DependentsClosure, oraclemcp_db::DependentsError>
 pub async fn oraclemcp_db::probe_editions_catalog(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> oraclemcp_db::EditionsCatalogCapabilities
 pub async fn oraclemcp_db::probe_editions_enabled(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &oraclemcp_db::EditionsCatalogCapabilities, &str, &str) -> oraclemcp_db::EditionsEnabledProof
 pub async fn oraclemcp_db::probe_native_redaction(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<oraclemcp_db::NativeRedactionAvailability, oraclemcp_db::DbError>

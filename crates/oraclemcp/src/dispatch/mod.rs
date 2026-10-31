@@ -54,24 +54,23 @@ use oraclemcp_core::{
 };
 use oraclemcp_db::{
     AsOf, CatalogInvalidation, CatalogQueryId, DbError, DbRequestQuota, DbmsOutput,
-    DependentObject, DependentsProbe, FlashbackRefusalKind, HardParseEffectClosureV1,
-    IncomparableMaskedColumn, MaskComparabilityBreak, OracleBackend, OracleBind,
-    OracleCatalogResolverCache, OracleConnection, OracleConnectionInfo, OracleRow,
-    PdbIdentityScope, PlanCostEstimate, PlanStatementId, PlanTableUnavailable, QuarantineOutcome,
-    QueryCaps, QueryDiffSource, QueryResponse, QueryRowStream, QueryRowStreamStart,
-    ReadQueryProvenance, ResultColumnMatch, ResultMaskingAction, ResultMaskingCertificate,
-    ResultMaskingDecisionAction, ResultMaskingDecisionSource, ResultMaskingPolicy,
-    ResultMaskingRule, ScnCapability, ScnProbeOutcome, SemanticSearchMetric, SerializeOptions,
-    SourceReadOptions, StructuredDecodeCaps, VerifiedPlanTable, compile_errors,
-    compile_object_statements, describe_columns, describe_constraints, describe_index,
-    describe_trigger, describe_view, diff_query_responses, execute_immediate_audit, explain_plan,
-    find_unused_declarations, get_ddl, get_source, get_sources_by_name,
-    incomparable_masked_columns, list_objects, list_objects_page, list_schema_projection_page,
-    list_schemas, observe_vpd_rls_for_relations_with_cached_bounded_probe, paginated_sql,
-    plan_cost_estimate, plscope_identifiers, plscope_statements, primary_key_columns,
-    probe_dependents, prove_hard_parse_effect_closure, read_pdb_identity_scope, read_query,
-    read_query_as_of, resolve_plan_table, run_catalog_query, search_objects,
-    search_objects_by_types, search_source, semantic_search_query,
+    FlashbackRefusalKind, HardParseEffectClosureV1, IncomparableMaskedColumn,
+    MaskComparabilityBreak, OracleBackend, OracleBind, OracleCatalogResolverCache,
+    OracleConnection, OracleConnectionInfo, OracleRow, PdbIdentityScope, PlanCostEstimate,
+    PlanStatementId, PlanTableUnavailable, QuarantineOutcome, QueryCaps, QueryDiffSource,
+    QueryResponse, QueryRowStream, QueryRowStreamStart, ReadQueryProvenance, ResultColumnMatch,
+    ResultMaskingAction, ResultMaskingCertificate, ResultMaskingDecisionAction,
+    ResultMaskingDecisionSource, ResultMaskingPolicy, ResultMaskingRule, ScnCapability,
+    ScnProbeOutcome, SemanticSearchMetric, SerializeOptions, SourceReadOptions,
+    StructuredDecodeCaps, VerifiedPlanTable, compile_errors, compile_object_statements,
+    describe_columns, describe_constraints, describe_index, describe_trigger, describe_view,
+    diff_query_responses, execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl,
+    get_source, get_sources_by_name, incomparable_masked_columns, list_objects, list_objects_page,
+    list_schema_projection_page, list_schemas,
+    observe_vpd_rls_for_relations_with_cached_bounded_probe, paginated_sql, plan_cost_estimate,
+    plscope_identifiers, plscope_statements, primary_key_columns, prove_hard_parse_effect_closure,
+    read_pdb_identity_scope, read_query, read_query_as_of, resolve_plan_table, run_catalog_query,
+    search_objects, search_objects_by_types, search_source, semantic_search_query,
     semantic_search_query_with_filter, semantic_search_text_query,
     semantic_search_text_query_with_filter, serialize_row,
 };
@@ -10955,58 +10954,6 @@ fn detected_object_json(hint: Option<&SourceObjectHint>) -> Value {
     .unwrap_or(Value::Null)
 }
 
-fn dependent_object_json(dep: &DependentObject) -> Value {
-    json!({
-        "owner": dep.owner,
-        "name": dep.name,
-        "type": dep.object_type,
-    })
-}
-
-/// The blast-radius block for a DDL preview: the direct (one-hop) dependents of
-/// the target object plus the invalidatable subset. Pure over a
-/// [`DependentsProbe`] so it is unit-testable offline. Returns the `(key,
-/// value)` pair to splice into the preview object — either the `dependents`
-/// block, or a `dependents_unavailable` reason when the dictionary probe
-/// degraded. Additive: never touches the classifier, gate, or ladder.
-fn dependents_preview_entry(probe: &DependentsProbe) -> (&'static str, Value) {
-    match probe {
-        DependentsProbe::Available { direct } => {
-            let objects: Vec<Value> = direct.iter().map(dependent_object_json).collect();
-            let at_risk: Vec<Value> = direct
-                .iter()
-                .filter(|dep| dep.is_invalidatable())
-                .map(dependent_object_json)
-                .collect();
-            (
-                "dependents",
-                json!({
-                    "count": direct.len(),
-                    "objects": objects,
-                    "at_risk_of_invalid": at_risk,
-                    "note": "direct dependents only (one hop from ALL_DEPENDENCIES); \
-                             transitive closure and dynamic-SQL (EXECUTE IMMEDIATE) references \
-                             are not shown, and objects outside this session's dictionary \
-                             visibility are omitted. at_risk_of_invalid is a best-effort static \
-                             estimate of which dependents a replace would mark INVALID.",
-                }),
-            )
-        }
-        DependentsProbe::Unavailable { reason } => {
-            ("dependents_unavailable", json!({ "reason": reason }))
-        }
-    }
-}
-
-/// Splice the dependents blast-radius block into a preview object in place.
-/// No-op if `preview` is not a JSON object (previews always are).
-fn merge_dependents_preview(preview: &mut Value, probe: &DependentsProbe) {
-    if let Value::Object(map) = preview {
-        let (key, value) = dependents_preview_entry(probe);
-        map.insert(key.to_owned(), value);
-    }
-}
-
 fn create_or_replace_next_actions(
     gate: &LevelDecision,
     source: &str,
@@ -11656,7 +11603,7 @@ async fn patch_source_inner(
             tool_name: tool_name.to_owned(),
             created_at: Instant::now(),
         });
-        let mut preview = json!({
+        let preview = json!({
             "applied": false,
             "preview": true,
             "owner": owner,
@@ -11691,18 +11638,6 @@ async fn patch_source_inner(
                 confirm.as_deref(),
             ),
         });
-        // Additive blast-radius enrichment: a read-only ALL_DEPENDENCIES probe of
-        // the object being patched. Observational only — never affects the gate,
-        // classifier, or ladder. Degrades in place if the probe cannot run.
-        let probe = probe_dependents(
-            cx,
-            conn,
-            &owner,
-            &object_name,
-            DEFAULT_DEPENDENTS_PREVIEW_MAX,
-        )
-        .await;
-        merge_dependents_preview(&mut preview, &probe);
         return Ok((preview, preview_entry));
     }
 
@@ -12030,7 +11965,7 @@ async fn create_or_replace_inner(
     };
 
     if !args.execute {
-        let mut preview = json!({
+        let preview = json!({
             "applied": false,
             "preview": true,
             "source_preview": source_preview_json(&source, 500),
@@ -12055,20 +11990,6 @@ async fn create_or_replace_inner(
                 confirm.as_deref(),
             ),
         });
-        // Additive blast-radius enrichment: a read-only ALL_DEPENDENCIES probe of
-        // the detected target. Observational only — it never affects the gate,
-        // classifier, or ladder above. Degrades in place if the probe cannot run.
-        if let Some(hint) = detected.as_ref() {
-            let probe = probe_dependents(
-                cx,
-                conn,
-                &hint.owner,
-                &hint.name,
-                DEFAULT_DEPENDENTS_PREVIEW_MAX,
-            )
-            .await;
-            merge_dependents_preview(&mut preview, &probe);
-        }
         return Ok(preview);
     }
 
@@ -13072,7 +12993,7 @@ impl OracleDispatcher {
                 | "oracle_create_or_replace"
                 | "oracle_patch_source"
         );
-        let before_generation = if can_carry_impact && preview_sql.is_some() {
+        let before_generation = if can_carry_impact {
             let state = self.state.lock(cx).await.map_err(|_| {
                 ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
             })?;
@@ -13130,9 +13051,7 @@ impl OracleDispatcher {
                 }
             }
         };
-        let Some(sql) = preview_sql else {
-            return attach_preview_impact(response);
-        };
+        let sql = preview_sql.unwrap_or_default();
         if !can_carry_impact || !impact::is_confirmation_preview(&response) {
             return attach_preview_impact(response);
         }
@@ -13154,7 +13073,7 @@ impl OracleDispatcher {
             // connection/profile that did not produce the preview.
             return attach_preview_impact(response);
         }
-        let Some(profile) = state
+        let profile = state
             .profile_generation
             .as_ref()
             .and_then(|lease| lease.config())
@@ -13163,12 +13082,7 @@ impl OracleDispatcher {
                     .profile_generation
                     .as_ref()
                     .and_then(|lease| config.profile(lease.profile()))
-            })
-        else {
-            // Config-free dispatcher constructors intentionally retain the
-            // status-complete `not_wired` impact payload used by unit tests.
-            return attach_preview_impact(response);
-        };
+            });
         let required_level = response
             .get("required_level")
             .cloned()
@@ -13183,26 +13097,40 @@ impl OracleDispatcher {
             timeout_seconds,
             CompletionPolicy::EnforceDeadlineAfterBody,
             || async {
-                impact::enrich_preview_impact(
-                    &mut response,
-                    cx,
-                    state.conn.as_ref(),
-                    &state.read_only_backstop,
-                    &self.quarantine,
-                    &state.catalog_cache,
-                    &sql,
-                    required_level,
-                    impact::is_dml_statement(&sql),
-                    commit,
-                    hold,
-                    sql.to_ascii_uppercase().contains("NEXTVAL"),
-                    current_level,
-                    profile.explain_plan_table.as_deref(),
-                    profile.max_query_cost,
-                    profile.read_only_standby(),
-                )
-                .await
-                .map_err(DbError::into_envelope)?;
+                if let Some(profile) = profile {
+                    impact::enrich_preview_impact(
+                        &mut response,
+                        cx,
+                        state.conn.as_ref(),
+                        &state.read_only_backstop,
+                        &self.quarantine,
+                        &state.catalog_cache,
+                        &sql,
+                        required_level,
+                        impact::is_dml_statement(&sql),
+                        commit,
+                        hold,
+                        sql.to_ascii_uppercase().contains("NEXTVAL"),
+                        current_level,
+                        profile.explain_plan_table.as_deref(),
+                        profile.max_query_cost,
+                        profile.read_only_standby(),
+                    )
+                    .await
+                    .map_err(DbError::into_envelope)?;
+                } else {
+                    // Dependency observation needs no profile cost settings.
+                    // Keep all other config-free fields at their seam status.
+                    impact::enrich_dependents_preview(
+                        &mut response,
+                        cx,
+                        state.conn.as_ref(),
+                        &sql,
+                        required_level,
+                        &self.quarantine,
+                    )
+                    .await;
+                }
                 Ok(response)
             },
         )

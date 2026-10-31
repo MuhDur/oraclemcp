@@ -3,7 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 
-use oraclemcp_db::{CatalogExtractReport, CatalogRowSetName, OracleRow};
+use oraclemcp_db::{
+    CatalogExtractReport, CatalogRowBatch, CatalogRowSetName, DependentObject, DependentsClosure,
+    OracleCell, OracleRow,
+};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use plsql_catalog::CatalogSnapshot;
 use plsql_cicd::{
@@ -848,6 +851,290 @@ pub(super) fn predict(
         report.schema_names.join(","),
     );
     Ok(prediction)
+}
+
+/// Approval projection of the same dictionary graph used by blast_radius.
+/// The changed root is being applied, so only dependent objects belong in the
+/// post-apply invalid set; the standalone tool's broader affected set is kept.
+#[derive(Serialize)]
+pub(super) struct PredictedInvalidSet {
+    pub mode: PredictMode,
+    pub objects: Vec<PredictedDependent>,
+    /// Unknown, remote or truncated observations never become a zero total.
+    pub count: Option<usize>,
+    pub uncertainties: Vec<Value>,
+}
+
+#[derive(Serialize)]
+pub(super) struct PredictedDependent {
+    pub owner: String,
+    pub name: String,
+    pub object_type: String,
+    pub depth: u32,
+}
+
+fn catalog_text_row(fields: Vec<(&str, Option<String>)>) -> OracleRow {
+    OracleRow {
+        columns: fields
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), OracleCell::new("VARCHAR2", value)))
+            .collect(),
+    }
+}
+
+pub(super) fn predict_invalid_set(
+    closure: &DependentsClosure,
+    mode: PredictMode,
+) -> Result<PredictedInvalidSet, ErrorEnvelope> {
+    let objects = closure
+        .roots
+        .iter()
+        .chain(&closure.nodes)
+        .map(|node| {
+            catalog_text_row(vec![
+                ("OWNER", Some(node.object.owner.clone())),
+                ("OBJECT_NAME", Some(node.object.name.clone())),
+                ("OBJECT_TYPE", Some(node.object.object_type.clone())),
+                ("OBJECT_ID", node.object_id.map(|id| id.to_string())),
+                ("STATUS", node.status.clone()),
+            ])
+        })
+        .collect();
+    // The snapshot normalizer requires non-null target identities. Preserve
+    // incomplete rows in the public closure and its uncertainty list while
+    // projecting only actual identities into the existing lineage graph.
+    let dependencies = closure
+        .edges
+        .iter()
+        .filter_map(|edge| {
+            let target = edge.referenced.as_ref()?;
+            Some(catalog_text_row(vec![
+                ("OWNER", Some(edge.dependent.owner.clone())),
+                ("NAME", Some(edge.dependent.name.clone())),
+                ("TYPE", Some(edge.dependent.object_type.clone())),
+                ("REFERENCED_OWNER", Some(target.owner.clone())),
+                ("REFERENCED_NAME", Some(target.name.clone())),
+                ("REFERENCED_TYPE", Some(target.object_type.clone())),
+                ("REFERENCED_LINK_NAME", edge.referenced_link_name.clone()),
+                ("DEPENDENCY_TYPE", edge.dependency_type.clone()),
+            ]))
+        })
+        .collect();
+    let report = CatalogExtractReport {
+        schema_names: closure
+            .requested_roots
+            .iter()
+            .chain(closure.nodes.iter().map(|node| &node.object))
+            .map(|object| object.owner.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        batches: vec![
+            CatalogRowBatch {
+                row_set: CatalogRowSetName::Objects,
+                rows: objects,
+            },
+            CatalogRowBatch {
+                row_set: CatalogRowSetName::Dependencies,
+                rows: dependencies,
+            },
+        ],
+        ..CatalogExtractReport::default()
+    };
+    let mut snapshot = super::snapshot_from_report(&report)?;
+    let mut changeset = ChangeSet::default();
+    for object in &closure.requested_roots {
+        let owner = snapshot.interner.intern(&object.owner).ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorClass::Internal,
+                "dependency owner could not be interned",
+            )
+        })?;
+        let name = snapshot.interner.intern(&object.name).ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorClass::Internal,
+                "dependency name could not be interned",
+            )
+        })?;
+        let kind = match object.object_type.as_str() {
+            "PACKAGE" => ChangedObjectKind::PackageSpec,
+            "PACKAGE BODY" => ChangedObjectKind::PackageBody,
+            "PROCEDURE" | "FUNCTION" => ChangedObjectKind::StandaloneRoutineSignature,
+            "TABLE" => ChangedObjectKind::TableDestructiveDdl,
+            "VIEW" => ChangedObjectKind::ViewDefinitionChange,
+            "TYPE" => ChangedObjectKind::TypeEvolution,
+            "SYNONYM" => ChangedObjectKind::SynonymRetargeting,
+            "MATERIALIZED VIEW" => ChangedObjectKind::MaterializedViewRefreshAffecting,
+            "TRIGGER" => ChangedObjectKind::TriggerChange,
+            "INDEX" => ChangedObjectKind::IndexChange,
+            "SEQUENCE" => ChangedObjectKind::SequenceChange,
+            kind => ChangedObjectKind::OtherKnownKind {
+                object_type: kind.to_owned(),
+            },
+        };
+        changeset.objects.push(plsql_cicd::ChangedObject {
+            owner: SchemaName::from(owner),
+            name: ObjectName::from(name),
+            kind,
+            new_hash: None,
+            previous_hash: None,
+            file_paths: Vec::new(),
+            uncertainties: Vec::new(),
+        });
+    }
+    // This is the sole dependency projection and lineage predictor. In
+    // particular, no independent invalidatable-type heuristic lives here.
+    let prediction = predict(&snapshot, &report, &changeset, mode)?;
+    let requested: BTreeSet<_> = closure.requested_roots.iter().cloned().collect();
+    let observed: BTreeSet<_> = closure
+        .nodes
+        .iter()
+        .map(|node| node.object.clone())
+        .collect();
+    let mut invalid = BTreeMap::new();
+    for item in &prediction.predicted_invalidations {
+        let (Some(owner), Some(name)) = (
+            snapshot.interner.resolve(item.owner.symbol()),
+            snapshot.interner.resolve(item.name.symbol()),
+        ) else {
+            continue;
+        };
+        let key = DependentObject {
+            owner: owner.to_owned(),
+            name: name.to_owned(),
+            object_type: item.object_type.clone(),
+        };
+        if requested.contains(&key) || !observed.contains(&key) {
+            continue;
+        }
+        invalid
+            .entry(key)
+            .and_modify(|depth: &mut u32| *depth = (*depth).min(item.distance))
+            .or_insert(item.distance);
+    }
+    let mut uncertainties = closure
+        .uncertainties
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "source":"catalog", "reason":item.reason, "object":item.object
+            })
+        })
+        .collect::<Vec<_>>();
+    uncertainties.extend(closure.edges.iter().filter(|edge|edge.referenced.is_none()).map(|edge|
+        serde_json::json!({"source":"catalog","reason":"unresolved_target","object":edge.dependent})));
+    uncertainties.extend(prediction.uncertainties.iter().map(|item| {
+        serde_json::json!({
+            "source":"lineage", "reason":item.reason, "description":item.description,
+            "owner":item.affected_owner.and_then(|owner| snapshot.interner.resolve(owner.symbol())),
+            "name":item.affected_name.and_then(|name| snapshot.interner.resolve(name.symbol())),
+        })
+    }));
+    let count = (!closure.truncated && uncertainties.is_empty()).then_some(invalid.len());
+    Ok(PredictedInvalidSet {
+        mode,
+        objects: invalid
+            .into_iter()
+            .map(|(object, depth)| PredictedDependent {
+                owner: object.owner,
+                name: object.name,
+                object_type: object.object_type,
+                depth,
+            })
+            .collect(),
+        count,
+        uncertainties,
+    })
+}
+
+#[cfg(test)]
+mod approval_prediction_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn fixture_closure() -> DependentsClosure {
+        let object = |name: &str, kind: &str| json!({"owner":"APP","name":name,"object_type":kind});
+        let node = |name: &str, kind: &str, id: u64, depth: usize| {
+            json!({
+                "object":object(name,kind),"object_id":id,"depth":depth,"status":"VALID",
+                "last_ddl_time":"2026-10-31T00:00:00",
+                "source_hash":{"status":"computed","sha256":vec![0_u8;32]},
+            })
+        };
+        let edge = |from: &str, from_type: &str, to: &str, to_type: &str, id: u64| {
+            json!({
+                "dependent":object(from,from_type),"referenced":object(to,to_type),
+                "referenced_object_id":id,"referenced_link_name":null,"dependency_type":"HARD",
+            })
+        };
+        serde_json::from_value(json!({
+            "requested_roots":[object("PKG","PACKAGE")],
+            "roots":[node("PKG","PACKAGE",1,0)],
+            "nodes":[node("PKG","PACKAGE BODY",2,1),node("P_DEP","PROCEDURE",3,1),node("P_DEP2","PROCEDURE",4,2)],
+            "edges":[edge("PKG","PACKAGE BODY","PKG","PACKAGE",1),
+                edge("P_DEP","PROCEDURE","PKG","PACKAGE",1),edge("P_DEP2","PROCEDURE","P_DEP","PROCEDURE",3)],
+            "caps":{"max_depth":10,"max_count":1000},"truncated":false,"truncation":[],
+            "uncertainties":[],"dependency_hash":vec![0_u8;32],
+        })).unwrap()
+    }
+
+    #[test]
+    fn predict_invalid_set_package_spec_change() {
+        let prediction =
+            predict_invalid_set(&fixture_closure(), PredictMode::LiveSnapshot).unwrap();
+        assert_eq!(prediction.count, Some(3));
+        assert!(prediction.uncertainties.is_empty());
+        let set = prediction
+            .objects
+            .iter()
+            .map(|object| {
+                (
+                    object.name.as_str(),
+                    object.object_type.as_str(),
+                    object.depth,
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            set,
+            BTreeSet::from([
+                ("PKG", "PACKAGE BODY", 1),
+                ("P_DEP", "PROCEDURE", 1),
+                ("P_DEP2", "PROCEDURE", 2)
+            ])
+        );
+    }
+
+    #[test]
+    fn predict_invalid_set_remote_only_is_unknown_not_zero() {
+        let mut closure = fixture_closure();
+        closure.edges.truncate(1);
+        closure.edges[0].referenced_link_name = Some("REMOTE_DB".into());
+        let prediction = predict_invalid_set(&closure, PredictMode::LiveSnapshot).unwrap();
+        assert!(prediction.objects.is_empty());
+        assert_eq!(prediction.count, None);
+        assert!(!prediction.uncertainties.is_empty());
+    }
+
+    #[test]
+    fn predict_invalid_set_unresolved_and_truncated_totals_stay_unknown() {
+        let mut closure = fixture_closure();
+        closure.edges[0].referenced = None;
+        let unresolved = predict_invalid_set(&closure, PredictMode::LiveSnapshot).unwrap();
+        assert_eq!(unresolved.count, None);
+        assert!(!unresolved.uncertainties.is_empty());
+        let mut closure = fixture_closure();
+        closure.truncated = true;
+        closure
+            .truncation
+            .push(oraclemcp_db::DependencyTruncation::Depth);
+        assert_eq!(
+            predict_invalid_set(&closure, PredictMode::LiveSnapshot)
+                .unwrap()
+                .count,
+            None
+        );
+    }
 }
 
 fn change_matches_type(change: &ChangedObjectKind, kind: &str) -> bool {

@@ -265,6 +265,50 @@ fn impact_attached_to_every_minting_preview() {
             "locks",
             "reversibility",
         ] {
+            if field == "dependents"
+                && matches!(
+                    canonical_tool_name(&tool.name),
+                    "oracle_preview_sql"
+                        | "oracle_compile_object"
+                        | "oracle_create_or_replace"
+                        | "oracle_patch_source"
+                )
+            {
+                if result["required_level"].as_str() == Some("READ_WRITE") {
+                    assert_eq!(
+                        result["impact"][field],
+                        json!({"status":"not_applicable","reason":"no_effect"}),
+                        "{}",
+                        tool.name
+                    );
+                } else if cfg!(feature = "plsql-intelligence") {
+                    assert_eq!(
+                        result["impact"][field]["status"], "estimated",
+                        "{}",
+                        tool.name
+                    );
+                    assert!(
+                        result["impact"][field]["value"]["predicted_invalid_count"].is_null(),
+                        "mock has no resolved dictionary root"
+                    );
+                    assert!(
+                        !result["impact"][field]["value"]["uncertainties"]
+                            .as_array()
+                            .unwrap()
+                            .is_empty(),
+                        "{} must expose the missing mock catalog",
+                        tool.name
+                    );
+                } else {
+                    assert_eq!(
+                        result["impact"][field],
+                        json!({"status":"unavailable","reason":"engine_not_wired"}),
+                        "{}",
+                        tool.name
+                    );
+                }
+                continue;
+            }
             assert_eq!(
                 result["impact"][field]["status"], "unavailable",
                 "{} {field}",
@@ -16136,87 +16180,231 @@ mod sec1_stored_verdict_never_authorizes {
     }
 }
 
-/// Offline unit tests for the additive DDL blast-radius (dependents) block
-/// assembled into the create_or_replace / patch_source previews (bead K11).
+/// In-process approval wiring; Oracle invalidation behavior is tested live.
+#[cfg(feature = "plsql-intelligence")]
 mod dependents_preview {
     use super::*;
 
-    fn dep(owner: &str, name: &str, ty: &str) -> DependentObject {
-        DependentObject {
-            owner: owner.to_owned(),
-            name: name.to_owned(),
-            object_type: ty.to_owned(),
+    struct DependentsConnection {
+        denied: bool,
+        remote: bool,
+        lost: bool,
+    }
+
+    fn row(fields: &[(&str, &str)]) -> OracleRow {
+        OracleRow {
+            columns: fields
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        (*key).into(),
+                        OracleCell::new("VARCHAR2", Some((*value).into())),
+                    )
+                })
+                .collect(),
         }
     }
 
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for DependentsConnection {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+        async fn close(&self, _: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn ping(&self, _: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn describe(&self, _: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo {
+                backend: Some(OracleBackend::RustOracle),
+                current_schema: Some("APP".into()),
+                session_user: Some("APP".into()),
+                ..OracleConnectionInfo::default()
+            })
+        }
+        async fn execute(&self, _: &Cx, _: &str, _: &[OracleBind]) -> Result<u64, DbError> {
+            panic!("preview executed SQL")
+        }
+        async fn commit(&self, _: &Cx) -> Result<(), DbError> {
+            panic!("preview committed")
+        }
+        async fn rollback(&self, _: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn query_rows(
+            &self,
+            _: &Cx,
+            sql: &str,
+            binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            if sql != CatalogQueryId::DependentsTransitive.spec().sql {
+                return Ok(Vec::new());
+            }
+            if self.lost {
+                return Err(DbError::ConnectionLost(
+                    "dependency read lost the wire".into(),
+                ));
+            }
+            if self.denied {
+                return Err(DbError::Query("ORA-01031: insufficient privileges".into()));
+            }
+            let OracleBind::String(json) = &binds[0] else {
+                panic!("frontier JSON")
+            };
+            let frontier: Value = serde_json::from_str(json).unwrap();
+            let child = frontier[0]["id"] == json!(2);
+            let mut rows = Vec::new();
+            for (name, kind, id) in [("PKG", "PACKAGE", "1"), ("P_DEP", "PROCEDURE", "2")] {
+                if child && id == "1" {
+                    continue;
+                }
+                rows.push(row(&[
+                    ("ROW_KIND", "object"),
+                    ("OWNER", "APP"),
+                    ("NAME", name),
+                    ("TYPE", kind),
+                    ("OBJECT_ID", id),
+                    ("STATUS", "VALID"),
+                    ("LAST_DDL_TIME", "2026-10-31T00:00:00"),
+                ]));
+                rows.push(row(&[
+                    ("ROW_KIND", "source"),
+                    ("OWNER", "APP"),
+                    ("NAME", name),
+                    ("TYPE", kind),
+                    ("OBJECT_ID", id),
+                    ("LINE", "1"),
+                    ("TEXT", "source"),
+                    ("SOURCE_LINES", "1"),
+                    ("SOURCE_LENGTH", "6"),
+                ]));
+            }
+            let mut edge = row(&[
+                ("ROW_KIND", "dependency"),
+                ("OWNER", "APP"),
+                ("NAME", "P_DEP"),
+                ("TYPE", "PROCEDURE"),
+                ("REFERENCED_OWNER", "APP"),
+                ("REFERENCED_NAME", "PKG"),
+                ("REFERENCED_TYPE", "PACKAGE"),
+                ("DEPENDENCY_TYPE", "HARD"),
+            ]);
+            edge.columns.push((
+                "REFERENCED_LINK_NAME".into(),
+                OracleCell::new("VARCHAR2", self.remote.then(|| "REMOTE_DB".into())),
+            ));
+            edge.columns.push((
+                "REFERENCED_OBJECT_ID".into(),
+                OracleCell::new("NUMBER", (!self.remote).then(|| "1".into())),
+            ));
+            rows.push(edge);
+            Ok(rows)
+        }
+    }
+
+    fn dispatcher(denied: bool, remote: bool) -> OracleDispatcher {
+        OracleDispatcher::new_with_profile_level(
+            Box::new(DependentsConnection {
+                denied,
+                remote,
+                lost: false,
+            }),
+            Some("dev".into()),
+            ddl_level(),
+        )
+    }
+
     #[test]
-    fn available_block_lists_objects_and_flags_invalidatable_subset() {
-        let probe = DependentsProbe::Available {
-            direct: vec![
-                dep("APP", "V_ORDERS", "VIEW"),
-                dep("APP", "P_REPORT", "PROCEDURE"),
-                dep("APP", "T_AUDIT", "TABLE"),
-            ],
-        };
-        let (key, block) = dependents_preview_entry(&probe);
-        assert_eq!(key, "dependents");
-        assert_eq!(block["count"], json!(3));
-        assert_eq!(block["objects"].as_array().unwrap().len(), 3);
-        // TABLE is not invalidatable; the view + proc are.
-        let at_risk = block["at_risk_of_invalid"].as_array().unwrap();
-        assert_eq!(at_risk.len(), 2);
-        let names: Vec<&str> = at_risk
-            .iter()
-            .map(|o| o["name"].as_str().unwrap())
-            .collect();
-        assert!(names.contains(&"V_ORDERS") && names.contains(&"P_REPORT"));
-        assert!(!names.contains(&"T_AUDIT"));
-        // Object shape uses the "type" key.
-        assert_eq!(block["objects"][0]["type"], json!("VIEW"));
+    fn compile_object_preview_includes_dependents() {
+        let preview = dispatcher(false, false)
+            .dispatch(
+                "oracle_compile_object",
+                json!({
+                    "owner":"APP","name":"PKG","object_type":"PACKAGE"
+                }),
+            )
+            .expect("compile preview");
+        let value = &preview["impact"]["dependents"]["value"];
+        assert_eq!(value["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(value["nodes"][0]["object"]["name"], "P_DEP");
+        assert_eq!(value["nodes"][0]["depth"], 1);
+        assert_eq!(value["predicted_invalid_set"][0]["name"], "P_DEP");
+        assert_eq!(value["predicted_invalid_count"], 1);
+        assert_eq!(value["prediction_mode"], "LiveSnapshot");
+        assert_eq!(value["truncated"], false);
+        assert!(preview["confirmation"]["confirm"].is_string());
+    }
+
+    #[test]
+    fn dependents_no_privilege_unavailable_preserves_preview_confirmation() {
+        let dispatcher = dispatcher(true, false);
+        let preview = dispatcher
+            .dispatch(
+                "oracle_compile_object",
+                json!({
+                    "owner":"APP","name":"PKG","object_type":"PACKAGE"
+                }),
+            )
+            .expect("R36: unavailable observation cannot fail preview");
+        assert_eq!(preview["impact"]["dependents"]["status"], "unavailable");
+        assert_eq!(preview["impact"]["dependents"]["reason"], "no_privilege");
+        assert_eq!(preview["gate_decision"], "allow");
+        assert!(preview["confirmation"]["confirm"].is_string());
+        assert_eq!(preview["preview"], true);
+        assert!(dispatcher.quarantine.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn dependents_remote_uncertainty_never_becomes_zero() {
+        let preview = dispatcher(false, true)
+            .dispatch(
+                "oracle_compile_object",
+                json!({
+                    "owner":"APP","name":"PKG","object_type":"PACKAGE"
+                }),
+            )
+            .unwrap();
+        let value = &preview["impact"]["dependents"]["value"];
+        assert!(value["predicted_invalid_count"].is_null());
+        assert!(!value["uncertainties"].as_array().unwrap().is_empty());
         assert!(
-            block["note"]
-                .as_str()
-                .unwrap()
-                .contains("direct dependents only")
+            value["uncertainties"]
+                .to_string()
+                .contains("remote_dependency")
         );
+        assert!(preview["confirmation"]["confirm"].is_string());
     }
 
     #[test]
-    fn unavailable_block_carries_reason_and_omits_dependents() {
-        let probe = DependentsProbe::Unavailable {
-            reason: "ALL_DEPENDENCIES not accessible: ORA-00942".to_owned(),
-        };
-        let (key, block) = dependents_preview_entry(&probe);
-        assert_eq!(key, "dependents_unavailable");
-        assert!(block["reason"].as_str().unwrap().contains("ORA-00942"));
-    }
-
-    #[test]
-    fn merge_splices_block_into_preview_without_disturbing_existing_keys() {
-        let mut preview = json!({ "applied": false, "preview": true });
-        let probe = DependentsProbe::Available {
-            direct: vec![dep("APP", "PKG_BODY", "PACKAGE BODY")],
-        };
-        merge_dependents_preview(&mut preview, &probe);
-        assert_eq!(preview["applied"], json!(false));
-        assert_eq!(preview["preview"], json!(true));
-        assert_eq!(preview["dependents"]["count"], json!(1));
+    fn dependents_connection_loss_preserves_preview_and_quarantines_wire() {
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(DependentsConnection {
+                denied: false,
+                remote: false,
+                lost: true,
+            }),
+            Some("dev".into()),
+            ddl_level(),
+        );
+        let preview = dispatcher
+            .dispatch(
+                "oracle_compile_object",
+                json!({
+                    "owner":"APP","name":"PKG","object_type":"PACKAGE"
+                }),
+            )
+            .expect("advisory catalog failure preserves preview");
         assert_eq!(
-            preview["dependents"]["at_risk_of_invalid"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
+            preview["impact"]["dependents"]["reason"],
+            "catalog_unavailable"
         );
-    }
-
-    #[test]
-    fn empty_available_block_has_zero_count() {
-        let probe = DependentsProbe::Available { direct: vec![] };
-        let (_key, block) = dependents_preview_entry(&probe);
-        assert_eq!(block["count"], json!(0));
-        assert_eq!(block["objects"].as_array().unwrap().len(), 0);
-        assert_eq!(block["at_risk_of_invalid"].as_array().unwrap().len(), 0);
+        assert!(preview["confirmation"]["confirm"].is_string());
+        assert!(
+            dispatcher.quarantine.lock().unwrap().is_some(),
+            "failed wire cannot be reused"
+        );
     }
 }
 

@@ -36,12 +36,13 @@ use oraclemcp_db::OfficialOracleConnection;
 use oraclemcp_db::error_envelope::ErrorClass;
 use oraclemcp_db::{
     AuthAdapter, CatalogExtractRequest, CatalogRowSetName, CqnNotificationOutcome, DbError,
-    DependentsProbe, DrcpConfig, NativeRedactionAvailability, OracleBind, OracleConnectOptions,
-    OracleConnection, OracleIdentifier, OracleSessionIdentity, PlanStatementId, QueryCaps,
-    RustOracleConnection, SchemaObject, SchemaObjectType, SchemaSnapshot, SearchDetailLevel,
-    SessionPurity, compare_schemas, explain_plan, extract_catalog_rowsets, migration_plan,
-    orient_fks, orient_hot_objects, orient_recent_ddl, orient_schema, plan_cost_estimate,
-    probe_dependents, resolve_plan_table, search_objects,
+    DepCaps, DependentObject, DependentsError, DrcpConfig, NativeRedactionAvailability, OracleBind,
+    OracleConnectOptions, OracleConnection, OracleIdentifier, OracleSessionIdentity,
+    PlanStatementId, QueryCaps, RustOracleConnection, SchemaObject, SchemaObjectType,
+    SchemaSnapshot, SearchDetailLevel, SessionPurity, compare_schemas, explain_plan,
+    extract_catalog_rowsets, migration_plan, orient_fks, orient_hot_objects, orient_recent_ddl,
+    orient_schema, plan_cost_estimate, probe_dependents_transitive, resolve_plan_table,
+    search_objects,
 };
 use oraclemcp_db::{OraclePool, PoolSettings, SerializeOptions, serialize_row};
 use oraclemcp_error::OracleRetryAction;
@@ -4019,16 +4020,15 @@ fn live_explain_plan_cost_estimate_orders_full_scan_above_pk_lookup() {
     });
 }
 
-/// K11 blast-radius probe: a package with a dependent view + procedure. The
-/// direct-dependents probe (which backs the DDL preview `dependents` block)
-/// must surface both dependents and flag them invalidatable. Self-skips without
-/// a reachable Oracle; cleans up its throwaway objects on every path.
+/// Real bounded closure for a package, dependent view and procedure. Accounts
+/// without dictionary visibility receive the explicit NoPrivilege outcome;
+/// the privileged FREE23 approval fixture separately requires full prediction.
 #[test]
-fn live_probe_dependents_flags_dependent_view_and_proc_at_risk() {
+fn live_probe_dependents_transitive_lists_view_and_proc() {
     run_with_cx(|cx| async move {
         let Some(conn) = connect_or_skip(
             &cx,
-            "live_probe_dependents_flags_dependent_view_and_proc_at_risk",
+            "live_probe_dependents_transitive_lists_view_and_proc",
             test_opts(),
         )
         .await
@@ -4078,11 +4078,20 @@ fn live_probe_dependents_flags_dependent_view_and_proc_at_risk() {
         }
         conn.commit(&cx).await.ok();
 
-        // Probe the package's direct dependents (this is what the DDL preview's
-        // `dependents` block runs when previewing a create_or_replace / patch of
-        // the package body).
         let probe = if build_ok {
-            Some(probe_dependents(&cx, &conn, &owner, pkg, 200).await)
+            Some(
+                probe_dependents_transitive(
+                    &cx,
+                    &conn,
+                    &[DependentObject {
+                        owner: owner.clone(),
+                        name: pkg.into(),
+                        object_type: "PACKAGE".into(),
+                    }],
+                    DepCaps::default(),
+                )
+                .await,
+            )
         } else {
             None
         };
@@ -4102,30 +4111,28 @@ fn live_probe_dependents_flags_dependent_view_and_proc_at_risk() {
         }
 
         match probe.expect("probe ran") {
-            DependentsProbe::Available { direct } => {
-                let view_dep = direct
+            Ok(closure) => {
+                assert!(!closure.truncated, "{closure:?}");
+                let view_dep = closure
+                    .nodes
                     .iter()
-                    .find(|d| d.name.eq_ignore_ascii_case(view))
-                    .unwrap_or_else(|| panic!("dependent view {view} not surfaced: {direct:?}"));
-                assert_eq!(view_dep.object_type.to_ascii_uppercase(), "VIEW");
-                assert!(
-                    view_dep.is_invalidatable(),
-                    "dependent view must be flagged at_risk_of_invalid"
-                );
+                    .find(|d| d.object.name.eq_ignore_ascii_case(view))
+                    .unwrap_or_else(|| panic!("dependent view {view} not surfaced: {closure:?}"));
+                assert_eq!(view_dep.object.object_type, "VIEW");
+                assert_eq!(view_dep.depth, 1);
 
-                let proc_dep = direct
+                let proc_dep = closure
+                    .nodes
                     .iter()
-                    .find(|d| d.name.eq_ignore_ascii_case(proc))
-                    .unwrap_or_else(|| panic!("dependent proc {proc} not surfaced: {direct:?}"));
-                assert_eq!(proc_dep.object_type.to_ascii_uppercase(), "PROCEDURE");
-                assert!(
-                    proc_dep.is_invalidatable(),
-                    "dependent procedure must be flagged at_risk_of_invalid"
-                );
+                    .find(|d| d.object.name.eq_ignore_ascii_case(proc))
+                    .unwrap_or_else(|| panic!("dependent proc {proc} not surfaced: {closure:?}"));
+                assert_eq!(proc_dep.object.object_type, "PROCEDURE");
+                assert_eq!(proc_dep.depth, 1);
             }
-            DependentsProbe::Unavailable { reason } => {
-                panic!("ALL_DEPENDENCIES probe should be available for the test user: {reason}");
+            Err(DependentsError::NoPrivilege) => {
+                eprintln!("[live] dependency dictionary visibility unavailable(no_privilege)")
             }
+            Err(error) => panic!("bounded dependency probe failed: {error}"),
         }
     });
 }

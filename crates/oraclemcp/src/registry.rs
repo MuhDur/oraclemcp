@@ -909,7 +909,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_preview_sql",
             ToolTier::FoundationStatic,
-            "Classify SQL without executing it and bind the exact SQL, typed binds, commit/hold mode, output caps and timeout into any confirmation. Changing one requires a new preview.",
+            "Classify SQL without executing it and bind the exact SQL, typed binds, commit/hold mode, output caps and timeout into any confirmation. Changing one requires a new preview. Admitted DDL previews include dependency closure and predicted invalidations, bounded to depth 10 and 1000 dependents; truncation and uncertainty are explicit, and unavailable observations do not change approval.",
         )
         .with_input_schema(object_schema(preview_sql_properties(), &["sql"])),
     );
@@ -1045,7 +1045,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_compile_object",
             ToolTier::FoundationLiveDb,
-            "Preview or compile one PL/SQL/view object through the active DDL profile gate; preview is the default and execution requires the returned confirmation token.",
+            "Preview or compile one PL/SQL/view object through the active DDL profile gate; preview is the default and execution requires the returned confirmation token. Preview impact includes transitive dependencies and predicted invalidations, capped at depth 10 and 1000 dependents, with explicit truncation and uncertainty.",
         )
         .with_input_schema(object_schema(
             props_with(
@@ -1073,7 +1073,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_create_or_replace",
             ToolTier::FoundationLiveDb,
-            "Preview or apply one CREATE OR REPLACE statement through the classifier and active DDL profile gate.",
+            "Preview or apply one CREATE OR REPLACE statement through the classifier and active DDL profile gate. Preview impact includes transitive dependencies and predicted invalidations, capped at depth 10 and 1000 dependents, with explicit truncation and uncertainty.",
         )
         .with_input_schema(object_schema(
             props_with(
@@ -1098,7 +1098,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_patch_source",
             ToolTier::FoundationLiveDb,
-            "Preview or apply an exact old_text to new_text replacement against one stored source object; preview refetches the current source and execute uses the existing DDL confirmation gate.",
+            "Preview or apply an exact old_text to new_text replacement against one stored source object; preview refetches the current source and execute uses the existing DDL confirmation gate. Preview impact includes transitive dependencies and predicted invalidations, capped at depth 10 and 1000 dependents, with explicit truncation and uncertainty.",
         )
         .with_input_schema(object_schema(
             props_with(

@@ -47,6 +47,19 @@ mod catalog_impact;
 mod sast_source;
 mod source_limits;
 
+/// Internal approval consumer of the same catalog projection as blast_radius.
+pub(crate) fn predict_invalid_set(
+    closure: &oraclemcp_db::DependentsClosure,
+) -> Result<Value, ErrorEnvelope> {
+    let prediction = catalog_impact::predict_invalid_set(closure, PredictMode::LiveSnapshot)?;
+    serde_json::to_value(prediction).map_err(|_| {
+        ErrorEnvelope::new(
+            ErrorClass::Internal,
+            "dependency prediction serialization failed",
+        )
+    })
+}
+
 pub const TOOL_NAMES: [&str; 9] = [
     "oracle_plsql_parse",
     "oracle_plsql_analyze",

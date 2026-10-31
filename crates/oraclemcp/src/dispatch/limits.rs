@@ -19,9 +19,6 @@ pub(super) const DEFAULT_METADATA_MAX_ROWS: usize = 200;
 pub(super) const MAX_METADATA_MAX_ROWS: usize = 5_000;
 /// Cap on before/after snippets in `oracle_patch_source` previews.
 pub(super) const DEFAULT_PATCH_PREVIEW_CHARS: usize = 1_000;
-/// Cap on direct dependents listed in a DDL preview's blast-radius block. The
-/// probe is observational enrichment, so it is bounded rather than paginated.
-pub(super) const DEFAULT_DEPENDENTS_PREVIEW_MAX: usize = 200;
 /// Default cap on `oracle_schema_inspect` result rows when the caller omits it.
 pub(super) const DEFAULT_SCHEMA_INSPECT_MAX_ROWS: usize = 500;
 /// Hard cap on `oracle_schema_inspect` for a single call.

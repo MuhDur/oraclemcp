@@ -398,8 +398,8 @@ pub enum CatalogQueryId {
     OrientForeignKeysPage,
     /// Bounded table-change activity page for orient.
     OrientHotObjectsPage,
-    /// Direct dependents of one object.
-    Dependents,
+    /// One bounded frontier of incoming dependencies, source facts and visibility gaps.
+    DependentsTransitive,
     /// Metadata for one index.
     IndexMetadata,
     /// Ordered columns of one index.
@@ -672,7 +672,7 @@ impl CatalogQueryId {
         Self::ListSchemas,
         Self::OrientForeignKeysPage,
         Self::OrientHotObjectsPage,
-        Self::Dependents,
+        Self::DependentsTransitive,
         Self::IndexMetadata,
         Self::IndexColumns,
         Self::IndexExpressions,
@@ -785,6 +785,7 @@ impl CatalogQueryId {
         const I: BindSchema = BindSchema(&[Integer]);
         const TT: BindSchema = BindSchema(&[Text, Text]);
         const TI: BindSchema = BindSchema(&[Text, Integer]);
+        const TII: BindSchema = BindSchema(&[Text, Integer, Integer]);
         const TTI: BindSchema = BindSchema(&[Text, Text, Integer]);
         const TTNNI: BindSchema = BindSchema(&[Text, Text, NullableText, NullableText, Integer]);
         const TTTI: BindSchema = BindSchema(&[Text, Text, Text, Integer]);
@@ -1667,20 +1668,101 @@ impl CatalogQueryId {
                 DictionaryMetadata,
                 Diagnostic,
             ),
-            Self::Dependents => (
-                "SELECT * FROM ( \
-                   WITH args AS ( \
-                       SELECT :1 owner_filter, :2 name_filter FROM SYS.dual \
-                   ) \
-                   SELECT DISTINCT d.owner, d.name, d.type \
-                   FROM SYS.all_dependencies d CROSS JOIN args \
-                   WHERE d.referenced_owner = args.owner_filter \
-                     AND d.referenced_name = args.name_filter \
-                     AND NOT (d.owner = args.owner_filter AND d.name = args.name_filter) \
-                   ORDER BY d.owner, d.type, d.name \
-               ) WHERE ROWNUM <= :3",
-                TTI,
-                "read bounded direct dependents",
+            Self::DependentsTransitive => (
+                r#"SELECT * FROM (WITH requested AS (
+  SELECT j.object_id, j.owner, j.name, j.object_type
+  FROM JSON_TABLE(:1, '$[*]' COLUMNS (
+    object_id NUMBER PATH '$.id', owner VARCHAR2(128) PATH '$.owner',
+    name VARCHAR2(128) PATH '$.name', object_type VARCHAR2(30) PATH '$.type'
+  )) j
+), frontier AS (
+  SELECT DISTINCT o.owner, o.object_name, o.object_type, o.object_id,
+         o.status, o.last_ddl_time
+  FROM SYS.all_objects o JOIN requested r
+    ON (r.object_id = o.object_id OR (r.object_id IS NULL
+      AND r.owner = o.owner AND r.name = o.object_name AND r.object_type = o.object_type))
+  WHERE o.subobject_name IS NULL
+), dependencies AS (
+  SELECT DISTINCT d.owner, d.name, d.type, d.referenced_owner, d.referenced_name,
+         d.referenced_type, d.referenced_link_name, d.dependency_type,
+         t.object_id AS referenced_object_id
+  FROM SYS.all_dependencies d JOIN frontier f
+    ON (d.owner = f.owner AND d.name = f.object_name AND d.type = f.object_type)
+    OR ((d.referenced_owner = f.owner OR d.referenced_owner IS NULL)
+      AND d.referenced_name = f.object_name
+      AND (d.referenced_type = f.object_type OR d.referenced_type IS NULL
+        OR d.referenced_type = 'NON-EXISTENT'))
+  LEFT JOIN SYS.all_objects t ON d.referenced_link_name IS NULL
+    AND t.owner = d.referenced_owner AND t.object_name = d.referenced_name
+    AND t.object_type = d.referenced_type AND t.subobject_name IS NULL
+), bounded_dependencies AS (
+  SELECT * FROM (SELECT * FROM dependencies
+    ORDER BY owner, name, type, referenced_owner, referenced_name,
+             referenced_type, referenced_link_name, dependency_type)
+  WHERE ROWNUM <= :2
+), objects AS (
+  SELECT * FROM frontier
+  UNION
+  SELECT o.owner, o.object_name, o.object_type, o.object_id, o.status, o.last_ddl_time
+  FROM bounded_dependencies d JOIN SYS.all_objects o
+    ON o.owner = d.owner AND o.object_name = d.name AND o.object_type = d.type
+    AND o.subobject_name IS NULL
+  WHERE d.referenced_link_name IS NULL AND EXISTS (
+    SELECT 1 FROM frontier f
+    WHERE d.referenced_owner = f.owner AND d.referenced_name = f.object_name
+      AND d.referenced_type = f.object_type)
+), sources AS (
+  SELECT o.owner, o.object_name, o.object_type, o.object_id, s.line, s.text,
+         COUNT(s.line) OVER (PARTITION BY o.object_id) AS source_lines,
+         LENGTHB(s.text) AS source_length
+  FROM objects o LEFT JOIN SYS.all_source s
+    ON s.owner = o.owner AND s.name = o.object_name AND s.type = o.object_type
+  WHERE o.object_type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION',
+                         'TRIGGER', 'TYPE', 'TYPE BODY', 'JAVA SOURCE')
+  UNION ALL
+  SELECT o.owner, o.object_name, o.object_type, o.object_id, 1, v.text_vc,
+         1, v.text_length
+  FROM objects o LEFT JOIN SYS.all_views v
+    ON v.owner = o.owner AND v.view_name = o.object_name
+  WHERE o.object_type = 'VIEW'
+), bounded_sources AS (
+  SELECT * FROM (SELECT * FROM sources ORDER BY object_id, line)
+  WHERE ROWNUM <= :3
+), visibility_gaps AS (
+  SELECT d.owner, d.name, d.type, d.referenced_owner, d.referenced_name,
+         d.referenced_type, d.referenced_link_name, d.dependency_type
+  FROM SYS.dba_dependencies d JOIN frontier f
+    ON (d.owner = f.owner AND d.name = f.object_name AND d.type = f.object_type)
+    OR ((d.referenced_owner = f.owner OR d.referenced_owner IS NULL)
+      AND d.referenced_name = f.object_name
+      AND (d.referenced_type = f.object_type OR d.referenced_type IS NULL
+        OR d.referenced_type = 'NON-EXISTENT'))
+  MINUS
+  SELECT owner, name, type, referenced_owner, referenced_name,
+         referenced_type, referenced_link_name, dependency_type FROM dependencies
+)
+SELECT 'object' AS row_kind, o.owner, o.object_name AS name, o.object_type AS type,
+       o.object_id, o.status,
+       TO_CHAR(o.last_ddl_time, 'YYYY-MM-DD"T"HH24:MI:SS') AS last_ddl_time,
+       NULL AS line, NULL AS text, NULL AS source_lines, NULL AS source_length,
+       NULL AS referenced_owner, NULL AS referenced_name, NULL AS referenced_type,
+       NULL AS referenced_link_name, NULL AS dependency_type, NULL AS referenced_object_id
+FROM objects o
+UNION ALL
+SELECT 'dependency', d.owner, d.name, d.type, NULL, NULL, NULL,
+       NULL, NULL, NULL, NULL, d.referenced_owner, d.referenced_name,
+       d.referenced_type, d.referenced_link_name, d.dependency_type, d.referenced_object_id
+FROM bounded_dependencies d
+UNION ALL
+SELECT 'source', s.owner, s.object_name, s.object_type, s.object_id, NULL, NULL,
+       s.line, s.text, s.source_lines, s.source_length, NULL, NULL, NULL, NULL, NULL, NULL
+FROM bounded_sources s
+UNION ALL
+SELECT 'visibility_gap', NULL, NULL, NULL, NULL, NULL, NULL,
+       NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+FROM visibility_gaps WHERE ROWNUM <= 1)"#,
+                TII,
+                "read one bounded transitive dependency frontier with source and visibility facts",
                 DictionaryMetadata,
                 Diagnostic,
             ),
