@@ -3963,6 +3963,55 @@ mod tests {
     }
 
     #[test]
+    fn adapter_call_specs_are_unknown_for_effects() {
+        let project = tempfile::tempdir().unwrap();
+        for separator in [" ", "\n", " /* call spec */ "] {
+            for (language, tail) in [
+                ("JAVA", "NAME 'X.f()'"),
+                ("C", "NAME \"employee_label\" LIBRARY employee_lib"),
+            ] {
+                let source = format!(
+                    "CREATE OR REPLACE PROCEDURE APP.OPAQUE_CALL AS LANGUAGE{separator}{language} {tail};\n/\n"
+                );
+                std::fs::write(project.path().join("call_spec.sql"), &source).unwrap();
+                let mut run = analyze_project(AnalysisRequest {
+                    project_root: project.path().to_owned(),
+                    cache: plsql_engine::CacheConfig {
+                        enabled: false,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .unwrap();
+                assert!(
+                    run.dep_graph
+                        .nodes
+                        .values()
+                        .any(|node| node.logical_id.as_str() == "APP.OPAQUE_CALL"),
+                    "the real parser must recognize {language} call spec with separator {separator:?}"
+                );
+                run.catalog = Some(empty_catalog());
+                for clean_outer_report in [false, true] {
+                    let mut oracle = PlsqlSideEffectOracle::from_analysis_run(&run);
+                    assert!(oracle.catalog_complete);
+                    if clean_outer_report {
+                        // An optimistic surrounding report cannot provide the
+                        // opaque body's missing invocation/effect proof.
+                        oracle.source_trustworthy = true;
+                    }
+                    let effects = oracle.routine_effects(&adapter_reference("OPAQUE_CALL"));
+                    assert_eq!(
+                        effects,
+                        unknown_effects(),
+                        "{language}, separator {separator:?}, clean outer {clean_outer_report}"
+                    );
+                    assert_eq!(effects_purity(&effects), Purity::Unknown);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn adapter_medium_writes_cannot_promote_source_read_db() {
         let mut run = adapter_read_run();
         add_edge(&mut run.dep_graph, 2, 1, 2, EdgeKind::Writes);

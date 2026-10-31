@@ -9398,6 +9398,18 @@ async fn preview_dml(
     .await
 }
 
+fn sandbox_not_applicable(
+    decision: &GuardDecision,
+    reason: oraclemcp_guard::NotApplicableReason,
+) -> Value {
+    json!({
+        "sandbox": oraclemcp_guard::FieldStatus::<u64>::NotApplicable { reason },
+        "previewed": false, "reversible": false, "rolled_back": false, "committed": false,
+        "required_level": decision.required_level, "danger": decision.danger,
+        "reason": decision.reason, "cannot_undo": [],
+    })
+}
+
 async fn preview_dml_inner(
     ctx: DbToolCtx<'_>,
     args: PreviewDmlArgs,
@@ -9413,6 +9425,15 @@ async fn preview_dml_inner(
     let decision = READ_PRECHECK_CLASSIFIER.classify(&args.sql);
     let gate = decision.gate(ctx.session);
     if !matches!(gate, LevelDecision::Allow) {
+        if decision
+            .required_level
+            .is_some_and(|required| required == OperatingLevel::ReadWrite)
+        {
+            return Ok(sandbox_not_applicable(
+                &decision,
+                oraclemcp_guard::NotApplicableReason::LevelBelowRequired,
+            ));
+        }
         return Err(execute_gate_error(&decision, gate, ctx.session));
     }
     let required_level = decision.required_level.ok_or_else(|| {
@@ -9444,6 +9465,7 @@ async fn preview_dml_inner(
     // it — instead of advancing the sequence and calling the result a preview.
     if decision.non_transactional_effect || decision.query_effect_requires_fetch {
         return Ok(json!({
+            "sandbox": oraclemcp_guard::FieldStatus::<u64>::NotApplicable { reason: oraclemcp_guard::NotApplicableReason::UntrustedTriggers },
             "previewed": false,
             "reversible": false,
             "rolled_back": false,
@@ -9455,6 +9477,69 @@ async fn preview_dml_inner(
             "reason": decision.reason,
             "next_step": "this statement was NOT executed: its effect escapes rollback, so no sandbox could undo it. Preview it with oracle_preview_sql and run it deliberately with oracle_execute once you accept the permanent effect",
         }));
+    }
+    if args.scoped_grant.is_some() {
+        return Err(write_auth_error(
+            WriteAuthRefusal::GrantEnforcementUnavailable,
+        ));
+    }
+    let proof = ctx
+        .profile_classifier
+        .prepare(cx, conn, ctx.catalog_cache, &args.sql)
+        .await;
+    if proof.require_readonly_routine_closures(&args.sql).is_err() {
+        return Ok(sandbox_not_applicable(
+            &decision,
+            oraclemcp_guard::NotApplicableReason::UntrustedTriggers,
+        ));
+    }
+    let base = proof.precheck.classify(&args.sql);
+    let policy = apply_sql_policy(
+        ctx.sql_policy,
+        ctx.current_schema,
+        Some(ctx.grant_binding.subject_id.as_str()),
+        &proof.precheck,
+        &base,
+        &args.sql,
+    )?;
+    let decision = policy.effective_decision;
+    if decision.danger == DangerLevel::Forbidden {
+        return Err(execute_gate_error(
+            &decision,
+            decision.gate(ctx.session),
+            ctx.session,
+        ));
+    }
+    let required_level = decision
+        .required_level
+        .unwrap_or(OperatingLevel::Admin)
+        .max(policy.required_level);
+    if !matches!(
+        ctx.session.evaluate(Some(required_level)),
+        LevelDecision::Allow
+    ) {
+        return Ok(sandbox_not_applicable(
+            &decision,
+            oraclemcp_guard::NotApplicableReason::LevelBelowRequired,
+        ));
+    }
+    let mut args = args;
+    if let Some(sql) = policy.effective_sql {
+        args.sql = sql;
+    }
+    if !Box::pin(impact::sandbox_mutation_is_reversible(
+        cx,
+        conn,
+        ctx.catalog_cache,
+        &args.sql,
+        ctx.session.effective_level(),
+    ))
+    .await
+    {
+        return Ok(sandbox_not_applicable(
+            &decision,
+            oraclemcp_guard::NotApplicableReason::UntrustedTriggers,
+        ));
     }
     ensure_workspace_level(ctx.session, "oracle_preview_dml")?;
 
@@ -9504,7 +9589,7 @@ async fn preview_dml_inner(
         scoped_grant: args.scoped_grant.as_deref(),
     });
     let executed_sql = with_audit_marker(&args.sql, ctx.active_profile, "oracle_preview_dml");
-    if READ_PRECHECK_CLASSIFIER.classify(&executed_sql) != decision {
+    if proof.precheck.classify(&executed_sql) != decision {
         return Err(ErrorEnvelope::new(
             ErrorClass::Internal,
             "audit marker changed the classifier verdict; refusing to execute",
@@ -9655,6 +9740,7 @@ async fn preview_dml_inner(
     )?;
 
     let mut response = json!({
+        "sandbox": oraclemcp_guard::FieldStatus::Computed { value: rows_affected },
         "previewed": true,
         "reversible": true,
         "rolled_back": true,
@@ -9668,7 +9754,7 @@ async fn preview_dml_inner(
         "sandbox": sandbox,
         "action_envelope_digest": sandbox_envelope,
         "next_step": "nothing was committed. To apply this exact change: oracle_preview_sql for its confirmation, then oracle_execute with commit=true — which re-classifies and re-gates the statement rather than trusting this preview",
-        "caveat": "a trigger or an autonomous transaction fired by the target objects can commit independently of this rollback; the classifier flags only what it can prove from the statement text",
+        "caveat": "the sandbox requires a current complete mutation-effect proof; its affected row count is an observation of this rolled-back execution, not a guarantee for a later execution under concurrency",
     });
     // DI2: a clamp nobody can see is worse than no clamp. Someone approves a DML
     // on the strength of the witness rows in front of them, so a preview that
@@ -10442,6 +10528,9 @@ async fn execute_sql_inner(
         "objects_affected": decision.objects_affected,
         "reason": decision.reason,
     });
+    if impact::is_dml_statement(&args.sql) {
+        response["observed_rows"] = json!(rows_affected);
+    }
     // Arc I honesty (bead .11.3): `rolled_back: true` reports the TRANSACTION,
     // and on its own it reads as "nothing happened". For a statement whose effect
     // escapes rollback — a sequence NEXTVAL the classifier can prove, and by
@@ -14105,6 +14194,24 @@ impl OracleDispatcher {
                 "oracle_preview_sql",
             )
             .await;
+            let rows = Box::pin(impact::compute_rows_impact(
+                cx,
+                impact::RowsImpactContext {
+                    dispatcher: self,
+                    state: &mut state,
+                    context,
+                    request_budget,
+                    subject: &request_subject,
+                    level: &scoped_level,
+                    sql_policy: sql_policy.as_ref(),
+                    current_schema: current_schema.as_deref(),
+                },
+                &a,
+                &proof,
+                &binding,
+            ))
+            .await;
+            impact::attach_rows_impact(&mut preview, rows);
             remember_execute_approved_token(&mut state, &a.sql, &preview);
             return Ok(preview);
         }

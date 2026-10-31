@@ -18,6 +18,309 @@ use serde_json::{Value, json};
 
 const MAX_IMPACT_SQL_BYTES: usize = 64 * 1024;
 
+/// All authority for an advisory count comes from the ordinary read executor.
+/// The mutation collector supplies evidence, never execution permission.
+pub(super) struct RowsImpactContext<'a> {
+    pub dispatcher: &'a super::OracleDispatcher,
+    pub state: &'a mut super::DispatcherState,
+    pub context: super::DispatchContext<'a>,
+    pub request_budget: super::RequestBudget,
+    pub subject: &'a super::AuditSubject,
+    pub level: &'a super::SessionLevelState,
+    pub sql_policy: Option<&'a super::SqlPolicyConfig>,
+    pub current_schema: Option<&'a str>,
+}
+
+/// A current, complete implicit-effect closure for this exact target and
+/// operation. This is the single W7 collector/engine port, shared by estimates
+/// and sandbox admission, not a parallel trigger or mutation analyzer.
+async fn collect_statement_mutation(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    statement: &sqlparser::ast::Statement,
+    target: &ResolvedObject,
+) -> Result<oraclemcp_guard::mutation_closure::MutationEffectClosureV1, UnavailableReason> {
+    use oraclemcp_db::mutation_closure::{MutationRequest, collect_mutation_effect_closure};
+    use oraclemcp_guard::mutation_closure::{MutationColumns, MutationStatementKind};
+    use sqlparser::ast::{AssignmentTarget, Statement};
+    let (statement_kind, columns) = match statement {
+        Statement::Update(update) => {
+            let names = update
+                .assignments
+                .iter()
+                .map(|assignment| {
+                    let AssignmentTarget::ColumnName(name) = &assignment.target else {
+                        return None;
+                    };
+                    let [part] = name.0.as_slice() else {
+                        return None;
+                    };
+                    let ident = part.as_ident()?;
+                    Some(if ident.quote_style.is_some() {
+                        ident.value.clone()
+                    } else {
+                        ident.value.to_ascii_uppercase()
+                    })
+                })
+                .collect::<Option<std::collections::BTreeSet<_>>>();
+            (
+                MutationStatementKind::Update,
+                names.map_or(MutationColumns::All, MutationColumns::Named),
+            )
+        }
+        Statement::Delete(_) => (MutationStatementKind::Delete, MutationColumns::All),
+        _ => return Err(UnavailableReason::UnsupportedDmlShape),
+    };
+    #[cfg(feature = "plsql-intelligence")]
+    let oracle = crate::mutation_closure::EngineMutationEffects;
+    #[cfg(not(feature = "plsql-intelligence"))]
+    let oracle = oraclemcp_db::mutation_closure::UnknownMutationEffects;
+    Ok(collect_mutation_effect_closure(
+        cx,
+        conn,
+        MutationRequest {
+            target: target.clone(),
+            statement_kind,
+            columns,
+        },
+        &oracle,
+    )
+    .await)
+}
+
+fn one_dml_statement(sql: &str) -> Result<sqlparser::ast::Statement, UnavailableReason> {
+    use sqlparser::{dialect::OracleDialect, parser::Parser};
+    if sql.is_empty() || sql.len() > MAX_IMPACT_SQL_BYTES {
+        return Err(UnavailableReason::UnsupportedDmlShape);
+    }
+    let mut statements = Parser::parse_sql(&OracleDialect {}, sql)
+        .map_err(|_| UnavailableReason::UnsupportedDmlShape)?;
+    if statements.len() != 1 {
+        return Err(UnavailableReason::UnsupportedDmlShape);
+    }
+    Ok(statements.remove(0))
+}
+
+pub(super) async fn sandbox_mutation_is_reversible(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    cache: &OracleCatalogResolverCache,
+    sql: &str,
+    level: OperatingLevel,
+) -> bool {
+    use oraclemcp_guard::RoutineEffect;
+    let Ok(statement) = one_dml_statement(sql) else {
+        return false;
+    };
+    let Ok(relations) = resolve_dml_relations(cx, conn, cache, sql).await else {
+        return false;
+    };
+    let [target] = relations.as_slice() else {
+        return false;
+    };
+    let Ok(closure) = collect_statement_mutation(cx, conn, &statement, target).await else {
+        return false;
+    };
+    closure.admit().is_ok_and(|required| required <= level)
+        && closure.mechanisms.iter().all(|fact| {
+            fact.effects.iter().all(|effect| {
+                matches!(
+                    effect,
+                    RoutineEffect::ReadDb | RoutineEffect::RowLock | RoutineEffect::Dml
+                )
+            })
+        })
+}
+
+pub(super) fn attach_rows_impact(
+    response: &mut Value,
+    rows: FieldStatus<oraclemcp_guard::RowEstimate>,
+) {
+    let Some(fields) = response.as_object_mut() else {
+        return;
+    };
+    let mut impact = fields
+        .get("impact")
+        .and_then(|value| serde_json::from_value::<ImpactV1>(value.clone()).ok())
+        .unwrap_or_default();
+    impact.rows = rows;
+    if let Ok(value) = serde_json::to_value(impact) {
+        fields.insert("impact".into(), value);
+    }
+}
+
+/// An estimate is advisory and belongs to an SCN window and profile generation.
+/// Neither an unknown mechanism nor a failed read can become a zero estimate.
+pub(super) async fn compute_rows_impact(
+    cx: &Cx,
+    ctx: RowsImpactContext<'_>,
+    args: &super::PreviewSqlArgs,
+    proof: &super::served_classifier::PreparedClassifier,
+    binding: &super::ExecGrantBinding,
+) -> FieldStatus<oraclemcp_guard::RowEstimate> {
+    use oraclemcp_db::{AsOf, ScnProbeOutcome};
+    use oraclemcp_guard::effective_dml_plan::{DmlImpactShapeV1, DmlPlanBindV1};
+    let unavailable = |reason| FieldStatus::Unavailable { reason };
+    if !is_dml_statement(&args.sql) {
+        return FieldStatus::NotApplicable {
+            reason: NotApplicableReason::NotDml,
+        };
+    }
+    // The scoped-grant runtime is still refused by execution. Never estimate
+    // its caller-only SQL while pretending to have applied a grant predicate.
+    if args.scoped_grant.is_some() {
+        return unavailable(UnavailableReason::UnsupportedDmlShape);
+    }
+    if ctx.request_budget.enforce(cx).is_err() {
+        return unavailable(UnavailableReason::Timeout);
+    }
+    let base = proof.precheck.classify(&args.sql);
+    let super::PolicyGate::Admitted(admission) = super::apply_preview_sql_policy(
+        ctx.sql_policy,
+        ctx.current_schema,
+        binding,
+        &proof.precheck,
+        &base,
+        &args.sql,
+    ) else {
+        return unavailable(UnavailableReason::UnsupportedDmlShape);
+    };
+    if admission.effective_decision.danger == super::DangerLevel::Forbidden {
+        return unavailable(UnavailableReason::UnsupportedDmlShape);
+    }
+    let sql = admission.effective_sql.as_deref().unwrap_or(&args.sql);
+    let Ok(statement) = one_dml_statement(sql) else {
+        return unavailable(UnavailableReason::UnsupportedDmlShape);
+    };
+    let Ok(relations) =
+        resolve_dml_relations(cx, ctx.state.conn.as_ref(), &ctx.state.catalog_cache, sql).await
+    else {
+        return unavailable(UnavailableReason::UnsupportedDmlShape);
+    };
+    let [target] = relations.as_slice() else {
+        return unavailable(UnavailableReason::UnsupportedDmlShape);
+    };
+    let Ok(plan) = DmlImpactShapeV1::prove(&statement, target) else {
+        return unavailable(UnavailableReason::UnsupportedDmlShape);
+    };
+    let count_binds = plan
+        .binds()
+        .iter()
+        .map(|bind| match bind {
+            DmlPlanBindV1::Caller { position } => position
+                .checked_sub(1)
+                .and_then(|index| args.binds.get(index))
+                .cloned(),
+            DmlPlanBindV1::Grant { .. } => None,
+        })
+        .collect::<Option<Vec<_>>>();
+    let (Some(binds), Ok(count_sql)) = (count_binds, plan.positional_sql()) else {
+        return unavailable(UnavailableReason::UnsupportedDmlShape);
+    };
+    // A SELECT policy may differ from the effective DML policy. If the read
+    // ladder would add another predicate, that count is not an equivalent
+    // selection. Refuse the estimate rather than report an undercount.
+    let count_base = proof.precheck.classify(&count_sql);
+    let Ok(read_policy) = super::apply_sql_policy(
+        ctx.sql_policy,
+        ctx.current_schema,
+        ctx.context.principal_key(),
+        &proof.precheck,
+        &count_base,
+        &count_sql,
+    ) else {
+        return unavailable(UnavailableReason::UnsupportedDmlShape);
+    };
+    if read_policy.effective_sql.is_some() {
+        return unavailable(UnavailableReason::UnsupportedDmlShape);
+    }
+    let guarded_conn = super::read_executor::ReadUncertaintyConn {
+        inner: ctx.state.conn.as_ref(),
+        quarantine: Some(&ctx.dispatcher.quarantine),
+        provenance: oraclemcp_db::ReadQueryProvenance::ServerRead,
+    };
+    let Ok(closure) = collect_statement_mutation(cx, &guarded_conn, &statement, target).await
+    else {
+        return unavailable(UnavailableReason::CatalogUnavailable);
+    };
+    if !closure.is_complete() {
+        return unavailable(UnavailableReason::CatalogUnavailable);
+    }
+    if ctx.request_budget.enforce(cx).is_err() {
+        return unavailable(UnavailableReason::Timeout);
+    }
+    let Ok(ScnProbeOutcome::Granted(scn_before)) =
+        AsOf::probe_current_system_change_number(cx, &guarded_conn).await
+    else {
+        return unavailable(UnavailableReason::CatalogUnavailable);
+    };
+    let profile_generation = ctx
+        .state
+        .profile_generation
+        .as_ref()
+        .map_or(0, |lease| lease.generation());
+    let result = super::GuardedReadExecutor::new(ctx.dispatcher)
+        .run_server_read(
+            cx,
+            ctx.state,
+            ctx.context,
+            "impact_probe",
+            json!({"binds":binds, "max_rows":1, "as_of":{"scn":scn_before}}),
+            super::read_executor::ServerSql::new(count_sql, relations),
+            ctx.request_budget,
+            ctx.subject,
+            ctx.sql_policy.cloned(),
+            ctx.current_schema.map(str::to_owned),
+            ctx.level,
+        )
+        .await;
+    let Ok(response) = result else {
+        return unavailable(UnavailableReason::CatalogUnavailable);
+    };
+    let guarded_conn = super::read_executor::ReadUncertaintyConn {
+        inner: ctx.state.conn.as_ref(),
+        quarantine: Some(&ctx.dispatcher.quarantine),
+        provenance: oraclemcp_db::ReadQueryProvenance::ServerRead,
+    };
+    let Ok(ScnProbeOutcome::Granted(scn_after)) =
+        AsOf::probe_current_system_change_number(cx, &guarded_conn).await
+    else {
+        return unavailable(UnavailableReason::CatalogUnavailable);
+    };
+    if response.get("observed_scn").and_then(Value::as_u64) != Some(scn_before) {
+        return unavailable(UnavailableReason::CatalogUnavailable);
+    }
+    if scn_after < scn_before || response.get("truncated").and_then(Value::as_bool) != Some(false) {
+        return unavailable(UnavailableReason::CatalogUnavailable);
+    }
+    let value = response
+        .get("rows")
+        .and_then(Value::as_array)
+        .filter(|rows| rows.len() == 1)
+        .and_then(|rows| rows[0].as_object())
+        .filter(|row| row.len() == 1)
+        .and_then(|row| row.values().next())
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
+        });
+    let Some(value) = value else {
+        return unavailable(UnavailableReason::CatalogUnavailable);
+    };
+    FieldStatus::Estimated {
+        value: oraclemcp_guard::RowEstimate {
+            kind: oraclemcp_guard::RowEstimateKind::SnapshotEstimate,
+            value,
+            scn: oraclemcp_guard::ScnBounds::Window {
+                scn_before,
+                scn_after,
+            },
+            profile_generation,
+        },
+    }
+}
+
 fn preview_dependency_root(response: &Value) -> Option<DependentObject> {
     let fields = response
         .get("detected_object")
@@ -2099,6 +2402,298 @@ mod tests {
 
         fn test_name(lane: &str) -> String {
             format!("impact_cost_live_{lane}")
+        }
+
+        #[cfg(feature = "plsql-intelligence")]
+        fn rows_catalog_grants(schema: &str, connect: &OracleConnectOptions) -> Result<(), String> {
+            let status = std::process::Command::new("python3")
+                .args([
+                    "-c",
+                    r#"
+import os, re, oracledb
+schema = os.environ['OMCP_ROWS_SCHEMA']
+assert re.fullmatch(r'OMCPR_[A-Z0-9]{8}_[1-4]', schema)
+dsn = os.environ['OMCP_ROWS_DSN']
+assert dsn == 'localhost:1523/FREEPDB1'
+with oracledb.connect(user='sys', password=os.environ['OMCP_ROWS_PASSWORD'],
+                      dsn=dsn, mode=oracledb.AUTH_MODE_SYSDBA,
+                      tcp_connect_timeout=10, retry_count=0) as conn:
+    conn.call_timeout = 10000
+    cursor = conn.cursor()
+    for view in ['V_$OPTION', 'DBA_CONSTRAINTS', 'DBA_CONS_COLUMNS',
+                 'ALL_AUDIT_POLICIES', 'ALL_XS_APPLIED_POLICIES', 'REDACTION_POLICIES']:
+        cursor.execute(f'GRANT SELECT ON SYS.{view} TO {schema}')
+    cursor.execute(f'GRANT EXECUTE ON SYS.DBMS_FLASHBACK TO {schema}')
+"#,
+                ])
+                .env("OMCP_ROWS_SCHEMA", schema)
+                .env("OMCP_ROWS_DSN", &connect.connect_string)
+                .env(
+                    "OMCP_ROWS_PASSWORD",
+                    connect.password.as_deref().ok_or("admin password absent")?,
+                )
+                .status()
+                .map_err(|error| error.to_string())?;
+            if !status.success() {
+                return Err("SYS-owned fixture catalog grants failed".into());
+            }
+            Ok(())
+        }
+
+        #[cfg(feature = "plsql-intelligence")]
+        async fn rows_live_fixture(cx: Cx, case: u8) -> Result<(), String> {
+            use super::super::super::{DispatchContext, OracleDispatcher};
+            use oraclemcp_audit::{
+                AuditError, AuditRecord, AuditSink, Auditor, MemoryAuditSink, SigningKey,
+            };
+            use std::sync::Arc;
+            struct SharedRowsSink(Arc<MemoryAuditSink>);
+            impl AuditSink for SharedRowsSink {
+                fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
+                    self.0.append(record)
+                }
+                fn append_with_verdict_certificate(
+                    &self,
+                    record: &AuditRecord,
+                    certificate: &oraclemcp_audit::BoundAuditVerdictCertificate,
+                ) -> Result<(), AuditError> {
+                    self.0.append_with_verdict_certificate(record, certificate)
+                }
+                fn flush(&self) -> Result<(), AuditError> {
+                    self.0.flush()
+                }
+            }
+            async fn sql(cx: &Cx, conn: &dyn OracleConnection, text: &str) -> Result<(), String> {
+                conn.execute(cx, text, &[])
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
+            async fn number(
+                cx: &Cx,
+                conn: &dyn OracleConnection,
+                text: &str,
+                binds: &[OracleBind],
+            ) -> Result<i64, String> {
+                let rows = conn
+                    .query_rows(cx, text, binds)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                rows.first()
+                    .and_then(|row| row.parse_i64("N"))
+                    .ok_or_else(|| "fixture count missing".into())
+            }
+            async fn call(
+                cx: &Cx,
+                dispatcher: &OracleDispatcher,
+                tool: &str,
+                args: Value,
+            ) -> Result<Value, String> {
+                Box::pin(dispatcher.dispatch_with_cx_inner(
+                    cx,
+                    DispatchContext::default(),
+                    tool,
+                    args,
+                    &std::cell::Cell::new(false),
+                ))
+                .await
+                .map_err(|error| format!("{tool}: {}", error.message))
+            }
+            let connect = options("FREE23");
+            if connect.connect_string != "localhost:1523/FREEPDB1" {
+                return Err("rows fixture requires local FREE23".into());
+            }
+            let admin = RustOracleConnection::connect(&cx, connect.clone())
+                .await
+                .map_err(|error| error.to_string())?;
+            let id = PlanStatementId::generate().map_err(|error| error.to_string())?;
+            let suffix = id.as_str()[5..13].to_ascii_uppercase();
+            let schema = format!("OMCPR_{suffix}_{case}");
+            let password = format!("Rows{suffix}Aa9");
+            sql(&cx, &admin, &format!("CREATE USER {schema} IDENTIFIED BY \"{password}\" DEFAULT TABLESPACE USERS QUOTA 8M ON USERS")).await?;
+            let outcome = async {
+                sql(&cx,&admin,&format!("GRANT CREATE SESSION, CREATE TABLE, CREATE TRIGGER, CREATE PROCEDURE TO {schema}")).await?;
+                rows_catalog_grants(&schema,&connect)?;
+                sql(&cx,&admin,&format!("CREATE TABLE {schema}.ROWS_T (ID NUMBER PRIMARY KEY, V NUMBER)")).await?;
+                sql(&cx,&admin,&format!("CREATE TABLE {schema}.CANARY (N NUMBER)")).await?;
+                let seed_rows = if case==1 {9} else {10};
+                sql(&cx,&admin,&format!("INSERT INTO {schema}.ROWS_T SELECT LEVEL,0 FROM SYS.DUAL CONNECT BY LEVEL<={seed_rows}")).await?;
+                // Rows outside the predicate make a dropped-WHERE fault
+                // observable against Oracle, not just in a rendered SQL test.
+                sql(&cx,&admin,&format!("INSERT INTO {schema}.ROWS_T VALUES (1001,0)")).await?;
+                sql(&cx,&admin,&format!("INSERT INTO {schema}.ROWS_T VALUES (1002,0)")).await?;
+                admin.commit(&cx).await.map_err(|error|error.to_string())?;
+                if case == 2 {
+                    sql(&cx,&admin,&format!("CREATE OR REPLACE TRIGGER {schema}.TR_AUTO BEFORE UPDATE ON {schema}.ROWS_T FOR EACH ROW DECLARE PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO {schema}.CANARY VALUES (1); COMMIT; END;")).await?;
+                }
+                if case == 4 {
+                    sql(&cx,&admin,&format!("CREATE OR REPLACE PROCEDURE {schema}.FGA_HANDLER(S VARCHAR2,O VARCHAR2,P VARCHAR2) AUTHID DEFINER IS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO {schema}.CANARY VALUES (1); COMMIT; END;")).await?;
+                    sql(&cx,&admin,&format!("BEGIN SYS.DBMS_FGA.ADD_POLICY(object_schema=>'{schema}',object_name=>'ROWS_T',policy_name=>'ROWS_FGA',handler_schema=>'{schema}',handler_module=>'FGA_HANDLER',statement_types=>'SELECT',enable=>TRUE); END;")).await?;
+                }
+                let reader_options = OracleConnectOptions {username:Some(schema.clone()),password:Some(password),..connect.clone()};
+                let conn = RustOracleConnection::connect(&cx,reader_options.clone()).await.map_err(|error|error.to_string())?;
+                let level = if case==1 || case==4 { OperatingLevel::ReadOnly } else { OperatingLevel::ReadWrite };
+                let mut session = oraclemcp_guard::SessionLevelState::new(level,false);
+                session.set_current_level(level).map_err(|error|error.to_string())?;
+                let sink = Arc::new(MemoryAuditSink::new());
+                let auditor = Arc::new(Auditor::new(Box::new(SharedRowsSink(Arc::clone(&sink))),
+                    SigningKey::new("rows-test",b"rows-test-key-with-sufficient-length".to_vec()).map_err(|error|error.to_string())?));
+                let dispatcher = OracleDispatcher::new_with_profile_level(Box::new(conn),Some("live-rows".into()),session)
+                    .with_fga_evidence_policy(oraclemcp_db::FgaEvidencePolicy::AdmitUnavailable).with_auditor(auditor);
+                let marker = format!("rows_candidate_{suffix}_case{case}");
+                let candidate = format!("/* {marker} */ UPDATE {schema}.ROWS_T SET V=:1 WHERE ID BETWEEN :2 AND :3");
+                let args = json!({"sql":candidate,"binds":[901,1,10]});
+                let result = async {
+                    if case == 1 {
+                        // Reuse an older read-only transaction, then prove that
+                        // the estimate reads its own newly recorded SCN.
+                        call(&cx,&dispatcher,"oracle_query",json!({"sql":format!("SELECT ID FROM {schema}.ROWS_T WHERE ID=1")})).await?;
+                        sql(&cx,&admin,&format!("INSERT INTO {schema}.ROWS_T VALUES (10,0)")).await?;
+                        admin.commit(&cx).await.map_err(|error|error.to_string())?;
+                    }
+
+                    if case == 2 {
+                        let preview = call(&cx,&dispatcher,"oracle_preview_dml",args).await?;
+                        let canary = number(&cx,&admin,&format!("SELECT COUNT(*) AS N FROM {schema}.CANARY"),&[]).await?;
+                        if canary!=0 { return Err(format!("autonomous sandbox persisted {canary} canary rows")); }
+                        if preview["sandbox"] != json!({"status":"not_applicable","reason":"untrusted_triggers"}) {
+                            return Err(format!("autonomous trigger sandbox was not refused: {preview}"));
+                        }
+                    } else {
+                        let preview = call(&cx,&dispatcher,"oracle_preview_sql",args.clone()).await?;
+                        let rows = &preview["impact"]["rows"];
+                        if case == 4 {
+                            if rows["status"] != "unavailable" || rows.get("value").is_some() {
+                                return Err(format!("unproven SELECT FGA count must be unavailable: {preview}"));
+                            }
+                        } else {
+                            if rows["status"]!="estimated" || rows["value"]["kind"]!="snapshot_estimate" || rows["value"]["value"]!=10 {
+                                return Err(format!("snapshot estimate mismatch: {preview}"));
+                            }
+                            let value = &rows["value"];
+                            let before = value["scn"]["scn_before"].as_u64().ok_or("SCN before absent")?;
+                            let after = value["scn"]["scn_after"].as_u64().ok_or("SCN after absent")?;
+                            let expected_generation = dispatcher.state.lock(&cx).await.map_err(|_|"generation state lock")?.profile_generation.as_ref().map_or(0,|lease|lease.generation());
+                            if before>after || value["profile_generation"].as_u64()!=Some(expected_generation) { return Err(format!("snapshot provenance mismatch: {value}, expected generation {expected_generation}")); }
+                            if !sink.records().iter().any(|record|record.tool=="impact_probe" && record.outcome==oraclemcp_audit::AuditOutcome::Succeeded) {
+                                return Err("count has no distinct successful impact_probe audit record".into());
+                            }
+                        }
+                        if case == 3 {
+                            let execution = call(&cx,&dispatcher,"oracle_execute",args).await?;
+                            if execution["observed_rows"]!=10 || execution["observed_rows"]!=rows["value"]["value"] || execution["rolled_back"]!=true || execution["committed"]!=false {
+                                return Err(format!("isolated observed count/rollback mismatch: {execution}"));
+                            }
+                            if number(&cx,&admin,&format!("SELECT COUNT(*) AS N FROM {schema}.ROWS_T WHERE V<>0"),&[]).await?!=0 { return Err("default rollback did not restore isolated fixture".into()); }
+                        }
+                    }
+                    if case != 3 {
+                        if sink.records().iter().any(|record| matches!(record.tool.as_str(),"oracle_execute"|"oracle_preview_dml")) {
+                            return Err("a refused/nonexecuting preview has candidate execution audit records".into());
+                        }
+                        if number(&cx,&admin,"SELECT COUNT(*) AS N FROM SYS.V_$SQL WHERE INSTR(sql_text,:1)>0",&[marker.clone().into()]).await?!=0 {
+                            return Err("candidate marker reached V$SQL".into());
+                        }
+                    }
+                    if number(&cx,&admin,&format!("SELECT COUNT(*) AS N FROM {schema}.CANARY"),&[]).await?!=0 {
+                        return Err("preview executed an autonomous canary".into());
+                    }
+                    if case == 2 {
+                        sql(&cx,&admin,&format!("UPDATE {schema}.ROWS_T SET V=1 WHERE ID=1")).await?;
+                        admin.rollback(&cx).await.map_err(|error|error.to_string())?;
+                        if number(&cx,&admin,&format!("SELECT COUNT(*) AS N FROM {schema}.CANARY"),&[]).await?!=1 { return Err("autonomous trigger positive control did not commit".into()); }
+                    }
+                    if case == 4 {
+                        let control = RustOracleConnection::connect(&cx,reader_options).await.map_err(|error|error.to_string())?;
+                        let count = number(&cx,&control,&format!("SELECT COUNT(*) AS N FROM {schema}.ROWS_T"),&[]).await;
+                        control.close(&cx).await.map_err(|error|error.to_string())?;
+                        if count?!=12 || number(&cx,&admin,&format!("SELECT COUNT(*) AS N FROM {schema}.CANARY"),&[]).await?!=1 { return Err("FGA positive control did not fire".into()); }
+                    }
+                    eprintln!("{}", json!({"case":case,"lane":"FREE23","rows_fixture":"isolated","candidate_executions":if case==3 {1}else{0},"verified":true}));
+                    Ok(())
+                }.await;
+                let closed = dispatcher.state.lock(&cx).await.map_err(|_|"fixture state lock")?.conn.close(&cx).await.map_err(|error|error.to_string());
+                result?;
+                closed
+            }.await;
+            let cleanup = sql(&cx, &admin, &format!("DROP USER {schema} CASCADE")).await;
+            let closed = admin.close(&cx).await.map_err(|error| error.to_string());
+            outcome?;
+            cleanup?;
+            closed
+        }
+
+        #[cfg(feature = "plsql-intelligence")]
+        fn run_rows_native_case(case: u8) {
+            use asupersync::Outcome;
+            use oraclemcp_core::lane::{LaneRuntime, block_on_lane_bridge};
+            use oraclemcp_core::server::{DispatchFuture, ToolDispatch};
+            use std::sync::Arc;
+            struct NativeRowsFixture(u8);
+            impl ToolDispatch for NativeRowsFixture {
+                fn dispatch<'a>(
+                    &'a self,
+                    cx: &'a Cx,
+                    _context: super::super::super::DispatchContext<'a>,
+                    _name: &'a str,
+                    _args: Value,
+                ) -> DispatchFuture<'a> {
+                    Box::pin(async move {
+                        match rows_live_fixture(cx.clone(), self.0).await {
+                            Ok(()) => Outcome::Ok(json!({"verified":true})),
+                            Err(message) => Outcome::Err(oraclemcp_error::ErrorEnvelope::new(
+                                oraclemcp_error::ErrorClass::Internal,
+                                message,
+                            )),
+                        }
+                    })
+                }
+            }
+            let lane = LaneRuntime::spawn_default(
+                format!("rows-native-{case}"),
+                Arc::new(NativeRowsFixture(case)),
+            );
+            let outcome = block_on_lane_bridge(async {
+                let cx = Cx::current().expect("lane bridge installs Cx");
+                lane.dispatch(
+                    &cx,
+                    super::super::super::DispatchContext::default(),
+                    "rows_fixture",
+                    json!({}),
+                )
+                .await
+            });
+            lane.close();
+            match outcome {
+                Outcome::Ok(value) => assert_eq!(value["verified"], true),
+                Outcome::Err(error) => panic!("native rows fixture: {}", error.message),
+                other => panic!("native rows fixture did not complete: {other:?}"),
+            }
+        }
+
+        #[cfg(feature = "plsql-intelligence")]
+        #[test]
+        #[ignore = "requires administrative access to local FREE23"]
+        fn impact_rows_live_read_only_update_estimate_zero_candidate_executions() {
+            run_rows_native_case(1);
+        }
+        #[cfg(feature = "plsql-intelligence")]
+        #[test]
+        #[ignore = "requires administrative access to local FREE23"]
+        fn impact_rows_live_autonomous_trigger_preview_executes_nothing() {
+            run_rows_native_case(2);
+        }
+        #[cfg(feature = "plsql-intelligence")]
+        #[test]
+        #[ignore = "requires administrative access to local FREE23"]
+        fn impact_rows_live_estimate_equals_observed_isolated_fixture() {
+            run_rows_native_case(3);
+        }
+        #[cfg(feature = "plsql-intelligence")]
+        #[test]
+        #[ignore = "requires administrative access to local FREE23"]
+        fn impact_rows_live_select_fga_handler_never_runs() {
+            run_rows_native_case(4);
         }
 
         #[cfg(feature = "plsql-intelligence")]

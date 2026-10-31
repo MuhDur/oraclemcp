@@ -355,8 +355,14 @@ fn impact_attached_to_every_minting_preview() {
                 "{} {field}",
                 tool.name
             );
+            let reason =
+                if field == "rows" && canonical_tool_name(&tool.name) == "oracle_preview_sql" {
+                    "catalog_unavailable"
+                } else {
+                    "not_wired"
+                };
             assert_eq!(
-                result["impact"][field]["reason"], "not_wired",
+                result["impact"][field]["reason"], reason,
                 "{} {field}",
                 tool.name
             );
@@ -510,6 +516,7 @@ fn relation_security_probe_rows(id: CatalogQueryId) -> Vec<OracleRow> {
         CatalogQueryId::ReadOlsTablePolicies
         | CatalogQueryId::ReadOlsSchemaPolicies
         | CatalogQueryId::ReadRasPolicies
+        | CatalogQueryId::MutationRasPolicies
         | CatalogQueryId::ReadRedactionPolicies => Vec::new(),
         _ => unreachable!("only relation-security catalog queries use this helper"),
     }
@@ -523,6 +530,7 @@ fn mock_relation_security_probe_rows(sql: &str) -> Option<Vec<OracleRow>> {
         CatalogQueryId::ReadOlsTablePolicies,
         CatalogQueryId::ReadOlsSchemaPolicies,
         CatalogQueryId::ReadRasPolicies,
+        CatalogQueryId::MutationRasPolicies,
         CatalogQueryId::ReadRedactionPolicies,
     ]
     .into_iter()
@@ -534,12 +542,19 @@ fn mock_relation_security_probe_rows(sql: &str) -> Option<Vec<OracleRow>> {
 /// semantic resolution. Dedicated security tests use `SemanticGuardMock`
 /// instead, so views, policies, and callables are never cleared by this model.
 fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>> {
-    // Complete bounded metadata for the synthetic clean compilation fixtures.
-    // The native compile canary test separately exercises actual Oracle answers.
+    // Explicit complete metadata for synthetic ordinary-table and clean
+    // compilation fixtures. Dedicated unit and native canaries test refusal.
     if [
+        CatalogQueryId::MutationTriggers,
+        CatalogQueryId::MutationTriggerColumns,
+        CatalogQueryId::MutationIndexes,
+        CatalogQueryId::MutationIndexExpressions,
+        CatalogQueryId::MutationVpdPolicies,
+        CatalogQueryId::MutationFgaPolicies,
+        CatalogQueryId::MutationForeignKeys,
+        CatalogQueryId::MutationMvLogs,
         CatalogQueryId::HardParseAssociations,
         CatalogQueryId::HardParseIndexes,
-        CatalogQueryId::MutationVpdPolicies,
     ]
     .iter()
     .any(|id| sql == id.spec().sql)
@@ -557,6 +572,39 @@ fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<Or
             ("EDITION_NAME", None),
             ("LAST_DDL_TIME", Some("2026-10-31T00:00:00")),
         ])]);
+    }
+    if sql == CatalogQueryId::MutationColumns.spec().sql {
+        return Some(
+            [
+                "ID",
+                "SALARY",
+                "EMPLOYEE_ID",
+                "C",
+                "C1",
+                "C2",
+                "N",
+                "STATUS",
+                "TENANT_ID",
+                "AMOUNT",
+                "SECRET",
+            ]
+            .into_iter()
+            .map(|name| {
+                semantic_row(&[
+                    ("OWNER", string_bind(binds, 0)),
+                    ("TABLE_NAME", string_bind(binds, 1)),
+                    ("COLUMN_NAME", Some(name)),
+                    ("DATA_TYPE", Some("NUMBER")),
+                    ("DATA_TYPE_OWNER", None),
+                    ("DATA_DEFAULT", None),
+                    ("DEFAULT_LENGTH", Some("0")),
+                    ("VIRTUAL_COLUMN", Some("NO")),
+                    ("HIDDEN_COLUMN", Some("NO")),
+                    ("USER_GENERATED", Some("YES")),
+                ])
+            })
+            .collect(),
+        );
     }
     if sql == CatalogQueryId::ClosureCompilerSettings.spec().sql {
         return Some(vec![semantic_row(&[
@@ -3193,6 +3241,8 @@ impl OracleConnection for PingFailingMock {
 
 #[derive(Default)]
 struct ExecState {
+    mutation_catalog_unreadable: AtomicBool,
+    impact_count: Mutex<Option<u64>>,
     executed: Mutex<Vec<(String, Vec<OracleBind>)>>,
     /// Every read that actually reached Oracle. A row-level policy is only
     /// enforced if its predicate is in the SQL the database sees.
@@ -3620,6 +3670,28 @@ impl OracleConnection for ExecRecordingMock {
             return Err(DbError::ServerQuery(
                 "ORA-00942: diagnostic plan display unavailable".to_owned(),
             ));
+        }
+        if sql == CatalogQueryId::MutationTriggers.spec().sql
+            && self
+                .state
+                .mutation_catalog_unreadable
+                .load(Ordering::SeqCst)
+        {
+            return Err(DbError::Query(
+                "ORA-00942: synthetic trigger catalog unavailable".into(),
+            ));
+        }
+        if let Some(count) = *self.state.impact_count.lock().unwrap() {
+            if sql == CatalogQueryId::CurrentScn.spec().sql {
+                return Ok(vec![semantic_row(&[("OBSERVED_SCN", Some("424242"))])]);
+            }
+            if sql.to_ascii_uppercase().contains("SELECT COUNT(*)") && sql.contains("impact_probe")
+            {
+                return Ok(vec![semantic_row(&[(
+                    "COUNT(*)",
+                    Some(&count.to_string()),
+                )])]);
+            }
         }
         if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
             return Ok(rows);
@@ -7251,6 +7323,19 @@ fn custom_tool_write_runs_with_confirmation_on_writable_profile() {
         .expect("preview minted execute grant")
         .to_owned();
 
+    let preview_queries = state.queried.lock().expect("queried mutex").clone();
+    assert!(
+        !preview_queries.is_empty(),
+        "rows preview observes the catalog"
+    );
+    assert!(
+        preview_queries
+            .iter()
+            .all(|sql| CatalogQueryId::ALL.iter().any(|id| sql == id.spec().sql)),
+        "preview queries only the closed catalog"
+    );
+    assert!(state.executed.lock().expect("executed mutex").is_empty());
+
     let err = dispatcher
         .dispatch(
             "app_customer_set_name",
@@ -7305,7 +7390,11 @@ fn custom_tool_write_runs_with_confirmation_on_writable_profile() {
         executed[0].1,
         vec![OracleBind::String("Acme".to_owned()), OracleBind::I64(7)]
     );
-    assert!(state.queried.lock().expect("queried mutex").is_empty());
+    assert_eq!(
+        *state.queried.lock().expect("queried mutex"),
+        preview_queries,
+        "confirmation and apply add no candidate reads"
+    );
 }
 
 /// Load exactly one custom tool from inline TOML at a given profile ceiling — a
@@ -8188,6 +8277,48 @@ impl OracleConnection for NoExecMock {
     }
     async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
+    }
+}
+
+/// A preview may observe only closed catalog SQL. Candidate reads and every
+/// execute still panic, so level/token tests cannot hide statement execution.
+struct CatalogOnlyNoExecMock;
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for CatalogOnlyNoExecMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo::default())
+    }
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        assert!(
+            CatalogQueryId::ALL.iter().any(|id| sql == id.spec().sql),
+            "preview attempted non-catalog SQL: {sql}"
+        );
+        Err(DbError::Query(
+            "ORA-00942: synthetic catalog unavailable".into(),
+        ))
+    }
+    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        panic!("preview must never execute a statement")
+    }
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        panic!("preview must never commit")
+    }
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        panic!("unavailable catalog needs no transaction reset")
     }
 }
 
@@ -9698,7 +9829,7 @@ fn preview_sql_reports_read_only_gate_decision_without_running_sql() {
 #[test]
 fn preview_sql_uses_configured_profile_ceiling() {
     let dispatcher = OracleDispatcher::new_with_profile_level(
-        Box::new(NoExecMock),
+        Box::new(CatalogOnlyNoExecMock),
         Some("dev".to_owned()),
         SessionLevelState::new(OperatingLevel::Ddl, false),
     );
@@ -10321,7 +10452,7 @@ fn deploy_ddl_rejects_dml_without_executing() {
 #[test]
 fn set_session_level_previews_before_elevating() {
     let dispatcher = OracleDispatcher::new_with_profile_level(
-        Box::new(NoExecMock),
+        Box::new(CatalogOnlyNoExecMock),
         Some("dev".to_owned()),
         SessionLevelState::new(OperatingLevel::ReadWrite, false),
     );
@@ -10356,7 +10487,7 @@ fn set_session_level_previews_before_elevating() {
 #[test]
 fn set_session_level_requires_confirmation_to_apply() {
     let dispatcher = OracleDispatcher::new_with_profile_level(
-        Box::new(NoExecMock),
+        Box::new(CatalogOnlyNoExecMock),
         Some("dev".to_owned()),
         SessionLevelState::new(OperatingLevel::ReadWrite, false),
     );
@@ -10604,7 +10735,7 @@ fn oauth_admin_scope_keeps_protected_profile_read_only() {
 #[test]
 fn write_compatibility_aliases_share_session_level_gate() {
     let dispatcher = OracleDispatcher::new_with_profile_level(
-        Box::new(NoExecMock),
+        Box::new(CatalogOnlyNoExecMock),
         Some("dev".to_owned()),
         SessionLevelState::new(OperatingLevel::ReadWrite, false),
     );
@@ -10648,7 +10779,7 @@ fn write_compatibility_aliases_share_session_level_gate() {
 #[test]
 fn preview_sql_includes_execute_confirmation_for_allowed_write() {
     let dispatcher = OracleDispatcher::new_with_profile_level(
-        Box::new(NoExecMock),
+        Box::new(CatalogOnlyNoExecMock),
         Some("dev".to_owned()),
         read_write_level(),
     );
@@ -19665,4 +19796,101 @@ fn operator_edition_opt_out_rechecks_current_profile_before_any_connection_call(
     assert_eq!(error.error_class, ErrorClass::PolicyDenied);
     assert!(error.message.contains("edition_change_requests"));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn preview_dml_sandbox_not_applicable_below_level() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new(Box::new(ExecRecordingMock::new(Arc::clone(&state))));
+    let result = dispatcher
+        .dispatch(
+            "oracle_preview_dml",
+            json!({"sql":"UPDATE APP.T SET C=1 WHERE ID=1"}),
+        )
+        .unwrap();
+    assert_eq!(
+        result["sandbox"],
+        json!({"status":"not_applicable","reason":"level_below_required"})
+    );
+    assert_eq!(result["previewed"], false);
+    assert!(executed_statements(&state).is_empty());
+    assert_eq!(
+        state.rollbacks.load(Ordering::SeqCst),
+        0,
+        "backstop was not cleared"
+    );
+}
+
+#[test]
+fn preview_dml_sandbox_not_applicable_untrusted_triggers() {
+    let state = Arc::new(ExecState::default());
+    state
+        .mutation_catalog_unreadable
+        .store(true, Ordering::SeqCst);
+    let dispatcher = workspace_dispatcher(&state);
+    let result = dispatcher
+        .dispatch(
+            "oracle_preview_dml",
+            json!({"sql":"UPDATE APP.T SET C=1 WHERE ID=1"}),
+        )
+        .unwrap();
+    assert_eq!(
+        result["sandbox"],
+        json!({"status":"not_applicable","reason":"untrusted_triggers"})
+    );
+    assert!(result.get("rows_affected").is_none(), "unknown is not zero");
+    assert!(executed_statements(&state).is_empty());
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn preview_dml_sandbox_not_applicable_sequence() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = workspace_dispatcher(&state);
+    let result = dispatcher
+        .dispatch(
+            "oracle_preview_dml",
+            json!({"sql":"INSERT INTO APP.T (ID) VALUES (APP.SEQ.NEXTVAL)"}),
+        )
+        .unwrap();
+    assert_eq!(
+        result["sandbox"],
+        json!({"status":"not_applicable","reason":"untrusted_triggers"})
+    );
+    assert!(executed_statements(&state).is_empty());
+}
+
+#[test]
+fn execute_returns_observed_rows() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = workspace_dispatcher(&state);
+    let result = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({"sql":"UPDATE APP.T SET C=1 WHERE ID=1"}),
+        )
+        .unwrap();
+    assert_eq!(result["observed_rows"], 3);
+    assert_eq!(result["rolled_back"], true);
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn impact_rows_unknown_mutation_catalog_is_unavailable_never_zero() {
+    let state = Arc::new(ExecState::default());
+    state
+        .mutation_catalog_unreadable
+        .store(true, Ordering::SeqCst);
+    *state.impact_count.lock().unwrap() = Some(0); // readable zero is distinct from unknown metadata
+    let dispatcher = OracleDispatcher::new(Box::new(ExecRecordingMock::new(Arc::clone(&state))));
+    let result = dispatcher
+        .dispatch(
+            "oracle_preview_sql",
+            json!({"sql":"UPDATE APP.T SET C=1 WHERE ID=1"}),
+        )
+        .unwrap();
+    assert_eq!(result["impact"]["rows"]["status"], "unavailable");
+    assert!(result["impact"]["rows"].get("value").is_none());
+    assert!(executed_statements(&state).is_empty());
 }

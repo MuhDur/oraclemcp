@@ -31,6 +31,10 @@ flowchart LR
 
 <sub>Only a failed basic-password connect ever falls back; IAM, wallet, and TCPS/PEM always stay on driver-cx, and a fallback never migrates a live session.</sub>
 
+The official alternate emits `TIMESTAMP WITH TIME ZONE` values as UTC (`Z`).
+Driver-cx retains numeric offsets for supported values. The official adapter
+refuses TSTZ binds because it cannot preserve their supplied offset.
+
 OCI Autonomous Database connectivity has an open post-ACCEPT authentication/TTC failure report ([#54](https://github.com/MuhDur/oraclemcp/issues/54)); this branch does not establish that a driver fix has resolved it. Token sources and wallet support do not prove ADB connectivity. Autonomous OCI token minting is also not implemented.
 
 ## At a glance
@@ -181,11 +185,11 @@ The tables below are generated from the server's tool registry — the same desc
 | `oracle_query` | Oracle Query | Run a read-only SELECT with positional binds; paginated and row/byte capped. | `READ_ONLY` | no |
 | `oracle_semantic_search` | Oracle Semantic Search | Run a bounded, fail-closed 23ai vector search through the same policy, semantic-resolution, masking, and audit path as oracle_query. | `READ_ONLY` | no |
 | `oracle_diff` | Oracle Diff | Diff one proven read-only SELECT across two Oracle SCNs, or across two databases. | `READ_ONLY` | no |
-| `oracle_preview_sql` | Oracle Preview SQL | Classify SQL without executing it and bind the exact SQL, typed binds, commit/hold mode, output caps and timeout into any confirmation. | `READ_ONLY` | no |
-| `oracle_execute` | Oracle Execute | Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default. | `READ_ONLY` | yes |
+| `oracle_preview_sql` | Oracle Preview SQL | Classify SQL without executing the candidate and bind the exact SQL, typed binds, commit/hold mode, output caps and timeout into any confirmation. | `READ_ONLY` | no |
+| `oracle_execute` | Oracle Execute | Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default and returns observed_rows separately from any preview estimate. | `READ_ONLY` | yes |
 | `oracle_checkpoint` | Oracle Checkpoint | Establish a named checkpoint (a native Oracle SAVEPOINT) on this session, opening the reversible workspace: oracle_execute with hold=true and a matching preview confirmation leaves DML pending instead of rolling it back, and oracle_undo_to walks it back. | `READ_WRITE` | yes |
 | `oracle_undo_to` | Oracle Undo To | Undo the reversible workspace: ROLLBACK TO SAVEPOINT <name> discards every held statement executed after that checkpoint and releases the checkpoints stacked above it, leaving the transaction open. | `READ_WRITE` | yes |
-| `oracle_preview_dml` | Oracle Preview DML | Dry-run one DML statement: the server brackets it in its own savepoint, executes it, reads the rows it touched, then rolls back to that savepoint and presents the result — nothing is committed and nothing is left behind. | `READ_WRITE` | yes |
+| `oracle_preview_dml` | Oracle Preview DML | Dry-run supported DML only when the current level admits it and a complete mutation closure proves reversible effects. | `READ_WRITE` | yes |
 | `oracle_compile_object` | Oracle Compile Object | Preview or compile one PL/SQL/view object through the active DDL profile gate; preview is the default and execution requires the returned confirmation token. | `DDL` | yes |
 | `oracle_create_or_replace` | Oracle Create Or Replace | Preview or apply one CREATE OR REPLACE statement through the classifier and active DDL profile gate. | `DDL` | yes |
 | `oracle_patch_source` | Oracle Patch Source | Preview or apply an exact old_text to new_text replacement against one stored source object; preview refetches the current source and execute uses the existing DDL confirmation gate. | `DDL` | yes |

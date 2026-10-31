@@ -2158,9 +2158,69 @@ fn token_only_guard_refusal_retains_the_previewed_statement_fingerprint() {
 }
 
 #[test]
+fn witness_with_incomplete_mutation_catalog_refuses_before_savepoint() {
+    let (auditor, sink) = auditor_with_sink();
+    let state = Arc::new(ExecState::default());
+    state
+        .mutation_catalog_unreadable
+        .store(true, Ordering::SeqCst);
+    let dispatcher = dispatcher_with_conn(
+        Box::new(ExecRecordingMock::new(state.clone())),
+        read_write_level(),
+        auditor,
+    );
+    let response = dispatcher
+        .dispatch(
+            "oracle_preview_dml",
+            json!({
+                "sql":"UPDATE refusal_target SET secret = secret WHERE id = 1",
+                "witness":"SELECT secret FROM refusal_target WHERE id = 1",
+            }),
+        )
+        .expect("incomplete mutation catalog returns a typed sandbox refusal");
+    assert_eq!(
+        response["sandbox"],
+        json!({"status":"not_applicable","reason":"untrusted_triggers"})
+    );
+    assert_eq!(response["previewed"], false);
+    assert!(
+        response.get("rows_affected").is_none(),
+        "unknown rows are not zero"
+    );
+    assert!(
+        state.executed.lock().unwrap().is_empty(),
+        "no savepoint or candidate DML"
+    );
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
+    let queried = state.queried.lock().unwrap();
+    assert!(
+        queried
+            .iter()
+            .any(|sql| sql == CatalogQueryId::MutationTriggers.spec().sql)
+    );
+    assert!(
+        queried
+            .iter()
+            .all(|sql| CatalogQueryId::ALL.iter().any(|id| sql == id.spec().sql)),
+        "the witness cannot run after failed mutation proof"
+    );
+    assert!(
+        sink.records()
+            .iter()
+            .all(|record| record.outcome != AuditOutcome::Pending),
+        "no candidate execution begins"
+    );
+}
+
+#[test]
 fn witness_guard_refusal_fingerprints_the_witness_once() {
     let (auditor, sink) = auditor_with_sink();
-    let dispatcher = dispatcher_with(read_write_level(), auditor);
+    let state = Arc::new(ExecState::default());
+    let dispatcher = dispatcher_with_conn(
+        Box::new(ExecRecordingMock::new(state.clone())),
+        read_write_level(),
+        auditor,
+    );
     let dml = "UPDATE refusal_target SET secret = secret WHERE id = 1";
     let witness = "DELETE FROM refusal_target WHERE secret = 'synthetic-witness-secret'";
     let error = dispatcher
@@ -2172,6 +2232,11 @@ fn witness_guard_refusal_fingerprints_the_witness_once() {
         )
         .unwrap_err();
     assert_eq!(error.error_class, ErrorClass::OperatingLevelTooLow);
+    assert!(
+        state.executed.lock().unwrap().is_empty(),
+        "the refused witness prevents the savepoint and candidate DML"
+    );
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
     let records = sink.records();
     let blocked: Vec<_> = records
         .iter()

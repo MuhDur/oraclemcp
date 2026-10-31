@@ -1418,8 +1418,12 @@ impl<'a> GuardedReadExecutor<'a> {
                 &executed_sql,
                 verified_local_vector_embedding,
                 super::read_proof_policy(
-                    state.fga_evidence_policy,
-                    state.require_security_feature_evidence,
+                    if tool == "impact_probe" {
+                        FgaEvidencePolicy::RequireProof
+                    } else {
+                        state.fga_evidence_policy
+                    },
+                    tool == "impact_probe" || state.require_security_feature_evidence,
                     state.trusted_views.as_ref(),
                     policy_functions.as_deref(),
                 ),

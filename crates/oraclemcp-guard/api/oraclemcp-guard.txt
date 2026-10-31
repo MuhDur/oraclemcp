@@ -2007,6 +2007,56 @@ pub type oraclemcp_guard::effective_dml_plan::DmlPlanError::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::effective_dml_plan::DmlPlanError where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::effective_dml_plan::DmlPlanError where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::effective_dml_plan::DmlPlanError::vzip(self) -> V
+pub struct oraclemcp_guard::effective_dml_plan::CountQueryPlan
+impl oraclemcp_guard::effective_dml_plan::CountQueryPlan
+pub fn oraclemcp_guard::effective_dml_plan::CountQueryPlan::binds(&self) -> &[oraclemcp_guard::effective_dml_plan::DmlPlanBindV1]
+pub fn oraclemcp_guard::effective_dml_plan::CountQueryPlan::from_effective_plan(&oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1) -> Self
+pub fn oraclemcp_guard::effective_dml_plan::CountQueryPlan::positional_sql(&self) -> core::result::Result<alloc::string::String, oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape>
+pub fn oraclemcp_guard::effective_dml_plan::CountQueryPlan::sql(&self) -> &str
+impl core::clone::Clone for oraclemcp_guard::effective_dml_plan::CountQueryPlan
+pub fn oraclemcp_guard::effective_dml_plan::CountQueryPlan::clone(&self) -> oraclemcp_guard::effective_dml_plan::CountQueryPlan
+impl core::fmt::Debug for oraclemcp_guard::effective_dml_plan::CountQueryPlan
+pub fn oraclemcp_guard::effective_dml_plan::CountQueryPlan::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for oraclemcp_guard::effective_dml_plan::CountQueryPlan
+impl core::marker::Send for oraclemcp_guard::effective_dml_plan::CountQueryPlan
+impl core::marker::Sync for oraclemcp_guard::effective_dml_plan::CountQueryPlan
+impl core::marker::Unpin for oraclemcp_guard::effective_dml_plan::CountQueryPlan
+impl core::marker::UnsafeUnpin for oraclemcp_guard::effective_dml_plan::CountQueryPlan
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::effective_dml_plan::CountQueryPlan
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::effective_dml_plan::CountQueryPlan
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::effective_dml_plan::CountQueryPlan where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::effective_dml_plan::CountQueryPlan where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::effective_dml_plan::CountQueryPlan where U: core::convert::From<T>
+pub fn oraclemcp_guard::effective_dml_plan::CountQueryPlan::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::effective_dml_plan::CountQueryPlan where U: core::convert::Into<T>
+pub type oraclemcp_guard::effective_dml_plan::CountQueryPlan::Error = core::convert::Infallible
+pub fn oraclemcp_guard::effective_dml_plan::CountQueryPlan::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::effective_dml_plan::CountQueryPlan where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::effective_dml_plan::CountQueryPlan::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::effective_dml_plan::CountQueryPlan::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::effective_dml_plan::CountQueryPlan where T: core::clone::Clone
+pub type oraclemcp_guard::effective_dml_plan::CountQueryPlan::Owned = T
+pub fn oraclemcp_guard::effective_dml_plan::CountQueryPlan::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::effective_dml_plan::CountQueryPlan::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::effective_dml_plan::CountQueryPlan
+impl<T> core::any::Any for oraclemcp_guard::effective_dml_plan::CountQueryPlan where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::effective_dml_plan::CountQueryPlan::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::effective_dml_plan::CountQueryPlan where T: ?core::marker::Sized
+pub fn oraclemcp_guard::effective_dml_plan::CountQueryPlan::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::effective_dml_plan::CountQueryPlan where T: ?core::marker::Sized
+pub fn oraclemcp_guard::effective_dml_plan::CountQueryPlan::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::effective_dml_plan::CountQueryPlan where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::effective_dml_plan::CountQueryPlan::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::effective_dml_plan::CountQueryPlan
+pub fn oraclemcp_guard::effective_dml_plan::CountQueryPlan::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::effective_dml_plan::CountQueryPlan
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::effective_dml_plan::CountQueryPlan
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::effective_dml_plan::CountQueryPlan
+impl<T> typenum::type_operators::Same for oraclemcp_guard::effective_dml_plan::CountQueryPlan
+pub type oraclemcp_guard::effective_dml_plan::CountQueryPlan::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::effective_dml_plan::CountQueryPlan where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::effective_dml_plan::CountQueryPlan where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::effective_dml_plan::CountQueryPlan::vzip(self) -> V
 pub struct oraclemcp_guard::effective_dml_plan::DmlCallerPredicateV1
 impl oraclemcp_guard::effective_dml_plan::DmlCallerPredicateV1
 pub fn oraclemcp_guard::effective_dml_plan::DmlCallerPredicateV1::bind_positions(&self) -> &alloc::collections::btree::set::BTreeSet<usize>
@@ -2109,6 +2159,43 @@ pub type oraclemcp_guard::effective_dml_plan::DmlCallerStatementV1::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::effective_dml_plan::DmlCallerStatementV1 where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::effective_dml_plan::DmlCallerStatementV1 where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::effective_dml_plan::DmlCallerStatementV1::vzip(self) -> V
+pub struct oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1
+impl oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1
+pub fn oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1::prove(&sqlparser::ast::Statement, &oraclemcp_guard::resolver::ResolvedObject) -> core::result::Result<oraclemcp_guard::effective_dml_plan::CountQueryPlan, oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape>
+impl core::marker::Freeze for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1
+impl core::marker::Send for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1
+impl core::marker::Sync for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1
+impl core::marker::Unpin for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1
+impl core::marker::UnsafeUnpin for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1 where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1 where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1 where U: core::convert::From<T>
+pub fn oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1 where U: core::convert::Into<T>
+pub type oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1::Error = core::convert::Infallible
+pub fn oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1 where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1
+impl<T> core::any::Any for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1 where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1 where T: ?core::marker::Sized
+pub fn oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1 where T: ?core::marker::Sized
+pub fn oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1
+pub fn oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1
+impl<T> typenum::type_operators::Same for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1
+pub type oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1 where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1 where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::effective_dml_plan::DmlImpactShapeV1::vzip(self) -> V
 pub struct oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1
 impl oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::caller(&self) -> &oraclemcp_guard::effective_dml_plan::DmlCallerStatementV1
@@ -2164,6 +2251,63 @@ pub type oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1 where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1 where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1::vzip(self) -> V
+pub struct oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+impl core::clone::Clone for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+pub fn oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::clone(&self) -> oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+impl core::cmp::Eq for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+impl core::cmp::PartialEq for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+pub fn oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::eq(&self, &oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape) -> bool
+impl core::error::Error for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+impl core::fmt::Debug for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+pub fn oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+pub fn oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+impl core::marker::StructuralPartialEq for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+impl core::marker::Freeze for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+impl core::marker::Send for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+impl core::marker::Sync for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+impl core::marker::Unpin for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+impl core::marker::UnsafeUnpin for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape where U: core::convert::From<T>
+pub fn oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape where U: core::convert::Into<T>
+pub type oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::Error = core::convert::Infallible
+pub fn oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape where T: core::clone::Clone
+pub type oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::Owned = T
+pub fn oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::to_owned(&self) -> T
+impl<T> alloc::string::ToString for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape where T: core::fmt::Display + ?core::marker::Sized
+pub fn oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::to_string(&self) -> alloc::string::String
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+impl<T> core::any::Any for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape where T: ?core::marker::Sized
+pub fn oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape where T: ?core::marker::Sized
+pub fn oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+pub fn oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+impl<T> typenum::type_operators::Same for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+pub type oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape::vzip(self) -> V
 pub const oraclemcp_guard::effective_dml_plan::DML_REWRITE_ALGORITHM_VERSION: u16
 pub mod oraclemcp_guard::enforcement
 pub const oraclemcp_guard::enforcement::SET_TRANSACTION_READ_ONLY: &str
@@ -2402,10 +2546,12 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::impact_binding::FieldStatus<T> where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::impact_binding::FieldStatus<T>::vzip(self) -> V
 pub enum oraclemcp_guard::impact_binding::NotApplicableReason
+pub oraclemcp_guard::impact_binding::NotApplicableReason::LevelBelowRequired
 pub oraclemcp_guard::impact_binding::NotApplicableReason::NoEffect
 pub oraclemcp_guard::impact_binding::NotApplicableReason::NoObject
 pub oraclemcp_guard::impact_binding::NotApplicableReason::NoSource
 pub oraclemcp_guard::impact_binding::NotApplicableReason::NotDml
+pub oraclemcp_guard::impact_binding::NotApplicableReason::UntrustedTriggers
 impl core::clone::Clone for oraclemcp_guard::impact_binding::NotApplicableReason
 pub fn oraclemcp_guard::impact_binding::NotApplicableReason::clone(&self) -> oraclemcp_guard::impact_binding::NotApplicableReason
 impl core::cmp::Eq for oraclemcp_guard::impact_binding::NotApplicableReason
@@ -2465,6 +2611,7 @@ pub fn oraclemcp_guard::impact_binding::NotApplicableReason::vzip(self) -> V
 pub enum oraclemcp_guard::impact_binding::RowEstimateKind
 pub oraclemcp_guard::impact_binding::RowEstimateKind::Estimated
 pub oraclemcp_guard::impact_binding::RowEstimateKind::Observed
+pub oraclemcp_guard::impact_binding::RowEstimateKind::SnapshotEstimate
 impl core::clone::Clone for oraclemcp_guard::impact_binding::RowEstimateKind
 pub fn oraclemcp_guard::impact_binding::RowEstimateKind::clone(&self) -> oraclemcp_guard::impact_binding::RowEstimateKind
 impl core::cmp::Eq for oraclemcp_guard::impact_binding::RowEstimateKind
@@ -15236,10 +15383,12 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::levels::LevelDecision where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::levels::LevelDecision::vzip(self) -> V
 pub enum oraclemcp_guard::NotApplicableReason
+pub oraclemcp_guard::NotApplicableReason::LevelBelowRequired
 pub oraclemcp_guard::NotApplicableReason::NoEffect
 pub oraclemcp_guard::NotApplicableReason::NoObject
 pub oraclemcp_guard::NotApplicableReason::NoSource
 pub oraclemcp_guard::NotApplicableReason::NotDml
+pub oraclemcp_guard::NotApplicableReason::UntrustedTriggers
 impl core::clone::Clone for oraclemcp_guard::impact_binding::NotApplicableReason
 pub fn oraclemcp_guard::impact_binding::NotApplicableReason::clone(&self) -> oraclemcp_guard::impact_binding::NotApplicableReason
 impl core::cmp::Eq for oraclemcp_guard::impact_binding::NotApplicableReason
@@ -16166,6 +16315,7 @@ pub fn oraclemcp_guard::purity::RoutineEffect::vzip(self) -> V
 pub enum oraclemcp_guard::RowEstimateKind
 pub oraclemcp_guard::RowEstimateKind::Estimated
 pub oraclemcp_guard::RowEstimateKind::Observed
+pub oraclemcp_guard::RowEstimateKind::SnapshotEstimate
 impl core::clone::Clone for oraclemcp_guard::impact_binding::RowEstimateKind
 pub fn oraclemcp_guard::impact_binding::RowEstimateKind::clone(&self) -> oraclemcp_guard::impact_binding::RowEstimateKind
 impl core::cmp::Eq for oraclemcp_guard::impact_binding::RowEstimateKind

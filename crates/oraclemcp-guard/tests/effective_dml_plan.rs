@@ -591,3 +591,158 @@ fn plan_refuses_mismatched_original_envelope() {
         DmlPlanError::InvalidEffectivePlan
     );
 }
+
+fn impact_target() -> oraclemcp_guard::ResolvedObject {
+    oraclemcp_guard::ResolvedObject {
+        owner: "APP".into(),
+        name: "ORDERS".into(),
+        kind: oraclemcp_guard::CatalogObjectKind::Table,
+        container: None,
+        member: None,
+        overloads: Vec::new(),
+        quote_exact: true,
+        synonym_chain: Vec::new(),
+        db_link: None,
+        identity: oraclemcp_guard::ResolvedIdentity {
+            object_id: 41,
+            edition: None,
+        },
+    }
+}
+
+fn impact_shape(
+    sql: &str,
+    resolved: &oraclemcp_guard::ResolvedObject,
+) -> Result<
+    oraclemcp_guard::effective_dml_plan::CountQueryPlan,
+    oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape,
+> {
+    use oraclemcp_guard::effective_dml_plan::{DmlImpactShapeV1, UnsupportedDmlShape};
+    let statements = Parser::parse_sql(&OracleDialect {}, sql).map_err(|_| UnsupportedDmlShape)?;
+    let [statement] = statements.as_slice() else {
+        return Err(UnsupportedDmlShape);
+    };
+    DmlImpactShapeV1::prove(statement, resolved)
+}
+
+#[test]
+fn dml_shape_update_single_table_supported() {
+    let plan = impact_shape(
+        "UPDATE APP.ORDERS SET STATUS=:1 WHERE ID BETWEEN :2 AND :3",
+        &impact_target(),
+    )
+    .unwrap();
+    assert_eq!(
+        plan.sql(),
+        "SELECT COUNT(*) FROM \"APP\".\"ORDERS\" WHERE ID BETWEEN :2 AND :3"
+    );
+    assert_eq!(
+        plan.binds(),
+        &[
+            DmlPlanBindV1::Caller { position: 2 },
+            DmlPlanBindV1::Caller { position: 3 }
+        ]
+    );
+    assert_eq!(
+        plan.positional_sql().unwrap(),
+        "SELECT COUNT(*) FROM \"APP\".\"ORDERS\" WHERE ID BETWEEN :1 AND :2"
+    );
+}
+
+#[test]
+fn dml_shape_delete_supported() {
+    let plan = impact_shape(
+        "DELETE FROM ORDERS WHERE ID BETWEEN 1 AND 10",
+        &impact_target(),
+    )
+    .unwrap();
+    assert_eq!(
+        plan.sql(),
+        "SELECT COUNT(*) FROM \"APP\".\"ORDERS\" WHERE ID BETWEEN 1 AND 10"
+    );
+    assert!(plan.binds().is_empty());
+}
+
+#[test]
+fn dml_shape_effective_plan_retains_policy_grant_and_bind_provenance() {
+    use oraclemcp_guard::effective_dml_plan::CountQueryPlan;
+    let effective = plan_with(
+        vec!["tenant-floor".into()],
+        [1; 32],
+        [2; 32],
+        "TENANT_ID = 3",
+        5,
+    );
+    let count = CountQueryPlan::from_effective_plan(&effective);
+    assert_eq!(count.sql(), effective.impact_count_sql());
+    assert_eq!(count.binds(), effective.impact_bind_layout());
+    assert!(count.sql().contains("TENANT_ID = 3"));
+    assert!(count.sql().contains(":omcp_g1"));
+    assert!(!count.positional_sql().unwrap().contains(":omcp_g1"));
+}
+
+macro_rules! unsupported_shape {
+    ($name:ident, $sql:expr) => {
+        #[test]
+        fn $name() {
+            assert_eq!(
+                impact_shape($sql, &impact_target()).unwrap_err(),
+                oraclemcp_guard::effective_dml_plan::UnsupportedDmlShape
+            );
+        }
+    };
+}
+
+unsupported_shape!(
+    dml_shape_unsupported_inline_view,
+    "UPDATE (SELECT * FROM APP.ORDERS) SET STATUS='x' WHERE ID=1"
+);
+unsupported_shape!(
+    dml_shape_unsupported_multi_table_view,
+    "DELETE FROM APP.ORDERS, APP.OTHER WHERE ID=1"
+);
+unsupported_shape!(
+    dml_shape_unsupported_partition_extended,
+    "UPDATE APP.ORDERS PARTITION (P1) SET STATUS='x' WHERE ID=1"
+);
+unsupported_shape!(
+    dml_shape_unsupported_remote,
+    "DELETE FROM APP.ORDERS@REMOTE WHERE ID=1"
+);
+unsupported_shape!(
+    dml_shape_unsupported_current_of,
+    "DELETE FROM APP.ORDERS WHERE CURRENT OF cursor1"
+);
+unsupported_shape!(
+    dml_shape_unsupported_table_collection,
+    "DELETE FROM TABLE(APP.COLLECTION()) WHERE ID=1"
+);
+unsupported_shape!(
+    dml_shape_unsupported_ambiguous,
+    "UPDATE APP.ORDERS o SET STATUS='x' WHERE o.ID=1"
+);
+unsupported_shape!(
+    dml_shape_unsupported_insert,
+    "INSERT INTO APP.ORDERS (ID) VALUES (1)"
+);
+unsupported_shape!(
+    dml_shape_unsupported_merge,
+    "MERGE INTO APP.ORDERS t USING APP.OTHER s ON (t.ID=s.ID) WHEN MATCHED THEN UPDATE SET STATUS='x'"
+);
+
+#[test]
+fn dml_shape_unsupported_instead_of_view() {
+    let mut target = impact_target();
+    target.kind = oraclemcp_guard::CatalogObjectKind::View;
+    assert!(impact_shape("UPDATE APP.ORDERS SET STATUS='x' WHERE ID=1", &target).is_err());
+}
+
+#[test]
+fn dml_shape_requires_the_exact_resolved_target() {
+    let mut target = impact_target();
+    target.name = "OTHER".into();
+    assert!(impact_shape("DELETE FROM APP.ORDERS WHERE ID=1", &target).is_err());
+    target = impact_target();
+    target.identity.object_id = 0;
+    assert!(impact_shape("DELETE FROM APP.ORDERS WHERE ID=1", &target).is_err());
+}

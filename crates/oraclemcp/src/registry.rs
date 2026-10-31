@@ -909,7 +909,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_preview_sql",
             ToolTier::FoundationStatic,
-            "Classify SQL without executing it and bind the exact SQL, typed binds, commit/hold mode, output caps and timeout into any confirmation. Changing one requires a new preview. Admitted DDL previews include dependency closure and predicted invalidations, bounded to depth 10 and 1000 dependents; truncation and uncertainty are explicit, and unavailable observations do not change approval.",
+            "Classify SQL without executing the candidate and bind the exact SQL, typed binds, commit/hold mode, output caps and timeout into any confirmation. Changing one requires a new preview. Supported UPDATE/DELETE previews may run a separately audited, guarded COUNT read and return an advisory snapshot estimate with SCN bounds; unavailable rows never become zero. Admitted DDL previews include dependency closure and predicted invalidations, bounded to depth 10 and 1000 dependents; truncation and uncertainty are explicit, and unavailable observations do not change approval.",
         )
         .with_input_schema(object_schema(preview_sql_properties(), &["sql"])),
     );
@@ -918,7 +918,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_execute",
             ToolTier::FoundationLiveDb,
-            "Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default. Commits, held DML and non-transactional effects such as sequence NEXTVAL require a confirmation from oracle_preview_sql for the exact SQL, typed binds, commit/hold mode, output caps and timeout; a change requires re-preview. Visible at READ_ONLY only when the effective profile/OAuth ceiling permits READ_WRITE; visibility grants no authority. An explicit scoped_grant selects the scoped-grant path with no session-level fallback. Query-shaped NEXTVAL is refused because this path does not fetch rows. Engine-free caller PL/SQL is limited to NULL and literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements; explicit CALL remains refused until its runtime target can be resolved exactly.",
+            "Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default and returns observed_rows separately from any preview estimate. Commits, held DML and non-transactional effects such as sequence NEXTVAL require a confirmation from oracle_preview_sql for the exact SQL, typed binds, commit/hold mode, output caps and timeout; a change requires re-preview. Visible at READ_ONLY only when the effective profile/OAuth ceiling permits READ_WRITE; visibility grants no authority. An explicit scoped_grant selects the scoped-grant path with no session-level fallback. Query-shaped NEXTVAL is refused because this path does not fetch rows. Engine-free caller PL/SQL is limited to NULL and literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements; explicit CALL remains refused until its runtime target can be resolved exactly.",
         )
         .with_input_schema(object_schema(
             props_with(
@@ -989,12 +989,12 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_preview_dml",
             ToolTier::FoundationLiveDb,
-            "Dry-run one DML statement: the server brackets it in its own savepoint, executes it, reads the rows it touched, then rolls back to that savepoint and presents the result — nothing is committed and nothing is left behind. Supply witness to see the affected rows before and after (it is proven read-only like any other read). A statement whose effect ESCAPES rollback (sequence NEXTVAL, and by nature autonomous transactions or triggers) is refused rather than dry-run, and returned labeled cannot_undo: a dry run must not cause an effect it cannot take back. Committing the previewed change afterwards still re-classifies and re-gates the exact statement — the preview grants nothing.",
+            "Dry-run supported DML only when the current level admits it and a complete mutation closure proves reversible effects. The server uses a savepoint and rolls back by default. Otherwise sandbox reports not_applicable with level_below_required or untrusted_triggers, without executing the candidate; unknown rows are never zero. Sequence advancement, autonomous work, transaction control and other unproven effects refuse the sandbox. An optional witness is separately proven read-only and shows rows before and after. Later execution re-classifies and re-gates the statement; the preview grants no authority.",
         )
         .with_input_schema(object_schema(
             props_with(
                 json!({
-                    "sql": { "type": "string", "description": "A single reversible DML statement (INSERT/UPDATE/DELETE/MERGE). Use :1, :2 … for binds. DDL cannot be dry-run: Oracle commits it implicitly." },
+                    "sql": { "type": "string", "description": "A single DML statement. The sandbox currently supports proven local-table UPDATE/DELETE; other shapes return not_applicable. Use :1, :2 … for binds. DDL cannot be dry-run: Oracle commits it implicitly." },
                     "binds": {
                         "type": "array",
                         "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
@@ -1025,7 +1025,14 @@ pub fn tool_registry() -> ToolRegistry {
             "properties": {
                 "previewed": { "type": "boolean", "description": "True when the statement was executed in the sandbox and rolled back." },
                 "reversible": { "type": "boolean", "description": "False when the statement has an effect the sandbox cannot take back; it is then refused, not run." },
-                "rows_affected": { "type": "integer", "minimum": 0, "description": "Rows the DML changed inside the sandbox." },
+                "sandbox": {
+                    "oneOf": [
+                        { "type":"object", "properties": { "status":{"const":"computed"}, "value":{"type":"integer","minimum":0} }, "required":["status","value"], "additionalProperties":false },
+                        { "type":"object", "properties": { "status":{"const":"not_applicable"}, "reason":{"enum":["level_below_required","untrusted_triggers"]} }, "required":["status","reason"], "additionalProperties":false }
+                    ],
+                    "description":"The sandbox count or the typed reason no sandbox ran."
+                },
+                "rows_affected": { "type": "integer", "minimum": 0, "description": "Rows the DML changed inside the sandbox. Absent when no sandbox ran." },
                 "before": { "type": "object", "description": "Witness rows read inside the sandbox before the DML.", "additionalProperties": true },
                 "after": { "type": "object", "description": "Witness rows read inside the sandbox after the DML, before the rollback.", "additionalProperties": true },
                 "cannot_undo": { "type": "array", "items": { "type": "string" }, "description": "Effects that would escape the rollback. Non-empty means the statement was NOT run." },
@@ -1035,7 +1042,7 @@ pub fn tool_registry() -> ToolRegistry {
                 "danger": { "type": "string" },
                 "next_step": { "type": "string" }
             },
-            "required": ["previewed", "reversible", "rolled_back", "committed"],
+            "required": ["sandbox", "previewed", "reversible", "rolled_back", "committed"],
             "additionalProperties": true
         }))
         .destructive(),

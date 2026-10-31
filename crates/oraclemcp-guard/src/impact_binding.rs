@@ -63,6 +63,8 @@ pub enum NotApplicableReason {
     NoObject,
     NoSource,
     NoEffect,
+    LevelBelowRequired,
+    UntrustedTriggers,
 }
 
 impl NotApplicableReason {
@@ -72,6 +74,8 @@ impl NotApplicableReason {
             Self::NoObject => 2,
             Self::NoSource => 3,
             Self::NoEffect => 4,
+            Self::LevelBelowRequired => 5,
+            Self::UntrustedTriggers => 6,
         }
     }
 }
@@ -181,6 +185,7 @@ pub enum ScnBounds {
 pub enum RowEstimateKind {
     Estimated,
     Observed,
+    SnapshotEstimate,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

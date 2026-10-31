@@ -23,7 +23,7 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 use crate::action_envelope::{ActionEnvelopeV1, ActionKind, BindEnvelope, OracleBindType};
 use crate::resolver::{CatalogObjectKind, RawName, RawNamePart, SyntacticRole};
 use crate::scoped_grant::matcher::{ResolvedDmlTarget, match_statement};
-use crate::scoped_grant::rewrite::{GrantRewriteV1, QuotedIdent, build_rewrite};
+use crate::scoped_grant::rewrite::{GrantRewriteV1, build_rewrite};
 use crate::scoped_grant::{
     ColumnIdent, GrantBind, GrantPredicateV1, GrantTargetIdentity, GrantVerb, MAX_IN_LIST_VALUES,
     ScopedGrant,
@@ -309,6 +309,15 @@ fn check_target(
     target: &GrantTargetIdentity,
     current_schema: &str,
 ) -> Result<(), DmlPlanError> {
+    check_table_target(relation, &target.owner, &target.object_name, current_schema)
+}
+
+fn check_table_target(
+    relation: &TableFactor,
+    owner: &str,
+    object_name: &str,
+    current_schema: &str,
+) -> Result<(), DmlPlanError> {
     let TableFactor::Table {
         name,
         alias: None,
@@ -329,8 +338,8 @@ fn check_target(
     }
     let parts = name_parts(name)?;
     let matches = match parts.as_slice() {
-        [table] => table == &target.object_name && current_schema == target.owner,
-        [owner, table] => owner == &target.owner && table == &target.object_name,
+        [table] => table == object_name && current_schema == owner,
+        [schema, table] => schema == owner && table == object_name,
         _ => false,
     };
     if matches {
@@ -987,7 +996,144 @@ fn put(out: &mut Vec<u8>, value: &[u8]) {
     out.extend_from_slice(value);
 }
 
-fn impact_count_template(target: &QuotedIdent, selection: Expr) -> Result<String, DmlPlanError> {
+/// A shape refusal never substitutes a zero row count.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnsupportedDmlShape;
+
+impl fmt::Display for UnsupportedDmlShape {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("unsupported_dml_shape")
+    }
+}
+
+impl std::error::Error for UnsupportedDmlShape {}
+
+/// Server-owned count SQL and its original bind provenance. Construction is
+/// private: a count must come from the proven shape or the effective DML plan.
+#[derive(Clone, Debug)]
+pub struct CountQueryPlan {
+    sql: String,
+    binds: Vec<DmlPlanBindV1>,
+}
+
+impl CountQueryPlan {
+    /// Preserve the exact W13 policy/grant predicate and bind layout. Do not
+    /// reconstruct a caller-only count after a scoped rewrite has happened.
+    #[must_use]
+    pub fn from_effective_plan(plan: &EffectiveDmlPlanV1) -> Self {
+        Self {
+            sql: plan.impact_count_sql().to_owned(),
+            binds: plan.impact_bind_layout().to_vec(),
+        }
+    }
+
+    #[must_use]
+    pub fn sql(&self) -> &str {
+        &self.sql
+    }
+
+    #[must_use]
+    pub fn binds(&self) -> &[DmlPlanBindV1] {
+        &self.binds
+    }
+
+    /// Render positional slots in occurrence order for the database adapter.
+    /// The provenance layout still names the original caller/grant values:
+    /// dropping SET must never bind its value to a retained WHERE placeholder.
+    pub fn positional_sql(&self) -> Result<String, UnsupportedDmlShape> {
+        let mut statements =
+            Parser::parse_sql(&OracleDialect {}, &self.sql).map_err(|_| UnsupportedDmlShape)?;
+        let mut position = 0;
+        let _: std::ops::ControlFlow<()> =
+            sqlparser::ast::visit_expressions_mut(&mut statements, |expression| {
+                if let Expr::Value(value) = expression
+                    && matches!(value.value, Value::Placeholder(_))
+                {
+                    position += 1;
+                    value.value = Value::Placeholder(format!(":{position}"));
+                }
+                std::ops::ControlFlow::Continue(())
+            });
+        if position != self.binds.len() || statements.len() != 1 {
+            return Err(UnsupportedDmlShape);
+        }
+        Ok(statements[0].to_string())
+    }
+}
+
+/// Equivalent row-selection proof for the ordinary session DML path. The
+/// supplied statement must already include the server's policy predicate.
+/// This is syntax/identity proof, not a second mutation-effect analyzer.
+pub struct DmlImpactShapeV1;
+
+impl DmlImpactShapeV1 {
+    pub fn prove(
+        statement: &Statement,
+        resolved: &crate::resolver::ResolvedObject,
+    ) -> Result<CountQueryPlan, UnsupportedDmlShape> {
+        if resolved.kind != CatalogObjectKind::Table
+            || resolved.db_link.is_some()
+            || !resolved.synonym_chain.is_empty()
+            || resolved.member.is_some()
+            || resolved.identity.object_id == 0
+        {
+            return Err(UnsupportedDmlShape);
+        }
+        let (relation, selection) = match statement {
+            Statement::Update(update)
+                if update.from.is_none()
+                    && update.table.joins.is_empty()
+                    && update.optimizer_hints.is_empty()
+                    && update.returning.is_none()
+                    && update.output.is_none()
+                    && update.or.is_none()
+                    && update.order_by.is_empty()
+                    && update.limit.is_none()
+                    && !update.assignments.is_empty() =>
+            {
+                (&update.table.relation, update.selection.as_ref())
+            }
+            Statement::Delete(delete)
+                if delete.tables.is_empty()
+                    && delete.using.is_none()
+                    && delete.optimizer_hints.is_empty()
+                    && delete.returning.is_none()
+                    && delete.output.is_none()
+                    && delete.order_by.is_empty()
+                    && delete.limit.is_none() =>
+            {
+                let FromTable::WithFromKeyword(tables) = &delete.from else {
+                    return Err(UnsupportedDmlShape);
+                };
+                let [table] = tables.as_slice() else {
+                    return Err(UnsupportedDmlShape);
+                };
+                if !table.joins.is_empty() {
+                    return Err(UnsupportedDmlShape);
+                }
+                (&table.relation, delete.selection.as_ref())
+            }
+            _ => return Err(UnsupportedDmlShape),
+        };
+        check_table_target(relation, &resolved.owner, &resolved.name, &resolved.owner)
+            .map_err(|_| UnsupportedDmlShape)?;
+        let target = format!(
+            "\"{}\".\"{}\"",
+            resolved.owner.replace('"', "\"\""),
+            resolved.name.replace('"', "\"\"")
+        );
+        let selection = selection.cloned().ok_or(UnsupportedDmlShape)?;
+        let sql = impact_count_template(&target, selection).map_err(|_| UnsupportedDmlShape)?;
+        crate::semantic_read_plan_checked(&sql).map_err(|_| UnsupportedDmlShape)?;
+        let binds = bind_layout(&sql, usize::MAX, &[]).map_err(|_| UnsupportedDmlShape)?;
+        Ok(CountQueryPlan { sql, binds })
+    }
+}
+
+fn impact_count_template(
+    target: &impl fmt::Display,
+    selection: Expr,
+) -> Result<String, DmlPlanError> {
     let sql = format!("SELECT COUNT(*) FROM {target}");
     let mut statements = Parser::parse_sql(&OracleDialect {}, &sql)
         .map_err(|_| DmlPlanError::InvalidEffectivePlan)?;
