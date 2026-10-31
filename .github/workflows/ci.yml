@@ -543,6 +543,14 @@ jobs:
         run: |
           mkdir -m 700 -p /private/tmp/omcp
           echo "TMPDIR=/private/tmp/omcp" >> "$GITHUB_ENV"
+      # The repository's e2e/release shell tooling is Linux-hosted (bash 4
+      # mapfile, GNU realpath -m, timeout); the e2e_harness tests run it.
+      - name: Provide GNU bash and coreutils for the repository scripts on macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew install bash coreutils
+          echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
       - name: Refuse nightly runtime features on every target
         shell: bash
         run: |
