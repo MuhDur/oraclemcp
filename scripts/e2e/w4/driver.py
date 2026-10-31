@@ -515,6 +515,10 @@ def impact_probe_audit_selftest():
         changed = clone(records)
         changed[probe]["verdict_certificate"]["bound_audit_hash"] = digest("different audit record")
         rejected(expected, changed, "unbound certificate")
+        changed = clone(records)
+        changed[probe + 1]["observed_scn"] = 8
+        changed[probe + 1]["verdict_certificate"]["observed_scn"] = "8"
+        rejected(expected, changed, "different pair SCN with consistent terminal certificate")
         rejected(expected, records, "unverified chain", verified=False)
     print(compact({"selftest": "impact_probe_exact_kind_order_chain_and_count", "verdict": "pass"}))
 
