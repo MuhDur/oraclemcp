@@ -149,6 +149,20 @@ pub(super) fn attach_rows_impact(
     }
 }
 
+async fn rows_current_scn(cx: &Cx, conn: &dyn OracleConnection) -> Result<u64, UnavailableReason> {
+    use oraclemcp_db::{AsOf, ScnProbeOutcome};
+    match AsOf::probe_current_system_change_number(cx, conn).await {
+        Ok(ScnProbeOutcome::Granted(scn)) => Ok(scn),
+        Ok(ScnProbeOutcome::NotGranted(_)) => {
+            Err(UnavailableReason::FlashbackCapabilityUnavailable)
+        }
+        Ok(ScnProbeOutcome::Desync) => Err(UnavailableReason::CatalogUnavailable),
+        Err(error) => Err(UnavailableReason::from_error_class(
+            error.into_envelope().error_class,
+        )),
+    }
+}
+
 /// An estimate is advisory and belongs to an SCN window and profile generation.
 /// Neither an unknown mechanism nor a failed read can become a zero estimate.
 pub(super) async fn compute_rows_impact(
@@ -158,7 +172,6 @@ pub(super) async fn compute_rows_impact(
     proof: &super::served_classifier::PreparedClassifier,
     binding: &super::ExecGrantBinding,
 ) -> FieldStatus<oraclemcp_guard::RowEstimate> {
-    use oraclemcp_db::{AsOf, ScnProbeOutcome};
     use oraclemcp_guard::effective_dml_plan::{DmlImpactShapeV1, DmlPlanBindV1};
     let unavailable = |reason| FieldStatus::Unavailable { reason };
     if !is_dml_statement(&args.sql) {
@@ -171,8 +184,10 @@ pub(super) async fn compute_rows_impact(
     if args.scoped_grant.is_some() {
         return unavailable(UnavailableReason::UnsupportedDmlShape);
     }
-    if ctx.request_budget.enforce(cx).is_err() {
-        return unavailable(UnavailableReason::Timeout);
+    if let Err(error) = ctx.request_budget.enforce(cx) {
+        return unavailable(UnavailableReason::from_error_class(
+            error.into_envelope().error_class,
+        ));
     }
     let base = proof.precheck.classify(&args.sql);
     let super::PolicyGate::Admitted(admission) = super::apply_preview_sql_policy(
@@ -183,15 +198,17 @@ pub(super) async fn compute_rows_impact(
         &base,
         &args.sql,
     ) else {
-        return unavailable(UnavailableReason::UnsupportedDmlShape);
+        return unavailable(UnavailableReason::PolicyDenied);
     };
     if admission.effective_decision.danger == super::DangerLevel::Forbidden {
-        return unavailable(UnavailableReason::UnsupportedDmlShape);
+        return unavailable(UnavailableReason::ForbiddenStatement);
     }
     let sql = admission.effective_sql.as_deref().unwrap_or(&args.sql);
     let Ok(statement) = one_dml_statement(sql) else {
         return unavailable(UnavailableReason::UnsupportedDmlShape);
     };
+    // This resolver rejects unsupported/nonlocal target shapes before a count
+    // plan exists. Keep that shape refusal distinct from executor read errors.
     let Ok(relations) =
         resolve_dml_relations(cx, ctx.state.conn.as_ref(), &ctx.state.catalog_cache, sql).await
     else {
@@ -221,15 +238,16 @@ pub(super) async fn compute_rows_impact(
     // ladder would add another predicate, that count is not an equivalent
     // selection. Refuse the estimate rather than report an undercount.
     let count_base = proof.precheck.classify(&count_sql);
-    let Ok(read_policy) = super::apply_sql_policy(
+    let read_policy = match super::apply_sql_policy(
         ctx.sql_policy,
         ctx.current_schema,
         ctx.context.principal_key(),
         &proof.precheck,
         &count_base,
         &count_sql,
-    ) else {
-        return unavailable(UnavailableReason::UnsupportedDmlShape);
+    ) {
+        Ok(policy) => policy,
+        Err(error) => return unavailable(UnavailableReason::from_error_class(error.error_class)),
     };
     if read_policy.effective_sql.is_some() {
         return unavailable(UnavailableReason::UnsupportedDmlShape);
@@ -239,20 +257,21 @@ pub(super) async fn compute_rows_impact(
         quarantine: Some(&ctx.dispatcher.quarantine),
         provenance: oraclemcp_db::ReadQueryProvenance::ServerRead,
     };
-    let Ok(closure) = collect_statement_mutation(cx, &guarded_conn, &statement, target).await
-    else {
-        return unavailable(UnavailableReason::CatalogUnavailable);
+    let closure = match collect_statement_mutation(cx, &guarded_conn, &statement, target).await {
+        Ok(closure) => closure,
+        Err(reason) => return unavailable(reason),
     };
     if !closure.is_complete() {
         return unavailable(UnavailableReason::CatalogUnavailable);
     }
-    if ctx.request_budget.enforce(cx).is_err() {
-        return unavailable(UnavailableReason::Timeout);
+    if let Err(error) = ctx.request_budget.enforce(cx) {
+        return unavailable(UnavailableReason::from_error_class(
+            error.into_envelope().error_class,
+        ));
     }
-    let Ok(ScnProbeOutcome::Granted(scn_before)) =
-        AsOf::probe_current_system_change_number(cx, &guarded_conn).await
-    else {
-        return unavailable(UnavailableReason::CatalogUnavailable);
+    let scn_before = match rows_current_scn(cx, &guarded_conn).await {
+        Ok(scn) => scn,
+        Err(reason) => return unavailable(reason),
     };
     let profile_generation = ctx
         .state
@@ -274,18 +293,18 @@ pub(super) async fn compute_rows_impact(
             ctx.level,
         )
         .await;
-    let Ok(response) = result else {
-        return unavailable(UnavailableReason::CatalogUnavailable);
+    let response = match result {
+        Ok(response) => response,
+        Err(error) => return unavailable(UnavailableReason::from_error_class(error.error_class)),
     };
     let guarded_conn = super::read_executor::ReadUncertaintyConn {
         inner: ctx.state.conn.as_ref(),
         quarantine: Some(&ctx.dispatcher.quarantine),
         provenance: oraclemcp_db::ReadQueryProvenance::ServerRead,
     };
-    let Ok(ScnProbeOutcome::Granted(scn_after)) =
-        AsOf::probe_current_system_change_number(cx, &guarded_conn).await
-    else {
-        return unavailable(UnavailableReason::CatalogUnavailable);
+    let scn_after = match rows_current_scn(cx, &guarded_conn).await {
+        Ok(scn) => scn,
+        Err(reason) => return unavailable(reason),
     };
     if response.get("observed_scn").and_then(Value::as_u64) != Some(scn_before) {
         return unavailable(UnavailableReason::CatalogUnavailable);
@@ -2447,6 +2466,67 @@ with oracledb.connect(user='sys', password=os.environ['OMCP_ROWS_PASSWORD'],
         }
 
         #[cfg(feature = "plsql-intelligence")]
+        async fn rows_flashback_ready(
+            cx: &Cx,
+            admin: &dyn OracleConnection,
+            dispatcher: &super::super::super::OracleDispatcher,
+            schema: &str,
+            expected_rows: i64,
+        ) -> Result<(), String> {
+            use oraclemcp_error::ErrorClass;
+            let started = std::time::Instant::now();
+            let mut attempts = 0;
+            // Fixture readiness only: freshly created tables can refuse AS-OF
+            // reads. Production estimates keep the original typed refusal.
+            asupersync::time::timeout(cx.now(), Duration::from_secs(60), async {
+                loop {
+                    attempts += 1;
+                    let scn = rows_current_scn(cx, admin)
+                        .await
+                        .map_err(|reason| format!("readiness SCN probe: {reason:?}"))?;
+                    let result = Box::pin(dispatcher.dispatch_with_cx_inner(
+                        cx,
+                        super::super::super::DispatchContext::default(),
+                        "oracle_query",
+                        json!({
+                            "sql":format!("SELECT COUNT(*) AS N FROM {schema}.ROWS_T WHERE ID BETWEEN :1 AND :2"),
+                            "binds":[1,10], "max_rows":1, "timeout_seconds":5,
+                            "as_of":{"scn":scn}
+                        }),
+                        &std::cell::Cell::new(false),
+                    ))
+                    .await;
+                    match result {
+                        Ok(value) => {
+                            let count = value["rows"][0]["N"].as_i64().or_else(|| {
+                                value["rows"][0]["N"].as_str()?.parse().ok()
+                            });
+                            if count != Some(expected_rows)
+                                || value["observed_scn"].as_u64() != Some(scn)
+                                || value["truncated"] != false
+                            {
+                                return Err(format!("flashback readiness mismatch: {value}"));
+                            }
+                            live_test_log(format_args!("{}", json!({
+                                "flashback_ready":true,"attempts":attempts,
+                                "elapsed_ms":started.elapsed().as_millis(),"scn":scn
+                            })));
+                            return Ok(());
+                        }
+                        Err(error) if error.error_class == ErrorClass::FlashbackDefinitionChanged => {
+                            asupersync::time::sleep(cx.now(), Duration::from_millis(100)).await;
+                        }
+                        Err(error) => return Err(format!(
+                            "flashback readiness refused: {:?}: {}", error.error_class, error.message
+                        )),
+                    }
+                }
+            })
+            .await
+            .map_err(|_| format!("flashback readiness timed out after 60s and {attempts} attempts"))?
+        }
+
+        #[cfg(feature = "plsql-intelligence")]
         async fn rows_live_fixture(cx: Cx, case: u8) -> Result<(), String> {
             use super::super::super::{DispatchContext, OracleDispatcher};
             use oraclemcp_audit::{
@@ -2550,6 +2630,11 @@ with oracledb.connect(user='sys', password=os.environ['OMCP_ROWS_PASSWORD'],
                 let candidate = format!("/* {marker} */ UPDATE {schema}.ROWS_T SET V=:1 WHERE ID BETWEEN :2 AND :3");
                 let args = json!({"sql":candidate,"binds":[901,1,10]});
                 let result = async {
+                    if case == 1 || case == 3 {
+                        // Probe before arming case 1's older read-only snapshot;
+                        // probing later would reset that transaction and weaken it.
+                        rows_flashback_ready(&cx,&admin,&dispatcher,&schema,seed_rows).await?;
+                    }
                     if case == 1 {
                         // Reuse an older read-only transaction, then prove that
                         // the estimate reads its own newly recorded SCN.
@@ -2632,7 +2717,10 @@ with oracledb.connect(user='sys', password=os.environ['OMCP_ROWS_PASSWORD'],
         #[cfg(feature = "plsql-intelligence")]
         fn run_rows_native_case(case: u8) {
             use asupersync::Outcome;
-            use oraclemcp_core::lane::{LaneRuntime, block_on_lane_bridge};
+            use oraclemcp_core::lane::{
+                DEFAULT_LANE_MAILBOX_CAPACITY, LaneContext, LaneDispatchFactory, LaneRuntime,
+                block_on_lane_bridge,
+            };
             use oraclemcp_core::server::{DispatchFuture, ToolDispatch};
             use std::sync::Arc;
             struct NativeRowsFixture(u8);
@@ -2655,9 +2743,21 @@ with oracledb.connect(user='sys', password=os.environ['OMCP_ROWS_PASSWORD'],
                     })
                 }
             }
-            let lane = LaneRuntime::spawn_default(
-                format!("rows-native-{case}"),
-                Arc::new(NativeRowsFixture(case)),
+            let name = format!("rows-native-{case}");
+            let factory: Arc<LaneDispatchFactory> = Arc::new(move |_, _| {
+                Box::pin(
+                    async move { Ok(Arc::new(NativeRowsFixture(case)) as Arc<dyn ToolDispatch>) },
+                )
+            });
+            // The fixture's 60-second readiness deadline has its own room in
+            // the ordinary configurable lane; individual tools retain 30s.
+            let lane = LaneRuntime::spawn_with_dispatch_factory(
+                name.clone(),
+                LaneContext::new(name, "process", "process", 1),
+                factory,
+                Duration::from_secs(120),
+                DEFAULT_LANE_MAILBOX_CAPACITY,
+                None,
             );
             let outcome = block_on_lane_bridge(async {
                 let cx = Cx::current().expect("lane bridge installs Cx");

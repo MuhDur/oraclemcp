@@ -326,3 +326,26 @@ fn status_encoding_changes_decisive_digest() {
         "unavailable"
     );
 }
+
+#[test]
+fn every_known_error_class_keeps_a_distinct_unavailable_reason() {
+    let mut reasons = std::collections::BTreeSet::new();
+    let mut digests = std::collections::BTreeSet::new();
+    for class in oraclemcp_error::ErrorClass::ALL {
+        let reason = UnavailableReason::from_error_class(class);
+        assert_ne!(reason, UnavailableReason::CatalogUnavailable, "{class:?}");
+        reasons.insert(serde_json::to_string(&reason).unwrap());
+        let mut binding = sample();
+        binding.decisive.statement_digest = FieldStatus::Unavailable { reason };
+        digests.insert(binding.decisive_digest().unwrap());
+    }
+    assert_eq!(reasons.len(), oraclemcp_error::ErrorClass::ALL.len());
+    assert_eq!(digests.len(), oraclemcp_error::ErrorClass::ALL.len());
+    assert_eq!(
+        serde_json::to_value(UnavailableReason::from_error_class(
+            oraclemcp_error::ErrorClass::FlashbackDefinitionChanged
+        ))
+        .unwrap(),
+        "flashback_definition_changed"
+    );
+}

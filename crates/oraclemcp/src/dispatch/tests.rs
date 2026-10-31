@@ -3383,6 +3383,8 @@ impl OracleConnection for PingFailingMock {
 struct ExecState {
     mutation_catalog_unreadable: AtomicBool,
     impact_count: Mutex<Option<u64>>,
+    impact_read_error: Mutex<Option<DbError>>,
+    impact_scn_error: Mutex<Option<(bool, DbError)>>,
     executed: Mutex<Vec<(String, Vec<OracleBind>)>>,
     /// Every read that actually reached Oracle. A row-level policy is only
     /// enforced if its predicate is in the SQL the database sees.
@@ -3823,10 +3825,24 @@ impl OracleConnection for ExecRecordingMock {
         }
         if let Some(count) = *self.state.impact_count.lock().unwrap() {
             if sql == CatalogQueryId::CurrentScn.spec().sql {
+                if let Some((after_count, error)) =
+                    self.state.impact_scn_error.lock().unwrap().as_ref()
+                {
+                    let count_read = self.state.queried.lock().unwrap().iter().any(|sql| {
+                        sql.contains("impact_probe")
+                            && sql.to_ascii_uppercase().contains("SELECT COUNT(*)")
+                    });
+                    if !after_count || count_read {
+                        return Err(error.clone());
+                    }
+                }
                 return Ok(vec![semantic_row(&[("OBSERVED_SCN", Some("424242"))])]);
             }
             if sql.to_ascii_uppercase().contains("SELECT COUNT(*)") && sql.contains("impact_probe")
             {
+                if let Some(error) = self.state.impact_read_error.lock().unwrap().as_ref() {
+                    return Err(error.clone());
+                }
                 return Ok(vec![semantic_row(&[(
                     "COUNT(*)",
                     Some(&count.to_string()),
@@ -19260,4 +19276,98 @@ fn impact_rows_unknown_mutation_catalog_is_unavailable_never_zero() {
     assert_eq!(result["impact"]["rows"]["status"], "unavailable");
     assert!(result["impact"]["rows"].get("value").is_none());
     assert!(executed_statements(&state).is_empty());
+}
+
+#[test]
+fn impact_rows_preserve_flashback_refusals_without_zero_or_preview_abort() {
+    for (message, reason) in [
+        (
+            Some("ORA-01466: unable to read data - table definition has changed"),
+            Some("flashback_definition_changed"),
+        ),
+        (
+            Some("ORA-08180: no snapshot found based on specified time"),
+            Some("flashback_retention_exceeded"),
+        ),
+        (
+            Some("ORA-02070: database REMOTE does not support flashback in this context"),
+            Some("flashback_not_flashbackable"),
+        ),
+        (None, None),
+    ] {
+        let state = Arc::new(ExecState::default());
+        *state.impact_count.lock().unwrap() = Some(0);
+        *state.impact_read_error.lock().unwrap() =
+            message.map(|message| DbError::Query(message.into()));
+        let dispatcher =
+            OracleDispatcher::new(Box::new(ExecRecordingMock::new(Arc::clone(&state))));
+        let preview = dispatcher
+            .dispatch(
+                "oracle_preview_sql",
+                json!({"sql":"UPDATE APP.T SET C=1 WHERE ID=1"}),
+            )
+            .expect("read refusal must not abort the preview");
+        assert_eq!(preview["required_level"], "READ_WRITE");
+        let rows = &preview["impact"]["rows"];
+        if let Some(reason) = reason {
+            assert_eq!(
+                rows,
+                &json!({"status":"unavailable","reason":reason}),
+                "{message:?}"
+            );
+            assert!(rows.get("value").is_none(), "unknown must not become zero");
+        } else {
+            assert_eq!(rows["status"], "estimated");
+            assert_eq!(
+                rows["value"]["value"], 0,
+                "a successful zero remains a real estimate"
+            );
+        }
+        assert!(
+            executed_statements(&state)
+                .iter()
+                .all(|sql| !sql.to_ascii_uppercase().contains("UPDATE APP.T")),
+            "preview never executes candidate DML"
+        );
+    }
+}
+
+#[test]
+fn impact_rows_preserve_scn_probe_refusals_before_and_after_count() {
+    for after_count in [false, true] {
+        let state = Arc::new(ExecState::default());
+        *state.impact_count.lock().unwrap() = Some(0);
+        *state.impact_scn_error.lock().unwrap() = Some((
+            after_count,
+            DbError::Query("ORA-01031: insufficient privileges".into()),
+        ));
+        let dispatcher =
+            OracleDispatcher::new(Box::new(ExecRecordingMock::new(Arc::clone(&state))));
+        let preview = dispatcher
+            .dispatch(
+                "oracle_preview_sql",
+                json!({"sql":"UPDATE APP.T SET C=1 WHERE ID=1"}),
+            )
+            .expect("SCN refusal must not abort the preview");
+        assert_eq!(
+            preview["impact"]["rows"],
+            json!({"status":"unavailable","reason":"no_privilege"}),
+            "after_count={after_count}"
+        );
+        let count_reads = state
+            .queried
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|sql| {
+                sql.contains("impact_probe") && sql.to_ascii_uppercase().contains("SELECT COUNT(*)")
+            })
+            .count();
+        assert_eq!(count_reads, usize::from(after_count));
+        assert!(
+            executed_statements(&state)
+                .iter()
+                .all(|sql| !sql.to_ascii_uppercase().contains("UPDATE APP.T"))
+        );
+    }
 }

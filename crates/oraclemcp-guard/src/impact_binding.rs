@@ -5,6 +5,7 @@
 
 use std::{collections::BTreeMap, future::Future, time::Instant};
 
+use oraclemcp_error::ErrorClass;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -32,9 +33,63 @@ pub enum UnavailableReason {
     CatalogUnavailable,
     UnresolvedDependency,
     EngineFailed,
+    ObjectNotFound,
+    SyntaxError,
+    ConnectionFailed,
+    RuntimeStateRequired,
+    ChallengeRequired,
+    RepreviewRequired,
+    LeaseRequired,
+    ForbiddenStatement,
+    Busy,
+    SessionBusy,
+    AtCapacity,
+    InvalidArguments,
+    PolicyDenied,
+    RequestCancelled,
+    Transient,
+    FlashbackRetentionExceeded,
+    FlashbackDefinitionChanged,
+    FlashbackNotFlashbackable,
+    FlashbackCapabilityUnavailable,
+    SnapshotTooOld,
+    Internal,
 }
 
 impl UnavailableReason {
+    /// Keep an executor refusal's machine-readable cause in advisory fields.
+    /// Unknown future classes remain unavailable rather than becoming a value.
+    #[must_use]
+    pub const fn from_error_class(class: ErrorClass) -> Self {
+        match class {
+            ErrorClass::InsufficientPrivilege => Self::NoPrivilege,
+            ErrorClass::OperatingLevelTooLow => Self::LevelBelowRequired,
+            ErrorClass::Timeout => Self::Timeout,
+            ErrorClass::ObjectNotFound => Self::ObjectNotFound,
+            ErrorClass::SyntaxError => Self::SyntaxError,
+            ErrorClass::ConnectionFailed => Self::ConnectionFailed,
+            ErrorClass::RuntimeStateRequired => Self::RuntimeStateRequired,
+            ErrorClass::ChallengeRequired => Self::ChallengeRequired,
+            ErrorClass::RepreviewRequired => Self::RepreviewRequired,
+            ErrorClass::LeaseRequired => Self::LeaseRequired,
+            ErrorClass::ForbiddenStatement => Self::ForbiddenStatement,
+            ErrorClass::Busy => Self::Busy,
+            ErrorClass::SessionBusy => Self::SessionBusy,
+            ErrorClass::AtCapacity => Self::AtCapacity,
+            ErrorClass::InvalidArguments => Self::InvalidArguments,
+            ErrorClass::PolicyDenied => Self::PolicyDenied,
+            ErrorClass::RequestCancelled => Self::RequestCancelled,
+            ErrorClass::Transient => Self::Transient,
+            ErrorClass::FlashbackRetentionExceeded => Self::FlashbackRetentionExceeded,
+            ErrorClass::FlashbackDefinitionChanged => Self::FlashbackDefinitionChanged,
+            ErrorClass::FlashbackNotFlashbackable => Self::FlashbackNotFlashbackable,
+            ErrorClass::FlashbackCapabilityUnavailable => Self::FlashbackCapabilityUnavailable,
+            ErrorClass::SnapshotTooOld => Self::SnapshotTooOld,
+            ErrorClass::Internal => Self::Internal,
+            _ => Self::CatalogUnavailable,
+        }
+    }
+
     const fn tag(self) -> u8 {
         match self {
             Self::LevelBelowRequired => 1,
@@ -52,6 +107,27 @@ impl UnavailableReason {
             Self::CatalogUnavailable => 13,
             Self::UnresolvedDependency => 14,
             Self::EngineFailed => 15,
+            Self::ObjectNotFound => 16,
+            Self::SyntaxError => 17,
+            Self::ConnectionFailed => 18,
+            Self::RuntimeStateRequired => 19,
+            Self::ChallengeRequired => 20,
+            Self::RepreviewRequired => 21,
+            Self::LeaseRequired => 22,
+            Self::ForbiddenStatement => 23,
+            Self::Busy => 24,
+            Self::SessionBusy => 25,
+            Self::AtCapacity => 26,
+            Self::InvalidArguments => 27,
+            Self::PolicyDenied => 28,
+            Self::RequestCancelled => 29,
+            Self::Transient => 30,
+            Self::FlashbackRetentionExceeded => 31,
+            Self::FlashbackDefinitionChanged => 32,
+            Self::FlashbackNotFlashbackable => 33,
+            Self::FlashbackCapabilityUnavailable => 34,
+            Self::SnapshotTooOld => 35,
+            Self::Internal => 36,
         }
     }
 }

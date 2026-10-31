@@ -2731,21 +2731,44 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::impact_binding::ScnBounds where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::impact_binding::ScnBounds::vzip(self) -> V
 pub enum oraclemcp_guard::impact_binding::UnavailableReason
+pub oraclemcp_guard::impact_binding::UnavailableReason::AtCapacity
+pub oraclemcp_guard::impact_binding::UnavailableReason::Busy
 pub oraclemcp_guard::impact_binding::UnavailableReason::CatalogUnavailable
+pub oraclemcp_guard::impact_binding::UnavailableReason::ChallengeRequired
+pub oraclemcp_guard::impact_binding::UnavailableReason::ConnectionFailed
 pub oraclemcp_guard::impact_binding::UnavailableReason::EngineFailed
 pub oraclemcp_guard::impact_binding::UnavailableReason::EngineNotWired
+pub oraclemcp_guard::impact_binding::UnavailableReason::FlashbackCapabilityUnavailable
+pub oraclemcp_guard::impact_binding::UnavailableReason::FlashbackDefinitionChanged
+pub oraclemcp_guard::impact_binding::UnavailableReason::FlashbackNotFlashbackable
+pub oraclemcp_guard::impact_binding::UnavailableReason::FlashbackRetentionExceeded
+pub oraclemcp_guard::impact_binding::UnavailableReason::ForbiddenStatement
 pub oraclemcp_guard::impact_binding::UnavailableReason::HardParseCallbacks
+pub oraclemcp_guard::impact_binding::UnavailableReason::Internal
+pub oraclemcp_guard::impact_binding::UnavailableReason::InvalidArguments
+pub oraclemcp_guard::impact_binding::UnavailableReason::LeaseRequired
 pub oraclemcp_guard::impact_binding::UnavailableReason::LevelBelowRequired
 pub oraclemcp_guard::impact_binding::UnavailableReason::NoPrivilege
 pub oraclemcp_guard::impact_binding::UnavailableReason::NotWired
+pub oraclemcp_guard::impact_binding::UnavailableReason::ObjectNotFound
 pub oraclemcp_guard::impact_binding::UnavailableReason::PlanTableUnverified
+pub oraclemcp_guard::impact_binding::UnavailableReason::PolicyDenied
 pub oraclemcp_guard::impact_binding::UnavailableReason::ReadOnlyTxn
+pub oraclemcp_guard::impact_binding::UnavailableReason::RepreviewRequired
+pub oraclemcp_guard::impact_binding::UnavailableReason::RequestCancelled
+pub oraclemcp_guard::impact_binding::UnavailableReason::RuntimeStateRequired
+pub oraclemcp_guard::impact_binding::UnavailableReason::SessionBusy
+pub oraclemcp_guard::impact_binding::UnavailableReason::SnapshotTooOld
+pub oraclemcp_guard::impact_binding::UnavailableReason::SyntaxError
 pub oraclemcp_guard::impact_binding::UnavailableReason::Timeout
+pub oraclemcp_guard::impact_binding::UnavailableReason::Transient
 pub oraclemcp_guard::impact_binding::UnavailableReason::Truncated
 pub oraclemcp_guard::impact_binding::UnavailableReason::UnresolvedDependency
 pub oraclemcp_guard::impact_binding::UnavailableReason::UnsupportedDmlShape
 pub oraclemcp_guard::impact_binding::UnavailableReason::UntrustedTriggers
 pub oraclemcp_guard::impact_binding::UnavailableReason::Vpd
+impl oraclemcp_guard::impact_binding::UnavailableReason
+pub const fn oraclemcp_guard::impact_binding::UnavailableReason::from_error_class(oraclemcp_error::ErrorClass) -> Self
 impl core::clone::Clone for oraclemcp_guard::impact_binding::UnavailableReason
 pub fn oraclemcp_guard::impact_binding::UnavailableReason::clone(&self) -> oraclemcp_guard::impact_binding::UnavailableReason
 impl core::cmp::Eq for oraclemcp_guard::impact_binding::UnavailableReason
@@ -16947,21 +16970,44 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::resolver::SyntacticRole where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::resolver::SyntacticRole::vzip(self) -> V
 pub enum oraclemcp_guard::UnavailableReason
+pub oraclemcp_guard::UnavailableReason::AtCapacity
+pub oraclemcp_guard::UnavailableReason::Busy
 pub oraclemcp_guard::UnavailableReason::CatalogUnavailable
+pub oraclemcp_guard::UnavailableReason::ChallengeRequired
+pub oraclemcp_guard::UnavailableReason::ConnectionFailed
 pub oraclemcp_guard::UnavailableReason::EngineFailed
 pub oraclemcp_guard::UnavailableReason::EngineNotWired
+pub oraclemcp_guard::UnavailableReason::FlashbackCapabilityUnavailable
+pub oraclemcp_guard::UnavailableReason::FlashbackDefinitionChanged
+pub oraclemcp_guard::UnavailableReason::FlashbackNotFlashbackable
+pub oraclemcp_guard::UnavailableReason::FlashbackRetentionExceeded
+pub oraclemcp_guard::UnavailableReason::ForbiddenStatement
 pub oraclemcp_guard::UnavailableReason::HardParseCallbacks
+pub oraclemcp_guard::UnavailableReason::Internal
+pub oraclemcp_guard::UnavailableReason::InvalidArguments
+pub oraclemcp_guard::UnavailableReason::LeaseRequired
 pub oraclemcp_guard::UnavailableReason::LevelBelowRequired
 pub oraclemcp_guard::UnavailableReason::NoPrivilege
 pub oraclemcp_guard::UnavailableReason::NotWired
+pub oraclemcp_guard::UnavailableReason::ObjectNotFound
 pub oraclemcp_guard::UnavailableReason::PlanTableUnverified
+pub oraclemcp_guard::UnavailableReason::PolicyDenied
 pub oraclemcp_guard::UnavailableReason::ReadOnlyTxn
+pub oraclemcp_guard::UnavailableReason::RepreviewRequired
+pub oraclemcp_guard::UnavailableReason::RequestCancelled
+pub oraclemcp_guard::UnavailableReason::RuntimeStateRequired
+pub oraclemcp_guard::UnavailableReason::SessionBusy
+pub oraclemcp_guard::UnavailableReason::SnapshotTooOld
+pub oraclemcp_guard::UnavailableReason::SyntaxError
 pub oraclemcp_guard::UnavailableReason::Timeout
+pub oraclemcp_guard::UnavailableReason::Transient
 pub oraclemcp_guard::UnavailableReason::Truncated
 pub oraclemcp_guard::UnavailableReason::UnresolvedDependency
 pub oraclemcp_guard::UnavailableReason::UnsupportedDmlShape
 pub oraclemcp_guard::UnavailableReason::UntrustedTriggers
 pub oraclemcp_guard::UnavailableReason::Vpd
+impl oraclemcp_guard::impact_binding::UnavailableReason
+pub const fn oraclemcp_guard::impact_binding::UnavailableReason::from_error_class(oraclemcp_error::ErrorClass) -> Self
 impl core::clone::Clone for oraclemcp_guard::impact_binding::UnavailableReason
 pub fn oraclemcp_guard::impact_binding::UnavailableReason::clone(&self) -> oraclemcp_guard::impact_binding::UnavailableReason
 impl core::cmp::Eq for oraclemcp_guard::impact_binding::UnavailableReason
