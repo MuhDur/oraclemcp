@@ -14,6 +14,31 @@ use oraclemcp::registry;
 use oraclemcp_core::min_visible_level_for_tool;
 use oraclemcp_error::{ErrorClass, ReasonCategory};
 
+#[derive(clap::Subcommand, Debug)]
+pub(crate) enum RobotDocsCommand {
+    /// Print the compact agent guide.
+    Guide,
+    /// Render the tool registry from the code (Markdown with --markdown).
+    Tools {
+        /// Emit the marked Markdown blocks for scripts/docs_generate.sh.
+        #[arg(long)]
+        markdown: bool,
+    },
+    /// Render the config field reference from the config types (Markdown).
+    Config {
+        /// Emit the marked Markdown block for scripts/docs_generate.sh.
+        #[arg(long)]
+        markdown: bool,
+    },
+    /// Render the closed refusal catalogue from the error types (Markdown with
+    /// --markdown).
+    Refusals {
+        /// Emit the marked Markdown block for scripts/docs_generate.sh.
+        #[arg(long)]
+        markdown: bool,
+    },
+}
+
 pub(crate) fn setup_profiles_template(profile: &str, credential_env: &str) -> String {
     format!(
         r#"schema_version = 2

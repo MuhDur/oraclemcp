@@ -381,3 +381,91 @@ fn served_custom_read_keeps_the_operators_declared_level_floor() {
     assert_eq!(error.error_class, ErrorClass::OperatingLevelTooLow);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
+
+// Canonical filter projection exercised through the dispatcher catalog seam.
+struct CanonicalSearchCatalog;
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for CanonicalSearchCatalog {
+    fn backend(&self) -> oraclemcp_db::OracleBackend {
+        oraclemcp_db::OracleBackend::RustOracle
+    }
+    async fn close(&self, _: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn ping(&self, _: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn describe(&self, _: &Cx) -> Result<oraclemcp_db::OracleConnectionInfo, DbError> {
+        Ok(Default::default())
+    }
+    async fn query_rows(
+        &self,
+        _: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<oraclemcp_db::OracleRow>, DbError> {
+        assert_eq!(
+            sql,
+            oraclemcp_db::CatalogQueryId::ListObjectsByTypes.spec().sql,
+            "filtered searches must use the canonical multi-type query"
+        );
+        assert_eq!(binds[0], OracleBind::from("APP"));
+        assert_eq!(binds[1], OracleBind::from("TABLE"));
+        assert!(binds[2] == OracleBind::Null || binds[2] == OracleBind::from("VIEW"));
+        Ok(vec![oraclemcp_db::OracleRow {
+            columns: [
+                ("OWNER", "APP"),
+                ("OBJECT_NAME", "T"),
+                ("OBJECT_TYPE", "TABLE"),
+                ("STATUS", "VALID"),
+            ]
+            .into_iter()
+            .map(|(name, value)| {
+                (
+                    name.into(),
+                    oraclemcp_db::OracleCell::new("VARCHAR2", Some(value.into())),
+                )
+            })
+            .collect(),
+        }])
+    }
+    async fn execute(&self, _: &Cx, sql: &str, _: &[OracleBind]) -> Result<u64, DbError> {
+        assert_eq!(sql, oraclemcp_guard::SET_TRANSACTION_READ_ONLY);
+        Ok(0)
+    }
+    async fn commit(&self, _: &Cx) -> Result<(), DbError> {
+        panic!("search cannot commit")
+    }
+    async fn rollback(&self, _: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn search_objects_deprecated_scalar_returns_only_the_canonical_filter_echo() {
+    let dispatcher = OracleDispatcher::new(Box::new(CanonicalSearchCatalog));
+    for (arguments, expected) in [
+        (
+            json!({"owner":"APP","detail_level":"names","object_type":"TABLE"}),
+            json!(["TABLE"]),
+        ),
+        (
+            json!({"owner":"APP","detail_level":"names","object_types":["TABLE","VIEW"]}),
+            json!(["TABLE", "VIEW"]),
+        ),
+    ] {
+        let result = dispatcher
+            .dispatch("oracle_search_objects", arguments)
+            .expect("canonical or deprecated search filter");
+        assert_eq!(result["object_types"], expected);
+        assert!(
+            result.get("object_type").is_none(),
+            "top-level filter echo must use only the canonical array"
+        );
+        assert_eq!(
+            result["results"][0]["object_type"], "TABLE",
+            "per-object identity is retained"
+        );
+    }
+}

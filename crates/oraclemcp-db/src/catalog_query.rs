@@ -6,6 +6,9 @@
 //! be shadowed by a table in CURRENT_SCHEMA, including ALL_SOURCE/ALL_POLICIES.
 
 use asupersync::Cx;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
+use std::sync::Mutex;
 
 use crate::{DbError, OracleBind, OracleConnection, OracleRow};
 
@@ -2942,6 +2945,156 @@ order by owner, object_name, line, col"#
         } else {
             Self::DescribeColumnsLegacy
         }
+    }
+}
+
+#[derive(Default)]
+struct CompileTrace {
+    commitments: BTreeSet<[u8; 32]>,
+    queries: usize,
+    rows: usize,
+    bytes: usize,
+}
+
+// Observe real answers without replacing any query or synthesizing rows. The
+// same connection and closed query runner feed both hard-parse consumers.
+pub(crate) struct CompileCatalog<'a> {
+    inner: &'a dyn OracleConnection,
+    trace: Mutex<CompileTrace>,
+}
+
+impl<'a> CompileCatalog<'a> {
+    pub(crate) fn new(inner: &'a dyn OracleConnection) -> Self {
+        Self {
+            inner,
+            trace: Mutex::new(CompileTrace::default()),
+        }
+    }
+    pub(crate) fn into_commitments(self) -> Result<BTreeSet<[u8; 32]>, DbError> {
+        self.trace
+            .into_inner()
+            .map(|trace| trace.commitments)
+            .map_err(|_| DbError::Internal("compile catalog trace unavailable".into()))
+    }
+    fn reserve_query(&self) -> Result<(), DbError> {
+        let mut trace = self
+            .trace
+            .lock()
+            .map_err(|_| DbError::Internal("compile catalog trace unavailable".into()))?;
+        trace.queries += 1;
+        if trace.queries > 512 {
+            return Err(DbError::Internal(
+                "compile catalog query cap exhausted".into(),
+            ));
+        }
+        Ok(())
+    }
+    fn record_rows(
+        &self,
+        sql: &str,
+        binds: &[OracleBind],
+        rows: Vec<OracleRow>,
+    ) -> Result<Vec<OracleRow>, DbError> {
+        if rows.iter().flat_map(|row| &row.columns).any(|(_, cell)| {
+            cell.bytes.is_some()
+                || cell.structured.is_some()
+                || cell.structured_contract_version.is_some()
+                || cell.nested_result.is_some()
+                || cell.source_length.is_some_and(|length| {
+                    length > cell.value.as_deref().unwrap_or("").chars().count()
+                })
+        }) {
+            return Err(DbError::Internal(
+                "compile catalog projection incomplete".into(),
+            ));
+        }
+        let mut canonical = rows
+            .iter()
+            .map(|row| serde_json::to_vec(row).expect("catalog row serializes"))
+            .collect::<Vec<_>>();
+        canonical.sort();
+        let bytes = canonical.iter().map(Vec::len).sum::<usize>();
+        let mut trace = self
+            .trace
+            .lock()
+            .map_err(|_| DbError::Internal("compile catalog trace unavailable".into()))?;
+        trace.rows = trace.rows.saturating_add(rows.len());
+        trace.bytes = trace.bytes.saturating_add(bytes);
+        if trace.rows > 65_536 || trace.bytes > 16 * 1024 * 1024 {
+            return Err(DbError::Internal(
+                "compile catalog evidence cap exhausted".into(),
+            ));
+        }
+        trace.commitments.insert(
+            Sha256::digest(
+                serde_json::to_vec(&(sql, binds, canonical))
+                    .expect("catalog commitment serializes"),
+            )
+            .into(),
+        );
+        Ok(rows)
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for CompileCatalog<'_> {
+    fn backend(&self) -> crate::OracleBackend {
+        self.inner.backend()
+    }
+    async fn close(&self, _: &Cx) -> Result<(), DbError> {
+        Err(DbError::Internal(
+            "compile proof cannot close the execution lane".into(),
+        ))
+    }
+    async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.ping(cx).await
+    }
+    async fn describe(&self, cx: &Cx) -> Result<crate::OracleConnectionInfo, DbError> {
+        self.inner.describe(cx).await
+    }
+    async fn query_rows(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let _ = (cx, sql, binds);
+        Err(DbError::Internal(
+            "compile proof requires a closed catalog query".into(),
+        ))
+    }
+    async fn query_rows_with_provenance(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+        provenance: crate::ReadQueryProvenance,
+        options: Option<&crate::SerializeOptions>,
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let ReadQueryProvenance::Catalog(id) = provenance else {
+            return Err(DbError::Internal(
+                "compile proof requires catalog provenance".into(),
+            ));
+        };
+        if sql != id.spec().sql || options.is_some() {
+            return Err(DbError::Internal(
+                "compile proof catalog query mismatch".into(),
+            ));
+        }
+        self.reserve_query()?;
+        let rows = run_catalog_query(cx, self.inner, id, binds).await?;
+        self.record_rows(sql, binds, rows)
+    }
+    async fn execute(&self, _: &Cx, _: &str, _: &[OracleBind]) -> Result<u64, DbError> {
+        Err(DbError::Internal(
+            "compile proof cannot execute candidate SQL".into(),
+        ))
+    }
+    async fn commit(&self, _: &Cx) -> Result<(), DbError> {
+        Err(DbError::Internal("compile proof cannot commit".into()))
+    }
+    async fn rollback(&self, _: &Cx) -> Result<(), DbError> {
+        Err(DbError::Internal("compile proof cannot rollback".into()))
     }
 }
 

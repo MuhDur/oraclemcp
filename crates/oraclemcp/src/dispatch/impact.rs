@@ -1653,6 +1653,12 @@ mod tests {
     use oraclemcp_db::{OracleBackend, OracleConnectionInfo, OracleRow};
     use std::sync::Mutex;
 
+    #[cfg(feature = "live-xe")]
+    fn live_test_log(message: std::fmt::Arguments<'_>) {
+        use std::io::Write;
+        writeln!(std::io::stderr().lock(), "{message}").expect("write live test diagnostics");
+    }
+
     #[derive(Default)]
     struct CountingConnection {
         calls: Mutex<Vec<String>>,
@@ -2609,7 +2615,7 @@ with oracledb.connect(user='sys', password=os.environ['OMCP_ROWS_PASSWORD'],
                         control.close(&cx).await.map_err(|error|error.to_string())?;
                         if count?!=12 || number(&cx,&admin,&format!("SELECT COUNT(*) AS N FROM {schema}.CANARY"),&[]).await?!=1 { return Err("FGA positive control did not fire".into()); }
                     }
-                    eprintln!("{}", json!({"case":case,"lane":"FREE23","rows_fixture":"isolated","candidate_executions":if case==3 {1}else{0},"verified":true}));
+                    live_test_log(format_args!("{}", json!({"case":case,"lane":"FREE23","rows_fixture":"isolated","candidate_executions":if case==3 {1}else{0},"verified":true})));
                     Ok(())
                 }.await;
                 let closed = dispatcher.state.lock(&cx).await.map_err(|_|"fixture state lock")?.conn.close(&cx).await.map_err(|error|error.to_string());
@@ -2762,7 +2768,9 @@ with oracledb.connect(user='sys', password=os.environ['OMCP_ROWS_PASSWORD'],
         #[test]
         fn impact_dependents_live_three_dependents_predicted_equals_observed() {
             if std::env::var("ORACLEMCP_LIVE_XE").as_deref() != Ok("1") {
-                eprintln!("live FREE23 dependents disabled; set ORACLEMCP_LIVE_XE=1");
+                live_test_log(format_args!(
+                    "live FREE23 dependents disabled; set ORACLEMCP_LIVE_XE=1"
+                ));
                 return;
             }
             run_with_cx(|cx| async move {
@@ -2836,7 +2844,7 @@ with oracledb.connect(user='sys', password=os.environ['OMCP_ROWS_PASSWORD'],
                             row.text("OBJECT_TYPE").ok_or("observed type")?.to_owned())))
                         .collect::<Result<std::collections::BTreeSet<_>,String>>()?;
                     if predicted!=observed { return Err(format!("predicted {predicted:?}, Oracle INVALID {observed:?}")); }
-                    println!("FREE23 native prediction equals observed INVALID set: 3 dependents; bounded closure; LiveSnapshot; {} explicit uncertainties",gaps.len());
+                    live_test_log(format_args!("FREE23 native prediction equals observed INVALID set: 3 dependents; bounded closure; LiveSnapshot; {} explicit uncertainties",gaps.len()));
                     Ok::<(),String>(())
                 }.await;
                 let cleanup = async {
@@ -2857,7 +2865,9 @@ with oracledb.connect(user='sys', password=os.environ['OMCP_ROWS_PASSWORD'],
         #[test]
         fn impact_effects_live_patch_source_diff() {
             if std::env::var("ORACLEMCP_LIVE_XE").as_deref() != Ok("1") {
-                eprintln!("live FREE23 effects disabled; set ORACLEMCP_LIVE_XE=1");
+                live_test_log(format_args!(
+                    "live FREE23 effects disabled; set ORACLEMCP_LIVE_XE=1"
+                ));
                 return;
             }
             run_with_cx(|cx| async move {
@@ -2906,7 +2916,7 @@ with oracledb.connect(user='sys', password=os.environ['OMCP_ROWS_PASSWORD'],
                     if source_rows.first().and_then(|row| row.text("N")) != Some("0") {
                         return Err("the preview applied the patch".into());
                     }
-                    println!("FREE23 patch_source effects: before [ReadDb] after [ReadDb, Dml] added [Dml]; sast {}", preview["impact"]["sast"]["status"]);
+                    live_test_log(format_args!("FREE23 patch_source effects: before [ReadDb] after [ReadDb, Dml] added [Dml]; sast {}", preview["impact"]["sast"]["status"]));
                     Ok::<(), String>(())
                 }.await;
                 for (kind, name) in [("FUNCTION", &function), ("TABLE", &table)] {
@@ -2924,7 +2934,9 @@ with oracledb.connect(user='sys', password=os.environ['OMCP_ROWS_PASSWORD'],
         #[test]
         fn impact_dependents_live_no_privilege_preserves_confirmation() {
             if std::env::var("ORACLEMCP_LIVE_XE").as_deref() != Ok("1") {
-                eprintln!("live FREE23 privilege boundary disabled; set ORACLEMCP_LIVE_XE=1");
+                live_test_log(format_args!(
+                    "live FREE23 privilege boundary disabled; set ORACLEMCP_LIVE_XE=1"
+                ));
                 return;
             }
             run_with_cx(|cx| async move {
@@ -2967,7 +2979,7 @@ with oracledb.connect(user='sys', password=os.environ['OMCP_ROWS_PASSWORD'],
                     let expected=std::collections::BTreeSet::from([(user.clone(),"P1".to_owned(),"PROCEDURE".to_owned()),(user.clone(),"P2".to_owned(),"PROCEDURE".to_owned())]);
                     if actual!=expected {return Err(format!("own transitive dependents: expected {expected:?}, got {actual:?}"));}
                     if value["truncated"]!=false {return Err(format!("small visible closure truncated: {value}"));}
-                    println!("FREE23 native low-privilege preview: own P1/P2 transitive dependents, count=null, visibility_unverified, confirmation preserved");
+                    live_test_log(format_args!("FREE23 native low-privilege preview: own P1/P2 transitive dependents, count=null, visibility_unverified, confirmation preserved"));
                     Ok::<(),String>(())
                 }.await;
                 admin.execute(&cx,&format!("DROP USER {user} CASCADE"),&[]).await.map_err(|error|format!("fixture user cleanup: {error}"))?;
@@ -3311,9 +3323,9 @@ with oracledb.connect(user='sys', password=os.environ['OMCP_ROWS_PASSWORD'],
             );
             conn.execute(&cx, &format!("DROP TABLE {schema}.PLAN_TABLE PURGE"), &[])
                 .await?;
-            eprintln!(
+            live_test_log(format_args!(
                 "{lane}: impact_cost_live_local_plan_table_autonomous_trigger_never_fires PASS"
-            );
+            ));
 
             conn.execute(
                 &cx,
@@ -3327,7 +3339,9 @@ with oracledb.connect(user='sys', password=os.environ['OMCP_ROWS_PASSWORD'],
             );
             conn.execute(&cx, &format!("DROP SYNONYM {schema}.PLAN_TABLE"), &[])
                 .await?;
-            eprintln!("{lane}: impact_cost_live_private_synonym_plan_table_refused PASS");
+            live_test_log(format_args!(
+                "{lane}: impact_cost_live_private_synonym_plan_table_refused PASS"
+            ));
 
             let table = resolve_plan_table(&cx, &conn, None)
                 .await
@@ -3372,7 +3386,9 @@ with oracledb.connect(user='sys', password=os.environ['OMCP_ROWS_PASSWORD'],
             for id in [&id_a, &id_b] {
                 assert!(plan_cost_estimate(&cx, &conn, &table, id).await?.is_none());
             }
-            eprintln!("{lane}: impact_cost_live_interleaved_statement_ids_isolated PASS");
+            live_test_log(format_args!(
+                "{lane}: impact_cost_live_interleaved_statement_ids_isolated PASS"
+            ));
 
             conn.execute(&cx, &format!("CREATE OR REPLACE FUNCTION {schema}.VP16_{suffix}(s VARCHAR2,o VARCHAR2) RETURN VARCHAR2 AS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO {canary} VALUES (1); COMMIT; RETURN '1=1'; END;"), &[]).await?;
             conn.execute(&cx, &format!("BEGIN DBMS_RLS.ADD_POLICY(object_schema=>'{schema}',object_name=>'T16A_{suffix}',policy_name=>'VP16_{suffix}',function_schema=>'{schema}',policy_function=>'VP16_{suffix}',statement_types=>'SELECT,UPDATE'); END;"), &[]).await?;
@@ -3409,7 +3425,9 @@ with oracledb.connect(user='sys', password=os.environ['OMCP_ROWS_PASSWORD'],
                 &[],
             )
             .await?;
-            eprintln!("{lane}: impact_cost_live_vpd_unavailable PASS");
+            live_test_log(format_args!(
+                "{lane}: impact_cost_live_vpd_unavailable PASS"
+            ));
 
             // Reuse the live W4 optimizer callback fixture, including its real
             // compilation check, rather than manufacturing catalog rows.
@@ -3450,7 +3468,9 @@ with oracledb.connect(user='sys', password=os.environ['OMCP_ROWS_PASSWORD'],
                 1,
                 "ODCI callback positive control did not fire"
             );
-            eprintln!("{lane}: impact_cost_live_odci_canary_never_invoked PASS");
+            live_test_log(format_args!(
+                "{lane}: impact_cost_live_odci_canary_never_invoked PASS"
+            ));
             conn.rollback(&cx).await?;
             conn.close(&cx).await?;
             Ok(())

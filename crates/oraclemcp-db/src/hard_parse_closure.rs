@@ -339,13 +339,13 @@ const fn unavailable(reason: &'static str) -> HardParseEffectClosureV1 {
     HardParseEffectClosureV1::Unavailable { reason }
 }
 
+use crate::catalog_query::CompileCatalog;
 use oraclemcp_guard::mutation_closure::{
     MutationDatabaseIdentity, MutationTarget, MutationUnavailableReason as CompileUnknown,
 };
 use oraclemcp_guard::{CatalogResolver, OperatingLevel, Resolution, StatementScope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::sync::Mutex;
 
 use crate::mutation_closure::{
     MutationEffectOracle, MutationRoutineUse, UnknownMutationEffects, flag as mutation_flag,
@@ -520,136 +520,6 @@ impl CompileParseEffectOracle for UnknownMutationEffects {
         Err(CompileUnknown::EffectProofUnavailable)
     }
 }
-#[derive(Default)]
-struct CompileTrace {
-    commitments: BTreeSet<[u8; 32]>,
-    queries: usize,
-    rows: usize,
-    bytes: usize,
-}
-
-// Observe real answers without replacing any query or synthesizing rows. The
-// same connection and closed query runner feed both hard-parse consumers.
-struct CompileCatalog<'a> {
-    inner: &'a dyn OracleConnection,
-    trace: Mutex<CompileTrace>,
-}
-
-impl CompileCatalog<'_> {
-    fn reserve_query(&self) -> Result<(), DbError> {
-        let mut trace = self
-            .trace
-            .lock()
-            .map_err(|_| DbError::Internal("compile catalog trace unavailable".into()))?;
-        trace.queries += 1;
-        if trace.queries > 512 {
-            return Err(DbError::Internal(
-                "compile catalog query cap exhausted".into(),
-            ));
-        }
-        Ok(())
-    }
-    fn record_rows(
-        &self,
-        sql: &str,
-        binds: &[OracleBind],
-        rows: Vec<OracleRow>,
-    ) -> Result<Vec<OracleRow>, DbError> {
-        if rows.iter().flat_map(|row| &row.columns).any(|(_, cell)| {
-            cell.bytes.is_some()
-                || cell.structured.is_some()
-                || cell.structured_contract_version.is_some()
-                || cell.nested_result.is_some()
-                || cell.source_length.is_some_and(|length| {
-                    length > cell.value.as_deref().unwrap_or("").chars().count()
-                })
-        }) {
-            return Err(DbError::Internal(
-                "compile catalog projection incomplete".into(),
-            ));
-        }
-        let mut canonical = rows
-            .iter()
-            .map(|row| serde_json::to_vec(row).expect("catalog row serializes"))
-            .collect::<Vec<_>>();
-        canonical.sort();
-        let bytes = canonical.iter().map(Vec::len).sum::<usize>();
-        let mut trace = self
-            .trace
-            .lock()
-            .map_err(|_| DbError::Internal("compile catalog trace unavailable".into()))?;
-        trace.rows = trace.rows.saturating_add(rows.len());
-        trace.bytes = trace.bytes.saturating_add(bytes);
-        if trace.rows > 65_536 || trace.bytes > 16 * 1024 * 1024 {
-            return Err(DbError::Internal(
-                "compile catalog evidence cap exhausted".into(),
-            ));
-        }
-        trace.commitments.insert(
-            Sha256::digest(
-                serde_json::to_vec(&(sql, binds, canonical))
-                    .expect("catalog commitment serializes"),
-            )
-            .into(),
-        );
-        Ok(rows)
-    }
-}
-
-#[async_trait::async_trait(?Send)]
-impl OracleConnection for CompileCatalog<'_> {
-    fn backend(&self) -> crate::OracleBackend {
-        self.inner.backend()
-    }
-    async fn close(&self, _: &Cx) -> Result<(), DbError> {
-        Err(DbError::Internal(
-            "compile proof cannot close the execution lane".into(),
-        ))
-    }
-    async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
-        self.inner.ping(cx).await
-    }
-    async fn describe(&self, cx: &Cx) -> Result<crate::OracleConnectionInfo, DbError> {
-        self.inner.describe(cx).await
-    }
-    async fn query_rows(
-        &self,
-        cx: &Cx,
-        sql: &str,
-        binds: &[OracleBind],
-    ) -> Result<Vec<OracleRow>, DbError> {
-        self.reserve_query()?;
-        let rows = self.inner.query_rows(cx, sql, binds).await?;
-        self.record_rows(sql, binds, rows)
-    }
-    async fn query_rows_with_provenance(
-        &self,
-        cx: &Cx,
-        sql: &str,
-        binds: &[OracleBind],
-        provenance: crate::ReadQueryProvenance,
-        options: Option<&crate::SerializeOptions>,
-    ) -> Result<Vec<OracleRow>, DbError> {
-        self.reserve_query()?;
-        let rows = self
-            .inner
-            .query_rows_with_provenance(cx, sql, binds, provenance, options)
-            .await?;
-        self.record_rows(sql, binds, rows)
-    }
-    async fn execute(&self, _: &Cx, _: &str, _: &[OracleBind]) -> Result<u64, DbError> {
-        Err(DbError::Internal(
-            "compile proof cannot execute candidate SQL".into(),
-        ))
-    }
-    async fn commit(&self, _: &Cx) -> Result<(), DbError> {
-        Err(DbError::Internal("compile proof cannot commit".into()))
-    }
-    async fn rollback(&self, _: &Cx) -> Result<(), DbError> {
-        Err(DbError::Internal("compile proof cannot rollback".into()))
-    }
-}
-
 /// Collect a fresh compile proof in a caller-specified schema and authenticated
 /// edition/container. Unknown source or any unreadable catalog family refuses.
 pub async fn collect_compile_parse_effect_closure(
@@ -673,10 +543,7 @@ pub async fn collect_compile_parse_effect_closure(
         closure.unknown(0, Class::Resolution, CompileUnknown::InvalidInput);
         return closure;
     }
-    let catalog = CompileCatalog {
-        inner: conn,
-        trace: Mutex::new(CompileTrace::default()),
-    };
+    let catalog = CompileCatalog::new(conn);
     match read_closure_database_identity(cx, &catalog).await {
         Ok(identity) => {
             let database = MutationDatabaseIdentity {
@@ -730,8 +597,8 @@ pub async fn collect_compile_parse_effect_closure(
             break;
         }
     }
-    match catalog.trace.into_inner() {
-        Ok(trace) => closure.catalog_commitments = trace.commitments,
+    match catalog.into_commitments() {
+        Ok(commitments) => closure.catalog_commitments = commitments,
         Err(_) => closure.unknown(
             0,
             Class::CatalogVisibility,
@@ -1130,6 +997,65 @@ mod tests {
         fn static_sql(&self, _: &str) -> Result<Vec<String>, CompileUnknown> {
             self.0.clone()
         }
+    }
+
+    #[test]
+    fn compile_catalog_trace_refuses_raw_and_spoofed_reads_before_driver() {
+        let mock = ClosureMock {
+            identity_readable: true,
+            ..Default::default()
+        };
+        run(|cx| async move {
+            let catalog = CompileCatalog::new(&mock);
+            let id = CatalogQueryId::ClosureIdentity;
+            assert!(catalog.query_rows(&cx, id.spec().sql, &[]).await.is_err());
+            assert!(
+                catalog
+                    .query_rows_with_provenance(
+                        &cx,
+                        id.spec().sql,
+                        &[],
+                        crate::ReadQueryProvenance::ServerRead,
+                        None,
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(
+                catalog
+                    .query_rows_with_provenance(
+                        &cx,
+                        "SELECT 1 FROM SYS.dual",
+                        &[],
+                        crate::ReadQueryProvenance::Catalog(id),
+                        None,
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(
+                catalog
+                    .query_rows_with_provenance(
+                        &cx,
+                        id.spec().sql,
+                        &[OracleBind::Null],
+                        crate::ReadQueryProvenance::Catalog(id),
+                        None,
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(mock.queries.lock().expect("query log").is_empty());
+            let rows = run_catalog_query(&cx, &catalog, id, &[])
+                .await
+                .expect("closed catalog query");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                mock.queries.lock().expect("query log").as_slice(),
+                [id.spec().sql]
+            );
+            assert_eq!(catalog.into_commitments().expect("catalog trace").len(), 1);
+        });
     }
 
     #[test]
