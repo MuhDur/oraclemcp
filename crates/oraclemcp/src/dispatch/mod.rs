@@ -5129,6 +5129,8 @@ use limits::*;
 mod audit_marker;
 use audit_marker::with_audit_marker;
 
+#[path = "../compile_parse_closure.rs"]
+pub mod compile_parse_closure;
 mod read_executor;
 mod served_classifier;
 pub use read_executor::{AdmittedRead, ServerSql};
@@ -9755,13 +9757,27 @@ async fn execute_sql_inner(
     let active_profile = ctx.active_profile;
     let session = ctx.session;
     let audit = ctx.audit;
-    let proof = ctx
-        .profile_classifier
-        .prepare(cx, conn, ctx.catalog_cache, &args.sql)
-        .await;
+    let proof = compile_parse_closure::prepare(
+        ctx.profile_classifier,
+        cx,
+        conn,
+        ctx.catalog_cache,
+        ctx.session,
+        &args.sql,
+    )
+    .await;
     let classifier = &proof.classifier;
     let base = classifier.classify(&args.sql);
     if base.danger != DangerLevel::Forbidden {
+        proof
+            .require_compile_parse_closure(&args.sql)
+            .map_err(|error| {
+                write_not_started(if args.confirm.is_some() {
+                    compile_parse_closure::stale()
+                } else {
+                    error
+                })
+            })?;
         proof
             .require_readonly_routine_closures(&args.sql)
             .map_err(write_not_started)?;
@@ -10152,6 +10168,16 @@ async fn execute_sql_inner(
         // could therefore preserve stale proof after a real mutation.
         ctx.catalog_cache.invalidate(invalidation);
     }
+    revalidate_compile_before_ddl(
+        &ctx,
+        &proof,
+        audit_entry,
+        audit_tool,
+        &executed_sql,
+        &danger_str,
+        write_intent_id.as_deref(),
+    )
+    .await?;
     let rows_affected = match execute_conn(cx, conn, &executed_sql, &binds).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -10571,6 +10597,41 @@ fn compile_diagnostic_counts(errors: &[oraclemcp_db::OracleRow]) -> (usize, usiz
     (error_count, warning_count)
 }
 
+async fn revalidate_compile_before_ddl(
+    ctx: &DbToolCtx<'_>,
+    proof: &compile_parse_closure::PreparedSqlProof,
+    audit_entry: AuditEntryCtx<'_>,
+    tool: &str,
+    sql: &str,
+    danger: &str,
+    intent: Option<&str>,
+) -> Result<(), ErrorEnvelope> {
+    if let Err(failure) = proof
+        .revalidate_compile_parse_closure(ctx.cx, ctx.conn)
+        .await
+    {
+        append_terminal_audit_with_failure(
+            ctx,
+            audit_entry,
+            tool,
+            sql,
+            danger,
+            None,
+            AuditOutcome::Failed,
+            &failure,
+        )?;
+        resolve_write_intent_after_db(
+            ctx,
+            intent,
+            WriteIntentOutcome::AbortedBeforeExecute,
+            AuditOutcome::Failed,
+            "compile callback proof changed before candidate DDL",
+        )?;
+        return Err(write_not_started(failure));
+    }
+    Ok(())
+}
+
 async fn compile_object(
     ctx: DbToolCtx<'_>,
     tool_name: &str,
@@ -10618,12 +10679,33 @@ async fn compile_object_inner(
     let compile_danger = classify_compile_statements(&statements)?;
     let gate = session.evaluate(Some(OperatingLevel::Ddl));
     let (gate_decision, blocked_reason, step_up_target) = gate_decision_json(&gate);
+    if args.execute && !matches!(gate, LevelDecision::Allow) {
+        return Err(write_not_started(compile_gate_error(gate, session)));
+    }
     let audited_sql = statements.join(";\n");
-    let action_material = ddl_action_material(
+    let proof = compile_parse_closure::prepare(
+        ctx.profile_classifier,
+        cx,
+        conn,
+        ctx.catalog_cache,
+        ctx.session,
+        &audited_sql,
+    )
+    .await;
+    proof
+        .require_compile_parse_closure(&audited_sql)
+        .map_err(|error| {
+            if args.execute && args.confirm.is_some() {
+                compile_parse_closure::stale()
+            } else {
+                error
+            }
+        })?;
+    let action_material = proof.bind_material(ddl_action_material(
         &audited_sql,
         ActionKind::CompileObject,
         args.timeout_seconds,
-    );
+    ));
     let confirm = matches!(gate, LevelDecision::Allow).then(|| {
         issue_confirmation_grant(
             ctx.execute_grants,
@@ -10677,6 +10759,7 @@ async fn compile_object_inner(
                 after: None,
             },
         );
+        proof.attach_compile_parse_binding(&mut preview);
         return Ok(preview);
     }
     if !matches!(gate, LevelDecision::Allow) {
@@ -10748,6 +10831,16 @@ async fn compile_object_inner(
         .invalidate(catalog_invalidation_for_object_type(&object_type));
     let mut rows_affected = Vec::with_capacity(statements.len());
     for stmt in &statements {
+        revalidate_compile_before_ddl(
+            &ctx,
+            &proof,
+            audit_entry,
+            tool_name,
+            &audited_sql,
+            &danger_str,
+            write_intent_id.as_deref(),
+        )
+        .await?;
         match execute_conn(cx, conn, stmt, &[]).await {
             Ok(rows) => rows_affected.push(rows),
             Err(e) => {
@@ -11631,8 +11724,29 @@ async fn patch_source_inner(
         tool_name,
     )?;
     let patched_ddl = create_or_replace_source_arg(tool_name, Some(patched_ddl))?;
-    let action_material =
-        ddl_action_material(&patched_ddl, ActionKind::PatchSource, args.timeout_seconds);
+    let proof = compile_parse_closure::prepare(
+        ctx.profile_classifier,
+        cx,
+        conn,
+        ctx.catalog_cache,
+        ctx.session,
+        &patched_ddl,
+    )
+    .await;
+    proof
+        .require_compile_parse_closure(&patched_ddl)
+        .map_err(|error| {
+            if args.execute && args.confirm.is_some() {
+                compile_parse_closure::stale()
+            } else {
+                error
+            }
+        })?;
+    let action_material = proof.bind_material(ddl_action_material(
+        &patched_ddl,
+        ActionKind::PatchSource,
+        args.timeout_seconds,
+    ));
     let decision = DEFAULT_CLASSIFIER.classify(&patched_ddl);
     // Source patches and direct CREATE OR REPLACE now share the guard's
     // token-aware stored-unit shape analysis. There is no patch-only
@@ -11720,6 +11834,7 @@ async fn patch_source_inner(
                 after: Some(&patched_ddl),
             },
         );
+        proof.attach_compile_parse_binding(&mut preview);
         return Ok((preview, preview_entry));
     }
 
@@ -11795,6 +11910,16 @@ async fn patch_source_inner(
     }
     ctx.catalog_cache
         .invalidate(catalog_invalidation_for_sql(&patched_ddl));
+    revalidate_compile_before_ddl(
+        &ctx,
+        &proof,
+        audit_entry,
+        tool_name,
+        &patched_ddl,
+        &danger_str,
+        write_intent_id.as_deref(),
+    )
+    .await?;
     let rows_affected = match execute_conn(cx, conn, &patched_ddl, &[]).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -12019,6 +12144,11 @@ async fn create_or_replace_inner(
     let decision = DEFAULT_CLASSIFIER.classify(&source);
     let gate = decision.gate(session);
     let (gate_decision, blocked_reason, step_up_target) = gate_decision_json(&gate);
+    if args.execute && !matches!(gate, LevelDecision::Allow) {
+        return Err(write_not_started(execute_gate_error(
+            &decision, gate, session,
+        )));
+    }
     let upper_source = source.trim_start().to_ascii_uppercase();
     if upper_source.starts_with("CREATE TABLE ")
         || upper_source.starts_with("CREATE OR REPLACE TABLE ")
@@ -12026,8 +12156,29 @@ async fn create_or_replace_inner(
         return Err(not_editionable_error("TABLE"));
     }
     let detected = detect_create_or_replace_object(cx, conn, &source).await;
-    let action_material =
-        ddl_action_material(&source, ActionKind::CreateOrReplace, args.timeout_seconds);
+    let proof = compile_parse_closure::prepare(
+        ctx.profile_classifier,
+        cx,
+        conn,
+        ctx.catalog_cache,
+        ctx.session,
+        &source,
+    )
+    .await;
+    proof
+        .require_compile_parse_closure(&source)
+        .map_err(|error| {
+            if args.execute && args.confirm.is_some() {
+                compile_parse_closure::stale()
+            } else {
+                error
+            }
+        })?;
+    let action_material = proof.bind_material(ddl_action_material(
+        &source,
+        ActionKind::CreateOrReplace,
+        args.timeout_seconds,
+    ));
     let confirm = match (args.execute, decision.required_level, &gate) {
         (false, Some(level), LevelDecision::Allow) if level >= OperatingLevel::Ddl => {
             let raw = ctx.execute_grants.issue(
@@ -12092,6 +12243,7 @@ async fn create_or_replace_inner(
                 },
             );
         }
+        proof.attach_compile_parse_binding(&mut preview);
         return Ok(preview);
     }
 
@@ -12258,10 +12410,15 @@ async fn deploy_ddl_inner(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Val
     }
 
     if !args.execute {
-        let proof = ctx
-            .profile_classifier
-            .prepare(ctx.cx, ctx.conn, ctx.catalog_cache, &ddl)
-            .await;
+        let proof = compile_parse_closure::prepare(
+            ctx.profile_classifier,
+            ctx.cx,
+            ctx.conn,
+            ctx.catalog_cache,
+            ctx.session,
+            &ddl,
+        )
+        .await;
         let mut preview = preview_sql(
             &PreviewSqlArgs {
                 sql: ddl.clone(),
@@ -12343,7 +12500,7 @@ fn preview_sql(
     binding: &ExecGrantBinding,
     sql_policy: Option<&SqlPolicyConfig>,
     current_schema: Option<&str>,
-    proof: &served_classifier::PreparedClassifier,
+    proof: &compile_parse_closure::PreparedSqlProof,
 ) -> Result<Value, ErrorEnvelope> {
     let sql = args.sql.as_str();
     let active_profile = proof.active_profile();
@@ -12353,6 +12510,7 @@ fn preview_sql(
     // live semantic purity before its own effect.
     let base = proof.precheck.classify(sql);
     if base.danger != DangerLevel::Forbidden {
+        proof.require_compile_parse_closure(sql)?;
         proof.require_readonly_routine_closures(sql)?;
     }
     // Arc N runs at PREVIEW too, and it has to: the grant is minted here, at the
@@ -12499,6 +12657,7 @@ fn preview_sql(
         preview["policy"] = tightening;
     }
     attach_routine_call_impact(&mut preview, proof, sql);
+    proof.attach_compile_parse_binding(&mut preview);
     Ok(preview)
 }
 
@@ -13920,10 +14079,15 @@ impl OracleDispatcher {
         if tool == "oracle_preview_sql" {
             let a: PreviewSqlArgs = parse_args(name, args)?;
             let binding = grant_binding_for_context(&state, context);
-            let proof = state
-                .profile_classifier
-                .prepare(cx, state.conn.as_ref(), &state.catalog_cache, &a.sql)
-                .await;
+            let proof = compile_parse_closure::prepare(
+                &state.profile_classifier,
+                cx,
+                state.conn.as_ref(),
+                &state.catalog_cache,
+                &state.level,
+                &a.sql,
+            )
+            .await;
             let mut preview = preview_sql(
                 &a,
                 &scoped_level,

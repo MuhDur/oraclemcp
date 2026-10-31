@@ -27,6 +27,7 @@ fn sample() -> ImpactBindingV1 {
             }]),
             edition: computed("EDITION_A".into()),
             compiler_facts: computed("PLSQL_OPTIMIZE_LEVEL=2".into()),
+            compile_parse_closure_digest: computed([0; 32]),
             engine_version: computed("0.8.0".into()),
             ruleset_digest: computed([0; 32]),
             effective_plan_digest: computed([0; 32]),
@@ -69,6 +70,7 @@ fn impact_every_field_serialized_with_status() {
         "objects",
         "edition",
         "compiler_facts",
+        "compile_parse_closure_digest",
         "engine_version",
         "ruleset_digest",
         "effective_plan_digest",
@@ -262,7 +264,7 @@ fn policy_rule_order_and_identity_are_decisive_even_at_smallest_mutation() {
 
 proptest! {
     #[test]
-    fn prop_decisive_digest_changes_on_each_decisive_field(field in 0usize..24, change in 1u8..=255) {
+    fn prop_decisive_digest_changes_on_each_decisive_field(field in 0usize..25, change in 1u8..=255) {
         let original = sample();
         let mut changed = original.clone();
         let facts = &mut changed.decisive;
@@ -273,6 +275,7 @@ proptest! {
             3 => facts.objects = computed(Vec::new()),
             4 => facts.edition = computed(format!("EDITION_{change}")),
             5 => facts.compiler_facts = computed(format!("COMPILER_{change}")),
+            24 => facts.compile_parse_closure_digest = computed([change; 32]),
             6 => facts.engine_version = computed(format!("ENGINE_{change}")),
             7 => facts.ruleset_digest = computed([change; 32]),
             8 => change_dbid(facts, change),

@@ -329,8 +329,8 @@ fn impact_attached_to_every_minting_preview() {
             if matches!(field, "effects" | "sast") && source_tool {
                 let status = &result["impact"][field];
                 if cfg!(feature = "plsql-intelligence") {
-                    // The mock patch leaves `BEGIN 1;`: SAST refuses the
-                    // malformed candidate with a typed engine failure.
+                    // Source impact retains typed statuses for unsupported
+                    // analyses; the patch fixture itself is valid PL/SQL.
                     assert!(
                         matches!(status["status"].as_str(), Some("computed" | "estimated"))
                             || *status == json!({"status":"not_applicable","reason":"no_source"})
@@ -534,6 +534,61 @@ fn mock_relation_security_probe_rows(sql: &str) -> Option<Vec<OracleRow>> {
 /// semantic resolution. Dedicated security tests use `SemanticGuardMock`
 /// instead, so views, policies, and callables are never cleared by this model.
 fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>> {
+    // Complete bounded metadata for the synthetic clean compilation fixtures.
+    // The native compile canary test separately exercises actual Oracle answers.
+    if [
+        CatalogQueryId::HardParseAssociations,
+        CatalogQueryId::HardParseIndexes,
+        CatalogQueryId::MutationVpdPolicies,
+    ]
+    .iter()
+    .any(|id| sql == id.spec().sql)
+    {
+        return Some(Vec::new());
+    }
+    if sql == CatalogQueryId::MutationTarget.spec().sql
+        || sql == CatalogQueryId::ClosureMemberObject.spec().sql
+    {
+        return Some(vec![semantic_row(&[
+            ("OWNER", string_bind(binds, 0)),
+            ("OBJECT_NAME", string_bind(binds, 1)),
+            ("OBJECT_ID", Some("42")),
+            ("STATUS", Some("VALID")),
+            ("EDITION_NAME", None),
+            ("LAST_DDL_TIME", Some("2026-10-31T00:00:00")),
+        ])]);
+    }
+    if sql == CatalogQueryId::ClosureCompilerSettings.spec().sql {
+        return Some(vec![semantic_row(&[
+            ("PLSQL_OPTIMIZE_LEVEL", Some("2")),
+            ("PLSQL_CODE_TYPE", Some("INTERPRETED")),
+            ("PLSQL_DEBUG", Some("FALSE")),
+            ("PLSQL_WARNINGS", Some("DISABLE:ALL")),
+            ("PLSQL_CCFLAGS", None),
+            ("NLS_LENGTH_SEMANTICS", Some("BYTE")),
+            ("PLSCOPE_SETTINGS", Some("IDENTIFIERS:NONE")),
+        ])]);
+    }
+    if sql == CatalogQueryId::ClosureSource.spec().sql {
+        let name = string_bind(binds, 1).unwrap_or("EMP_API");
+        let source = match string_bind(binds, 2).unwrap_or("PACKAGE BODY") {
+            "PACKAGE" => format!("PACKAGE {name} AS PROCEDURE p; END;\n"),
+            "PACKAGE BODY" => {
+                format!("PACKAGE BODY {name} AS PROCEDURE p IS BEGIN NULL; END; END;\n")
+            }
+            "PROCEDURE" => format!("PROCEDURE {name} AS BEGIN NULL; END;\n"),
+            "FUNCTION" => format!("FUNCTION {name} RETURN NUMBER AS BEGIN RETURN 1; END;\n"),
+            "TYPE" => format!("TYPE {name} AS OBJECT(id NUMBER);\n"),
+            "TYPE BODY" => {
+                format!("TYPE BODY {name} AS MEMBER PROCEDURE p IS BEGIN NULL; END; END;\n")
+            }
+            _ => return None,
+        };
+        return Some(vec![semantic_row(&[
+            ("LINE", Some("1")),
+            ("TEXT", Some(&source)),
+        ])]);
+    }
     if let Some(rows) = mock_relation_security_probe_rows(sql) {
         return Some(rows);
     }
@@ -3817,7 +3872,7 @@ fn args_for(name: &str) -> Value {
             json!({ "source_code": "CREATE OR REPLACE VIEW EMP_V AS SELECT 1 AS ID FROM dual" })
         }
         "oracle_patch_source" => {
-            json!({ "object_type": "PACKAGE_BODY", "owner": "HR", "name": "EMP_API", "old_text": "NULL", "new_text": "1" })
+            json!({ "object_type": "PACKAGE_BODY", "owner": "HR", "name": "EMP_API", "old_text": "NULL", "new_text": "NULL /* patched */" })
         }
         "current_database" => json!({}),
         "switch_database" => json!({ "db": "other" }),
@@ -3838,7 +3893,7 @@ fn args_for(name: &str) -> Value {
             json!({ "source_code": "CREATE OR REPLACE VIEW EMP_V AS SELECT 1 AS ID FROM dual" })
         }
         "patch_package" => {
-            json!({ "owner": "HR", "object_name": "EMP_API", "search_text": "NULL", "replacement": "1" })
+            json!({ "owner": "HR", "object_name": "EMP_API", "search_text": "NULL", "replacement": "NULL /* patched */" })
         }
         "patch_view" => {
             json!({ "owner": "HR", "object_name": "EMP_V", "old_text": "CREATE TABLE ...", "new_text": "CREATE OR REPLACE VIEW EMP_V AS SELECT 1 AS ID FROM dual" })
@@ -6669,7 +6724,7 @@ fn patch_source_preview_requires_unique_match_and_returns_confirmation() {
                 "name": "EMP_API",
                 "object_type": "PACKAGE_BODY",
                 "old_text": "NULL",
-                "new_text": "1",
+                "new_text": "NULL /* patched */",
             }),
         )
         .expect("patch preview succeeds");
@@ -6791,7 +6846,7 @@ fn patch_source_execute_refetches_and_uses_create_or_replace_gate() {
         "name": "EMP_API",
         "object_type": "PACKAGE_BODY",
         "old_text": "NULL",
-        "new_text": "1",
+        "new_text": "NULL /* patched */",
     });
     let preview = dispatcher
         .dispatch("oracle_patch_source", preview_args.clone())
@@ -6816,7 +6871,7 @@ fn patch_source_execute_refetches_and_uses_create_or_replace_gate() {
             .0
             .contains("CREATE OR REPLACE PACKAGE BODY APP.EMP_API")
     );
-    assert!(executed[0].0.contains("BEGIN 1; END;"));
+    assert!(executed[0].0.contains("BEGIN NULL /* patched */; END;"));
     assert_eq!(state.commits.load(Ordering::SeqCst), 1);
 }
 
@@ -6859,7 +6914,7 @@ fn read_patch_preview_lists_and_reads_last_preview() {
                 "owner": "APP",
                 "object_name": "EMP_API",
                 "search_text": "NULL",
-                "replacement": "1",
+                "replacement": "NULL /* patched */",
             }),
         )
         .expect("patch preview is remembered");
@@ -13502,7 +13557,7 @@ mod qa85_terminal_boundaries {
                 "name": "EMP_API",
                 "object_type": "PACKAGE_BODY",
                 "old_text": "NULL",
-                "new_text": "1"
+                "new_text": "NULL /* patched */"
             }),
         );
     }
@@ -16281,6 +16336,9 @@ mod dependents_preview {
             sql: &str,
             binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
+            if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
+                return Ok(rows);
+            }
             let verified = sql == CatalogQueryId::DependentsTransitive.spec().sql;
             if !verified && sql != CatalogQueryId::DependentsTransitiveVisible.spec().sql {
                 return Ok(Vec::new());
@@ -16537,8 +16595,11 @@ mod source_impact_preview {
             binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
             let stored = matches!(binds.get(1), Some(OracleBind::String(name)) if name == "F");
-            if sql != CatalogQueryId::GetSource.spec().sql || !stored {
-                return Ok(Vec::new());
+            if (sql != CatalogQueryId::GetSource.spec().sql
+                && sql != CatalogQueryId::ClosureSource.spec().sql)
+                || !stored
+            {
+                return Ok(mock_plain_table_dictionary(sql, binds).unwrap_or_default());
             }
             Ok(STORED
                 .iter()

@@ -122,6 +122,8 @@ pub struct DecisiveFacts {
     pub objects: FieldStatus<Vec<ObjectFact>>,
     pub edition: FieldStatus<String>,
     pub compiler_facts: FieldStatus<String>,
+    /// Offline static SQL and fresh parse-time callback proof for candidate DDL.
+    pub compile_parse_closure_digest: FieldStatus<[u8; 32]>,
     pub engine_version: FieldStatus<String>,
     pub ruleset_digest: FieldStatus<[u8; 32]>,
     /// The W13 plan that later preview/count/classification/apply consumers must share.
@@ -148,6 +150,7 @@ impl Default for DecisiveFacts {
             objects: FieldStatus::not_wired(),
             edition: FieldStatus::not_wired(),
             compiler_facts: FieldStatus::not_wired(),
+            compile_parse_closure_digest: FieldStatus::not_wired(),
             engine_version: FieldStatus::not_wired(),
             ruleset_digest: FieldStatus::not_wired(),
             effective_plan_digest: FieldStatus::not_wired(),
@@ -395,6 +398,9 @@ impl DecisiveFacts {
         });
         put_status(out, &self.edition, |out, v| put_text(out, v));
         put_status(out, &self.compiler_facts, |out, v| put_text(out, v));
+        put_status(out, &self.compile_parse_closure_digest, |out, v| {
+            put_bytes(out, v)
+        });
         put_status(out, &self.engine_version, |out, v| put_text(out, v));
         put_status(out, &self.ruleset_digest, |out, v| put_bytes(out, v));
         put_status(out, &self.effective_plan_digest, |out, v| put_bytes(out, v));

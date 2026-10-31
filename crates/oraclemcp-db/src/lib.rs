@@ -156,7 +156,12 @@ pub use error::{
     FlashbackRefusalKind, QuarantineOutcome, RetryDecision, RetryPolicy, StatementClass,
     StatementOutcome, connect_hint_for, is_transient_error, retry_decision,
 };
-pub use hard_parse_closure::{HardParseEffectClosureV1, prove_hard_parse_effect_closure};
+pub use hard_parse_closure::{
+    CompileParseCallbackClass, CompileParseCallbackFact, CompileParseEffectClosureV1,
+    CompileParseEffectOracle, CompileParseStatementClosure, CompileParseUnproven,
+    HardParseEffectClosureV1, collect_compile_parse_effect_closure,
+    prove_hard_parse_effect_closure,
+};
 pub use health::{
     Finding, HealthSubcheck, ParsedHealthRequest, PreflightReport, Severity, SubcheckPreflight,
     ViewTier, buffer_cache_hit_ratio_sql, detect_view_tier, disabled_constraints_sql,

@@ -1618,7 +1618,7 @@ fn patch_source_execute_is_audited_pending_then_signed_outcome() {
         "name": "EMP_API",
         "object_type": "PACKAGE_BODY",
         "old_text": "NULL",
-        "new_text": "1",
+        "new_text": "NULL /* patched */",
     });
     let preview = dispatcher
         .dispatch("oracle_patch_source", preview_args.clone())
@@ -1694,7 +1694,7 @@ fn audit_write_failure_refuses_patch_before_db_execute() {
         "name": "EMP_API",
         "object_type": "PACKAGE_BODY",
         "old_text": "NULL",
-        "new_text": "1",
+        "new_text": "NULL /* patched */",
     });
     let preview = dispatcher
         .dispatch("oracle_patch_source", preview_args.clone())

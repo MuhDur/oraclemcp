@@ -2606,6 +2606,27 @@ impl OracleCatalogResolver {
         names: &[RawName],
         context: &ResolveCtx,
     ) -> Result<Self, DbError> {
+        Self::load_for_schema(cx, conn, names, context, &context.current_schema).await
+    }
+
+    /// Resolve static names relative to the exact owner of a candidate unit,
+    /// validating the authenticated session context before lookup. The returned
+    /// snapshot resolves only with a context whose current schema is the chosen
+    /// source owner; it cannot be reused for an unqualified caller-session read.
+    /// Public/private synonym traversal is the same canonical dictionary path.
+    pub async fn load_for_schema(
+        cx: &Cx,
+        conn: &dyn OracleConnection,
+        names: &[RawName],
+        context: &ResolveCtx,
+        resolution_schema: &str,
+    ) -> Result<Self, DbError> {
+        if resolution_schema.is_empty()
+            || resolution_schema.len() > 128
+            || resolution_schema.chars().any(char::is_control)
+        {
+            return Err(DbError::Query("invalid compile resolution schema".into()));
+        }
         if names.len() > MAX_CATALOG_NAMES {
             return Err(DbError::Query(format!(
                 "catalog resolver name cap exceeded: {} > {MAX_CATALOG_NAMES}",
@@ -2627,7 +2648,13 @@ impl OracleCatalogResolver {
             });
         }
 
-        let lookup = DictionaryLookup { cx, conn, context };
+        let mut lookup_context = context.clone();
+        lookup_context.current_schema = resolution_schema.to_owned();
+        let lookup = DictionaryLookup {
+            cx,
+            conn,
+            context: &lookup_context,
+        };
         let mut entries = HashMap::with_capacity(names.len());
         for name in names {
             if entries.contains_key(name) {
@@ -2637,7 +2664,7 @@ impl OracleCatalogResolver {
             entries.insert(name.clone(), resolution);
         }
         Ok(Self {
-            context: context.clone(),
+            context: lookup_context,
             entries,
         })
     }

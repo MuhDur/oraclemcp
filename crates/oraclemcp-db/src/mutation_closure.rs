@@ -171,13 +171,19 @@ fn rows_digest(rows: &[OracleRow]) -> String {
     digest(&encoded(&canonical))
 }
 
-fn required<'a>(row: &'a OracleRow, column: &str) -> Result<&'a str, MutationUnavailableReason> {
+pub(crate) fn required<'a>(
+    row: &'a OracleRow,
+    column: &str,
+) -> Result<&'a str, MutationUnavailableReason> {
     row.text(column)
         .filter(|value| !value.is_empty())
         .ok_or(MutationUnavailableReason::CatalogIncomplete)
 }
 
-fn optional(row: &OracleRow, column: &str) -> Result<Option<String>, MutationUnavailableReason> {
+pub(crate) fn optional(
+    row: &OracleRow,
+    column: &str,
+) -> Result<Option<String>, MutationUnavailableReason> {
     let cell = row
         .cell(column)
         .ok_or(MutationUnavailableReason::CatalogIncomplete)?;
@@ -198,7 +204,7 @@ fn optional(row: &OracleRow, column: &str) -> Result<Option<String>, MutationUna
     Ok(cell.value.clone())
 }
 
-fn flag(row: &OracleRow, column: &str) -> Result<bool, MutationUnavailableReason> {
+pub(crate) fn flag(row: &OracleRow, column: &str) -> Result<bool, MutationUnavailableReason> {
     match required(row, column)? {
         "YES" => Ok(true),
         "NO" => Ok(false),

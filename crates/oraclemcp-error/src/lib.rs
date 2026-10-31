@@ -402,13 +402,15 @@ pub enum ReasonCategory {
     ProtectedByRedaction,
     /// Required OLS, RAS, or Data Redaction catalog evidence was unavailable.
     SecurityFeatureVisibilityUnknown,
+    /// Candidate compilation could invoke a callback whose effects are unproven.
+    ParseCallbackUnproven,
     /// A refusal that does not fit the categories above.
     Other,
 }
 
 impl ReasonCategory {
     /// Every currently defined structured refusal category, in deterministic wire order.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::BlockListed,
         Self::CostBudgetExceeded,
         Self::DynamicSql,
@@ -418,6 +420,7 @@ impl ReasonCategory {
         Self::OneChildEdition,
         Self::OperatorOnlyStatement,
         Self::Other,
+        Self::ParseCallbackUnproven,
         Self::PlSqlBlock,
         Self::PolicyDenied,
         Self::ProtectedByOls,
@@ -458,6 +461,7 @@ impl ReasonCategory {
             Self::SecurityFeatureVisibilityUnknown => {
                 "required security catalog evidence is unavailable"
             }
+            Self::ParseCallbackUnproven => "candidate compile-time callback closure is unproven",
             Self::Other => "structured cause has no narrower category",
         }
     }
@@ -491,6 +495,9 @@ impl ReasonCategory {
             }
             Self::SecurityFeatureVisibilityUnknown => {
                 "least-privilege catalog read could not prove policy status"
+            }
+            Self::ParseCallbackUnproven => {
+                "static SQL parsing, callback effects or required catalog visibility is unknown"
             }
             Self::Other => "no more specific structured cause was supplied",
         }
@@ -553,6 +560,9 @@ impl ReasonCategory {
             }
             Self::SecurityFeatureVisibilityUnknown => {
                 "ask the administrator to grant the minimum security-catalog visibility needed for proof"
+            }
+            Self::ParseCallbackUnproven => {
+                "use fully parsed source and obtain a complete effect-free parse-callback proof before compiling"
             }
             Self::Other => {
                 "inspect the structured refusal reason and choose a documented guarded tool"

@@ -975,7 +975,9 @@ pub const oraclemcp_guard::classifier::VERDICT_CERTIFICATE_CLASSIFIER_VERSION: &
 pub const oraclemcp_guard::classifier::VERDICT_CERTIFICATE_REGISTRY_GENERATION: u16
 pub fn oraclemcp_guard::classifier::analyze_batch(&str) -> oraclemcp_guard::classifier::BatchShape
 pub fn oraclemcp_guard::classifier::builtin_only_virtual_column_expression(&str, &str) -> bool
+pub fn oraclemcp_guard::classifier::compile_static_sql_relations(&str) -> core::result::Result<alloc::vec::Vec<oraclemcp_guard::resolver::RawName>, oraclemcp_guard::PlanMismatch>
 pub fn oraclemcp_guard::classifier::function_free_virtual_column_expression(&str) -> bool
+pub fn oraclemcp_guard::classifier::hard_parse_sql_routine_calls(&str) -> core::result::Result<alloc::vec::Vec<oraclemcp_guard::purity::ObjectRef>, oraclemcp_guard::PlanMismatch>
 pub fn oraclemcp_guard::classifier::hard_parse_user_calls(&str) -> core::result::Result<alloc::vec::Vec<oraclemcp_guard::purity::ObjectRef>, oraclemcp_guard::PlanMismatch>
 pub fn oraclemcp_guard::classifier::named_bind_placeholders(&str) -> alloc::vec::Vec<alloc::string::String>
 pub fn oraclemcp_guard::classifier::planned_relations_match_base_objects(&oraclemcp_guard::resolver::SemanticReadPlan, &[oraclemcp_guard::purity::ObjectRef]) -> core::result::Result<(), oraclemcp_guard::PlanMismatch>
@@ -2713,6 +2715,7 @@ impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::impact_binding::DbIde
 pub fn oraclemcp_guard::impact_binding::DbIdentity::vzip(self) -> V
 pub struct oraclemcp_guard::impact_binding::DecisiveFacts
 pub oraclemcp_guard::impact_binding::DecisiveFacts::bind_hmac: oraclemcp_guard::impact_binding::FieldStatus<[u8; 32]>
+pub oraclemcp_guard::impact_binding::DecisiveFacts::compile_parse_closure_digest: oraclemcp_guard::impact_binding::FieldStatus<[u8; 32]>
 pub oraclemcp_guard::impact_binding::DecisiveFacts::compiler_facts: oraclemcp_guard::impact_binding::FieldStatus<alloc::string::String>
 pub oraclemcp_guard::impact_binding::DecisiveFacts::current_schema: oraclemcp_guard::impact_binding::FieldStatus<alloc::string::String>
 pub oraclemcp_guard::impact_binding::DecisiveFacts::db_identity: oraclemcp_guard::impact_binding::FieldStatus<oraclemcp_guard::impact_binding::DbIdentity>
@@ -17472,6 +17475,7 @@ impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::impact_binding::DbIde
 pub fn oraclemcp_guard::impact_binding::DbIdentity::vzip(self) -> V
 pub struct oraclemcp_guard::DecisiveFacts
 pub oraclemcp_guard::DecisiveFacts::bind_hmac: oraclemcp_guard::impact_binding::FieldStatus<[u8; 32]>
+pub oraclemcp_guard::DecisiveFacts::compile_parse_closure_digest: oraclemcp_guard::impact_binding::FieldStatus<[u8; 32]>
 pub oraclemcp_guard::DecisiveFacts::compiler_facts: oraclemcp_guard::impact_binding::FieldStatus<alloc::string::String>
 pub oraclemcp_guard::DecisiveFacts::current_schema: oraclemcp_guard::impact_binding::FieldStatus<alloc::string::String>
 pub oraclemcp_guard::DecisiveFacts::db_identity: oraclemcp_guard::impact_binding::FieldStatus<oraclemcp_guard::impact_binding::DbIdentity>

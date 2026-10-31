@@ -228,6 +228,7 @@ pub oraclemcp_error::ReasonCategory::NotEditionable
 pub oraclemcp_error::ReasonCategory::OneChildEdition
 pub oraclemcp_error::ReasonCategory::OperatorOnlyStatement
 pub oraclemcp_error::ReasonCategory::Other
+pub oraclemcp_error::ReasonCategory::ParseCallbackUnproven
 pub oraclemcp_error::ReasonCategory::PlSqlBlock
 pub oraclemcp_error::ReasonCategory::PolicyDenied
 pub oraclemcp_error::ReasonCategory::ProtectedByOls
@@ -241,7 +242,7 @@ pub oraclemcp_error::ReasonCategory::UnbalancedBlock
 pub oraclemcp_error::ReasonCategory::UnprovenSideEffect
 pub oraclemcp_error::ReasonCategory::UseChangeRequest
 impl oraclemcp_error::ReasonCategory
-pub const oraclemcp_error::ReasonCategory::ALL: [Self; 21]
+pub const oraclemcp_error::ReasonCategory::ALL: [Self; 22]
 pub const fn oraclemcp_error::ReasonCategory::meaning(self) -> &'static str
 pub const fn oraclemcp_error::ReasonCategory::next_action(self) -> &'static str
 pub const fn oraclemcp_error::ReasonCategory::typical_cause(self) -> &'static str

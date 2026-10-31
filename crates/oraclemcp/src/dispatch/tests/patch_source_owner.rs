@@ -128,7 +128,7 @@ fn patch_args(owner: &str) -> Value {
         "name": "EMP_API",
         "object_type": "PACKAGE_BODY",
         "old_text": "NULL",
-        "new_text": "1",
+        "new_text": "NULL /* patched */",
     })
 }
 

@@ -427,38 +427,7 @@ impl PreparedClassifier {
 }
 
 fn sql_routine_calls(sql: &str) -> Result<Vec<ObjectRef>, ()> {
-    use sqlparser::ast::{Expr, Statement, Visit, Visitor};
-    use std::{collections::HashSet, ops::ControlFlow};
-    struct Names(HashSet<String>);
-    impl Visitor for Names {
-        type Break = ();
-        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
-            if let Expr::Function(function) = expr {
-                self.0
-                    .insert(function.name.to_string().to_ascii_uppercase());
-            }
-            ControlFlow::Continue(())
-        }
-    }
-    let statements =
-        sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::OracleDialect {}, sql)
-            .map_err(|_| ())?;
-    let mut names = Names(HashSet::new());
-    for statement in statements {
-        if matches!(
-            statement,
-            Statement::Query(_)
-                | Statement::Insert(_)
-                | Statement::Update(_)
-                | Statement::Delete(_)
-                | Statement::Merge { .. }
-        ) {
-            let _ = statement.visit(&mut names);
-        }
-    }
-    let mut calls = oraclemcp_guard::hard_parse_user_calls(sql).map_err(|_| ())?;
-    calls.retain(|call| names.0.contains(&routine_call_key(call)));
-    Ok(calls)
+    oraclemcp_guard::classifier::hard_parse_sql_routine_calls(sql).map_err(|_| ())
 }
 
 fn routine_call_key(source: &ObjectRef) -> String {

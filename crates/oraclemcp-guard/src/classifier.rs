@@ -2016,6 +2016,49 @@ pub fn hard_parse_user_calls(sql: &str) -> Result<Vec<ObjectRef>, PlanMismatch> 
     Ok(user_defined_calls(sql, false))
 }
 
+/// Intersect conservative callback tokens with actual SQL function nodes.
+/// DML target column lists are relations, never callable expressions. Parsing
+/// failures remain unknown; this inventory grants no effect authority.
+pub fn hard_parse_sql_routine_calls(sql: &str) -> Result<Vec<ObjectRef>, PlanMismatch> {
+    if exceeds_sqlparser_square_bracket_budget(sql) {
+        return Err(PlanMismatch::ParserWorkBudgetExceeded);
+    }
+    let statements =
+        Parser::parse_sql(&OracleDialect {}, sql).map_err(|_| PlanMismatch::UnsupportedShape)?;
+    struct Names(HashSet<String>);
+    impl Visitor for Names {
+        type Break = ();
+        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+            if let Expr::Function(function) = expr {
+                self.0
+                    .insert(function.name.to_string().to_ascii_uppercase());
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    let mut names = Names(HashSet::new());
+    for statement in statements {
+        if matches!(
+            statement,
+            Statement::Query(_)
+                | Statement::Insert(_)
+                | Statement::Update(_)
+                | Statement::Delete(_)
+                | Statement::Merge { .. }
+        ) {
+            let _ = statement.visit(&mut names);
+        }
+    }
+    let mut calls = hard_parse_user_calls(sql)?;
+    calls.retain(|call| {
+        names.0.contains(&match &call.schema {
+            Some(schema) => format!("{schema}.{}", call.name).to_ascii_uppercase(),
+            None => call.name.to_ascii_uppercase(),
+        })
+    });
+    Ok(calls)
+}
+
 /// Whether the submitted text immediately executes PL/SQL rather than merely
 /// defining stored code. Leading PL/SQL labels are allowed on anonymous blocks,
 /// so skip `<<label>>` prefixes before checking the first executable keyword.
@@ -3296,6 +3339,102 @@ pub fn semantic_read_plan_checked(sql: &str) -> Result<SemanticReadPlan, PlanMis
         return Err(PlanMismatch::UnsupportedShape);
     }
     Ok(plan)
+}
+
+/// Collect exact relation names for an offline compile-time SQL proof. This
+/// grants no execution authority and includes DML targets as well as every
+/// expression-contained subquery. Unsupported scopes remain unproven.
+pub fn compile_static_sql_relations(sql: &str) -> Result<Vec<RawName>, PlanMismatch> {
+    if exceeds_sqlparser_square_bracket_budget(sql) {
+        return Err(PlanMismatch::ParserWorkBudgetExceeded);
+    }
+    let statements =
+        Parser::parse_sql(&OracleDialect {}, sql).map_err(|_| PlanMismatch::UnsupportedShape)?;
+    let [statement] = statements.as_slice() else {
+        return Err(PlanMismatch::UnsupportedShape);
+    };
+    if !matches!(
+        statement,
+        Statement::Query(_)
+            | Statement::Insert(_)
+            | Statement::Update(_)
+            | Statement::Delete(_)
+            | Statement::Merge { .. }
+    ) {
+        return Err(PlanMismatch::UnsupportedShape);
+    }
+    struct Relations {
+        names: Vec<RawName>,
+        depth: usize,
+    }
+    impl Visitor for Relations {
+        type Break = PlanMismatch;
+        fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+            self.depth += 1;
+            if query.with.is_some() || self.depth > MAX_BLOCK_DEPTH {
+                return ControlFlow::Break(PlanMismatch::UnsupportedShape);
+            }
+            ControlFlow::Continue(())
+        }
+        fn post_visit_query(&mut self, _: &Query) -> ControlFlow<Self::Break> {
+            self.depth -= 1;
+            ControlFlow::Continue(())
+        }
+        fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Self::Break> {
+            if !matches!(
+                factor,
+                TableFactor::Table { args: None, .. } | TableFactor::Derived { .. }
+            ) {
+                return ControlFlow::Break(PlanMismatch::UnsupportedShape);
+            }
+            ControlFlow::Continue(())
+        }
+        fn pre_visit_relation(
+            &mut self,
+            name: &sqlparser::ast::ObjectName,
+        ) -> ControlFlow<Self::Break> {
+            if !(1..=2).contains(&name.0.len()) || self.names.len() >= MAX_PLANNED_RELATIONS {
+                return ControlFlow::Break(PlanMismatch::UnsupportedShape);
+            }
+            let mut parts = Vec::new();
+            for part in &name.0 {
+                let Some(ident) = part.as_ident() else {
+                    return ControlFlow::Break(PlanMismatch::UnsupportedShape);
+                };
+                if ident.value.is_empty()
+                    || ident.value.len() > 128
+                    || ident.value.chars().any(char::is_control)
+                {
+                    return ControlFlow::Break(PlanMismatch::UnsupportedShape);
+                }
+                parts.push(match ident.quote_style {
+                    None if ident.value.as_bytes()[0].is_ascii_alphabetic()
+                        && ident
+                            .value
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"_$#".contains(&byte)) =>
+                    {
+                        RawNamePart::unquoted(ident.value.clone())
+                    }
+                    Some('"') => RawNamePart::quoted(ident.value.clone()),
+                    _ => return ControlFlow::Break(PlanMismatch::UnsupportedShape),
+                });
+            }
+            let raw = RawName::new(parts, SyntacticRole::FromFactor);
+            if !self.names.contains(&raw) {
+                self.names.push(raw);
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    let mut relations = Relations {
+        names: Vec::new(),
+        depth: 0,
+    };
+    match statement.visit(&mut relations) {
+        ControlFlow::Break(error) => Err(error),
+        ControlFlow::Continue(()) => Ok(relations.names),
+    }
 }
 
 /// Convert a parsed `ObjectName` (the `schema.table` of a `FROM`/`JOIN` factor)
@@ -7025,6 +7164,72 @@ mod tests {
             DangerLevel::Safe,
             "a base-object-free read has no unproven object"
         );
+    }
+
+    #[test]
+    fn hard_parse_sql_inventory_excludes_dml_target_column_lists() {
+        assert!(
+            hard_parse_sql_routine_calls("INSERT INTO app.t(id) VALUES (1)")
+                .unwrap()
+                .is_empty()
+        );
+        for sql in [
+            "INSERT INTO app.t(id) VALUES (app.fx(1))",
+            "UPDATE app.t SET id=(SELECT app.fx(1) FROM app.s) WHERE id=1",
+            "SELECT app.replace(id) FROM app.t",
+        ] {
+            let calls = hard_parse_sql_routine_calls(sql).unwrap();
+            assert_eq!(calls.len(), 1, "{sql}: {calls:?}");
+            assert_eq!(calls[0].schema.as_deref(), Some("app"));
+        }
+        assert!(hard_parse_sql_routine_calls("INSERT INTO app.t(").is_err());
+    }
+
+    #[test]
+    fn compile_sql_relations_include_targets_subqueries_and_preserve_quotes() {
+        for (sql, expected) in [
+            ("SELECT id INTO local_id FROM app.t", vec!["t"]),
+            (
+                "INSERT INTO app.dst (id) SELECT id FROM app.src",
+                vec!["dst", "src"],
+            ),
+            (
+                "UPDATE app.dst SET id = (SELECT MAX(id) FROM app.src)",
+                vec!["dst", "src"],
+            ),
+            (
+                "DELETE FROM app.dst WHERE id IN (SELECT id FROM app.src)",
+                vec!["dst", "src"],
+            ),
+            (
+                "MERGE INTO app.dst d USING app.src s ON (d.id=s.id) WHEN MATCHED THEN UPDATE SET d.id=s.id",
+                vec!["dst", "src"],
+            ),
+        ] {
+            let names = compile_static_sql_relations(sql).unwrap();
+            let actual = names
+                .iter()
+                .map(|name| name.parts.last().unwrap().text.to_ascii_lowercase())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{sql}");
+        }
+        let names = compile_static_sql_relations("SELECT \"id\" FROM \"App\".\"MiXeD\"").unwrap();
+        assert_eq!(
+            names[0].parts,
+            vec![RawNamePart::quoted("App"), RawNamePart::quoted("MiXeD")]
+        );
+        for sql in [
+            "CREATE TABLE t(id NUMBER)",
+            "SELECT * FROM a.b.c",
+            "SELECT * FROM t@remote",
+            "WITH t AS (SELECT 1 FROM dual) SELECT * FROM t",
+            "SELECT * FROM TABLE(app.f())",
+        ] {
+            assert!(
+                compile_static_sql_relations(sql).is_err(),
+                "unsupported compile SQL must be unknown: {sql}"
+            );
+        }
     }
 
     #[test]

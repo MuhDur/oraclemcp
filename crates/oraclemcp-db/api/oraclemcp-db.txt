@@ -1079,6 +1079,8 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::mutation_closure::MutationRoutineSource where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::mutation_closure::MutationRoutineSource::vzip(self) -> V
 pub struct oraclemcp_db::mutation_closure::UnknownMutationEffects
+impl oraclemcp_db::CompileParseEffectOracle for oraclemcp_db::mutation_closure::UnknownMutationEffects
+pub fn oraclemcp_db::mutation_closure::UnknownMutationEffects::static_sql(&self, &str) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_guard::mutation_closure::MutationUnavailableReason>
 impl oraclemcp_db::mutation_closure::MutationEffectOracle for oraclemcp_db::mutation_closure::UnknownMutationEffects
 pub fn oraclemcp_db::mutation_closure::UnknownMutationEffects::prove_source<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 dyn oraclemcp_db::OracleConnection, &'life3 oraclemcp_db::mutation_closure::MutationRoutineSource) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::mutation_closure::MutationRoutineProof, oraclemcp_guard::mutation_closure::MutationUnavailableReason>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
 impl core::marker::Freeze for oraclemcp_db::mutation_closure::UnknownMutationEffects
@@ -2025,6 +2027,79 @@ pub type oraclemcp_db::ChangeKind::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ChangeKind where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ChangeKind where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::ChangeKind::vzip(self) -> V
+pub enum oraclemcp_db::CompileParseCallbackClass
+pub oraclemcp_db::CompileParseCallbackClass::CatalogVisibility
+pub oraclemcp_db::CompileParseCallbackClass::Optimizer
+pub oraclemcp_db::CompileParseCallbackClass::Resolution
+pub oraclemcp_db::CompileParseCallbackClass::SecurityPolicy
+pub oraclemcp_db::CompileParseCallbackClass::Source
+pub oraclemcp_db::CompileParseCallbackClass::SqlRoutine
+pub oraclemcp_db::CompileParseCallbackClass::StaticSql
+pub oraclemcp_db::CompileParseCallbackClass::VpdPolicy
+impl core::clone::Clone for oraclemcp_db::CompileParseCallbackClass
+pub fn oraclemcp_db::CompileParseCallbackClass::clone(&self) -> oraclemcp_db::CompileParseCallbackClass
+impl core::cmp::Eq for oraclemcp_db::CompileParseCallbackClass
+impl core::cmp::Ord for oraclemcp_db::CompileParseCallbackClass
+pub fn oraclemcp_db::CompileParseCallbackClass::cmp(&self, &oraclemcp_db::CompileParseCallbackClass) -> core::cmp::Ordering
+impl core::cmp::PartialEq for oraclemcp_db::CompileParseCallbackClass
+pub fn oraclemcp_db::CompileParseCallbackClass::eq(&self, &oraclemcp_db::CompileParseCallbackClass) -> bool
+impl core::cmp::PartialOrd for oraclemcp_db::CompileParseCallbackClass
+pub fn oraclemcp_db::CompileParseCallbackClass::partial_cmp(&self, &oraclemcp_db::CompileParseCallbackClass) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for oraclemcp_db::CompileParseCallbackClass
+pub fn oraclemcp_db::CompileParseCallbackClass::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::CompileParseCallbackClass
+impl core::marker::StructuralPartialEq for oraclemcp_db::CompileParseCallbackClass
+impl serde_core::ser::Serialize for oraclemcp_db::CompileParseCallbackClass
+pub fn oraclemcp_db::CompileParseCallbackClass::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::CompileParseCallbackClass
+pub fn oraclemcp_db::CompileParseCallbackClass::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::CompileParseCallbackClass
+impl core::marker::Send for oraclemcp_db::CompileParseCallbackClass
+impl core::marker::Sync for oraclemcp_db::CompileParseCallbackClass
+impl core::marker::Unpin for oraclemcp_db::CompileParseCallbackClass
+impl core::marker::UnsafeUnpin for oraclemcp_db::CompileParseCallbackClass
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::CompileParseCallbackClass
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::CompileParseCallbackClass
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::CompileParseCallbackClass where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::CompileParseCallbackClass where T: 'a
+impl<Q, K> equivalent::Comparable<K> for oraclemcp_db::CompileParseCallbackClass where Q: core::cmp::Ord + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseCallbackClass::compare(&self, &K) -> core::cmp::Ordering
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::CompileParseCallbackClass where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseCallbackClass::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::CompileParseCallbackClass where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::CompileParseCallbackClass where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::CompileParseCallbackClass where U: core::convert::From<T>
+pub fn oraclemcp_db::CompileParseCallbackClass::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::CompileParseCallbackClass where U: core::convert::Into<T>
+pub type oraclemcp_db::CompileParseCallbackClass::Error = core::convert::Infallible
+pub fn oraclemcp_db::CompileParseCallbackClass::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::CompileParseCallbackClass where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::CompileParseCallbackClass::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::CompileParseCallbackClass::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::CompileParseCallbackClass where T: core::clone::Clone
+pub type oraclemcp_db::CompileParseCallbackClass::Owned = T
+pub fn oraclemcp_db::CompileParseCallbackClass::clone_into(&self, &mut T)
+pub fn oraclemcp_db::CompileParseCallbackClass::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::CompileParseCallbackClass
+impl<T> core::any::Any for oraclemcp_db::CompileParseCallbackClass where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseCallbackClass::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::CompileParseCallbackClass where T: ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseCallbackClass::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::CompileParseCallbackClass where T: ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseCallbackClass::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::CompileParseCallbackClass where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::CompileParseCallbackClass::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::CompileParseCallbackClass
+pub fn oraclemcp_db::CompileParseCallbackClass::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::CompileParseCallbackClass
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::CompileParseCallbackClass where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::CompileParseCallbackClass
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::CompileParseCallbackClass
+impl<T> typenum::type_operators::Same for oraclemcp_db::CompileParseCallbackClass
+pub type oraclemcp_db::CompileParseCallbackClass::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::CompileParseCallbackClass where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::CompileParseCallbackClass where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::CompileParseCallbackClass::vzip(self) -> V
 #[non_exhaustive] pub enum oraclemcp_db::ConnectFailureKind
 pub oraclemcp_db::ConnectFailureKind::ConnectResendLoop
 pub oraclemcp_db::ConnectFailureKind::ConnectResendLoop::rounds: u8
@@ -6860,6 +6935,266 @@ pub type oraclemcp_db::CloudStatus::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::CloudStatus where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::CloudStatus where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::CloudStatus::vzip(self) -> V
+pub struct oraclemcp_db::CompileParseCallbackFact
+pub oraclemcp_db::CompileParseCallbackFact::effects: oraclemcp_guard::purity::RoutineEffectsV1
+pub oraclemcp_db::CompileParseCallbackFact::name: alloc::string::String
+pub oraclemcp_db::CompileParseCallbackFact::owner: alloc::string::String
+pub oraclemcp_db::CompileParseCallbackFact::routine_closure_fingerprint: alloc::string::String
+pub oraclemcp_db::CompileParseCallbackFact::source_sha256: alloc::string::String
+impl core::clone::Clone for oraclemcp_db::CompileParseCallbackFact
+pub fn oraclemcp_db::CompileParseCallbackFact::clone(&self) -> oraclemcp_db::CompileParseCallbackFact
+impl core::cmp::Eq for oraclemcp_db::CompileParseCallbackFact
+impl core::cmp::PartialEq for oraclemcp_db::CompileParseCallbackFact
+pub fn oraclemcp_db::CompileParseCallbackFact::eq(&self, &oraclemcp_db::CompileParseCallbackFact) -> bool
+impl core::fmt::Debug for oraclemcp_db::CompileParseCallbackFact
+pub fn oraclemcp_db::CompileParseCallbackFact::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::CompileParseCallbackFact
+impl serde_core::ser::Serialize for oraclemcp_db::CompileParseCallbackFact
+pub fn oraclemcp_db::CompileParseCallbackFact::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::CompileParseCallbackFact
+pub fn oraclemcp_db::CompileParseCallbackFact::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::CompileParseCallbackFact
+impl core::marker::Send for oraclemcp_db::CompileParseCallbackFact
+impl core::marker::Sync for oraclemcp_db::CompileParseCallbackFact
+impl core::marker::Unpin for oraclemcp_db::CompileParseCallbackFact
+impl core::marker::UnsafeUnpin for oraclemcp_db::CompileParseCallbackFact
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::CompileParseCallbackFact
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::CompileParseCallbackFact
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::CompileParseCallbackFact where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::CompileParseCallbackFact where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::CompileParseCallbackFact where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseCallbackFact::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::CompileParseCallbackFact where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::CompileParseCallbackFact where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::CompileParseCallbackFact where U: core::convert::From<T>
+pub fn oraclemcp_db::CompileParseCallbackFact::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::CompileParseCallbackFact where U: core::convert::Into<T>
+pub type oraclemcp_db::CompileParseCallbackFact::Error = core::convert::Infallible
+pub fn oraclemcp_db::CompileParseCallbackFact::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::CompileParseCallbackFact where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::CompileParseCallbackFact::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::CompileParseCallbackFact::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::CompileParseCallbackFact where T: core::clone::Clone
+pub type oraclemcp_db::CompileParseCallbackFact::Owned = T
+pub fn oraclemcp_db::CompileParseCallbackFact::clone_into(&self, &mut T)
+pub fn oraclemcp_db::CompileParseCallbackFact::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::CompileParseCallbackFact
+impl<T> core::any::Any for oraclemcp_db::CompileParseCallbackFact where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseCallbackFact::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::CompileParseCallbackFact where T: ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseCallbackFact::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::CompileParseCallbackFact where T: ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseCallbackFact::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::CompileParseCallbackFact where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::CompileParseCallbackFact::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::CompileParseCallbackFact
+pub fn oraclemcp_db::CompileParseCallbackFact::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::CompileParseCallbackFact
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::CompileParseCallbackFact where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::CompileParseCallbackFact
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::CompileParseCallbackFact
+impl<T> typenum::type_operators::Same for oraclemcp_db::CompileParseCallbackFact
+pub type oraclemcp_db::CompileParseCallbackFact::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::CompileParseCallbackFact where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::CompileParseCallbackFact where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::CompileParseCallbackFact::vzip(self) -> V
+pub struct oraclemcp_db::CompileParseEffectClosureV1
+pub oraclemcp_db::CompileParseEffectClosureV1::catalog_commitments: alloc::collections::btree::set::BTreeSet<[u8; 32]>
+pub oraclemcp_db::CompileParseEffectClosureV1::database: core::option::Option<oraclemcp_guard::mutation_closure::MutationDatabaseIdentity>
+pub oraclemcp_db::CompileParseEffectClosureV1::resolution_schema: alloc::string::String
+pub oraclemcp_db::CompileParseEffectClosureV1::source_sha256: [u8; 32]
+pub oraclemcp_db::CompileParseEffectClosureV1::statements: alloc::vec::Vec<oraclemcp_db::CompileParseStatementClosure>
+pub oraclemcp_db::CompileParseEffectClosureV1::unavailable: alloc::collections::btree::set::BTreeSet<oraclemcp_db::CompileParseUnproven>
+impl oraclemcp_db::CompileParseEffectClosureV1
+pub fn oraclemcp_db::CompileParseEffectClosureV1::admit(&self) -> core::result::Result<(), oraclemcp_db::CompileParseUnproven>
+pub fn oraclemcp_db::CompileParseEffectClosureV1::digest(&self) -> [u8; 32]
+pub fn oraclemcp_db::CompileParseEffectClosureV1::is_complete(&self) -> bool
+impl core::clone::Clone for oraclemcp_db::CompileParseEffectClosureV1
+pub fn oraclemcp_db::CompileParseEffectClosureV1::clone(&self) -> oraclemcp_db::CompileParseEffectClosureV1
+impl core::cmp::Eq for oraclemcp_db::CompileParseEffectClosureV1
+impl core::cmp::PartialEq for oraclemcp_db::CompileParseEffectClosureV1
+pub fn oraclemcp_db::CompileParseEffectClosureV1::eq(&self, &oraclemcp_db::CompileParseEffectClosureV1) -> bool
+impl core::fmt::Debug for oraclemcp_db::CompileParseEffectClosureV1
+pub fn oraclemcp_db::CompileParseEffectClosureV1::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::CompileParseEffectClosureV1
+impl serde_core::ser::Serialize for oraclemcp_db::CompileParseEffectClosureV1
+pub fn oraclemcp_db::CompileParseEffectClosureV1::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::CompileParseEffectClosureV1
+pub fn oraclemcp_db::CompileParseEffectClosureV1::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::CompileParseEffectClosureV1
+impl core::marker::Send for oraclemcp_db::CompileParseEffectClosureV1
+impl core::marker::Sync for oraclemcp_db::CompileParseEffectClosureV1
+impl core::marker::Unpin for oraclemcp_db::CompileParseEffectClosureV1
+impl core::marker::UnsafeUnpin for oraclemcp_db::CompileParseEffectClosureV1
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::CompileParseEffectClosureV1
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::CompileParseEffectClosureV1
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::CompileParseEffectClosureV1 where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::CompileParseEffectClosureV1 where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::CompileParseEffectClosureV1 where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseEffectClosureV1::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::CompileParseEffectClosureV1 where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::CompileParseEffectClosureV1 where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::CompileParseEffectClosureV1 where U: core::convert::From<T>
+pub fn oraclemcp_db::CompileParseEffectClosureV1::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::CompileParseEffectClosureV1 where U: core::convert::Into<T>
+pub type oraclemcp_db::CompileParseEffectClosureV1::Error = core::convert::Infallible
+pub fn oraclemcp_db::CompileParseEffectClosureV1::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::CompileParseEffectClosureV1 where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::CompileParseEffectClosureV1::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::CompileParseEffectClosureV1::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::CompileParseEffectClosureV1 where T: core::clone::Clone
+pub type oraclemcp_db::CompileParseEffectClosureV1::Owned = T
+pub fn oraclemcp_db::CompileParseEffectClosureV1::clone_into(&self, &mut T)
+pub fn oraclemcp_db::CompileParseEffectClosureV1::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::CompileParseEffectClosureV1
+impl<T> core::any::Any for oraclemcp_db::CompileParseEffectClosureV1 where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseEffectClosureV1::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::CompileParseEffectClosureV1 where T: ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseEffectClosureV1::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::CompileParseEffectClosureV1 where T: ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseEffectClosureV1::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::CompileParseEffectClosureV1 where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::CompileParseEffectClosureV1::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::CompileParseEffectClosureV1
+pub fn oraclemcp_db::CompileParseEffectClosureV1::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::CompileParseEffectClosureV1
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::CompileParseEffectClosureV1 where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::CompileParseEffectClosureV1
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::CompileParseEffectClosureV1
+impl<T> typenum::type_operators::Same for oraclemcp_db::CompileParseEffectClosureV1
+pub type oraclemcp_db::CompileParseEffectClosureV1::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::CompileParseEffectClosureV1 where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::CompileParseEffectClosureV1 where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::CompileParseEffectClosureV1::vzip(self) -> V
+pub struct oraclemcp_db::CompileParseStatementClosure
+pub oraclemcp_db::CompileParseStatementClosure::callbacks: alloc::vec::Vec<oraclemcp_db::CompileParseCallbackFact>
+pub oraclemcp_db::CompileParseStatementClosure::objects: alloc::vec::Vec<oraclemcp_guard::mutation_closure::MutationTarget>
+pub oraclemcp_db::CompileParseStatementClosure::ordinal: u32
+pub oraclemcp_db::CompileParseStatementClosure::sql_sha256: [u8; 32]
+impl core::clone::Clone for oraclemcp_db::CompileParseStatementClosure
+pub fn oraclemcp_db::CompileParseStatementClosure::clone(&self) -> oraclemcp_db::CompileParseStatementClosure
+impl core::cmp::Eq for oraclemcp_db::CompileParseStatementClosure
+impl core::cmp::PartialEq for oraclemcp_db::CompileParseStatementClosure
+pub fn oraclemcp_db::CompileParseStatementClosure::eq(&self, &oraclemcp_db::CompileParseStatementClosure) -> bool
+impl core::fmt::Debug for oraclemcp_db::CompileParseStatementClosure
+pub fn oraclemcp_db::CompileParseStatementClosure::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::CompileParseStatementClosure
+impl serde_core::ser::Serialize for oraclemcp_db::CompileParseStatementClosure
+pub fn oraclemcp_db::CompileParseStatementClosure::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::CompileParseStatementClosure
+pub fn oraclemcp_db::CompileParseStatementClosure::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::CompileParseStatementClosure
+impl core::marker::Send for oraclemcp_db::CompileParseStatementClosure
+impl core::marker::Sync for oraclemcp_db::CompileParseStatementClosure
+impl core::marker::Unpin for oraclemcp_db::CompileParseStatementClosure
+impl core::marker::UnsafeUnpin for oraclemcp_db::CompileParseStatementClosure
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::CompileParseStatementClosure
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::CompileParseStatementClosure
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::CompileParseStatementClosure where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::CompileParseStatementClosure where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::CompileParseStatementClosure where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseStatementClosure::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::CompileParseStatementClosure where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::CompileParseStatementClosure where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::CompileParseStatementClosure where U: core::convert::From<T>
+pub fn oraclemcp_db::CompileParseStatementClosure::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::CompileParseStatementClosure where U: core::convert::Into<T>
+pub type oraclemcp_db::CompileParseStatementClosure::Error = core::convert::Infallible
+pub fn oraclemcp_db::CompileParseStatementClosure::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::CompileParseStatementClosure where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::CompileParseStatementClosure::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::CompileParseStatementClosure::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::CompileParseStatementClosure where T: core::clone::Clone
+pub type oraclemcp_db::CompileParseStatementClosure::Owned = T
+pub fn oraclemcp_db::CompileParseStatementClosure::clone_into(&self, &mut T)
+pub fn oraclemcp_db::CompileParseStatementClosure::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::CompileParseStatementClosure
+impl<T> core::any::Any for oraclemcp_db::CompileParseStatementClosure where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseStatementClosure::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::CompileParseStatementClosure where T: ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseStatementClosure::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::CompileParseStatementClosure where T: ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseStatementClosure::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::CompileParseStatementClosure where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::CompileParseStatementClosure::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::CompileParseStatementClosure
+pub fn oraclemcp_db::CompileParseStatementClosure::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::CompileParseStatementClosure
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::CompileParseStatementClosure where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::CompileParseStatementClosure
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::CompileParseStatementClosure
+impl<T> typenum::type_operators::Same for oraclemcp_db::CompileParseStatementClosure
+pub type oraclemcp_db::CompileParseStatementClosure::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::CompileParseStatementClosure where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::CompileParseStatementClosure where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::CompileParseStatementClosure::vzip(self) -> V
+pub struct oraclemcp_db::CompileParseUnproven
+pub oraclemcp_db::CompileParseUnproven::callback_class: oraclemcp_db::CompileParseCallbackClass
+pub oraclemcp_db::CompileParseUnproven::reason: oraclemcp_guard::mutation_closure::MutationUnavailableReason
+pub oraclemcp_db::CompileParseUnproven::statement_ordinal: u32
+impl core::clone::Clone for oraclemcp_db::CompileParseUnproven
+pub fn oraclemcp_db::CompileParseUnproven::clone(&self) -> oraclemcp_db::CompileParseUnproven
+impl core::cmp::Eq for oraclemcp_db::CompileParseUnproven
+impl core::cmp::Ord for oraclemcp_db::CompileParseUnproven
+pub fn oraclemcp_db::CompileParseUnproven::cmp(&self, &oraclemcp_db::CompileParseUnproven) -> core::cmp::Ordering
+impl core::cmp::PartialEq for oraclemcp_db::CompileParseUnproven
+pub fn oraclemcp_db::CompileParseUnproven::eq(&self, &oraclemcp_db::CompileParseUnproven) -> bool
+impl core::cmp::PartialOrd for oraclemcp_db::CompileParseUnproven
+pub fn oraclemcp_db::CompileParseUnproven::partial_cmp(&self, &oraclemcp_db::CompileParseUnproven) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for oraclemcp_db::CompileParseUnproven
+pub fn oraclemcp_db::CompileParseUnproven::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::CompileParseUnproven
+impl serde_core::ser::Serialize for oraclemcp_db::CompileParseUnproven
+pub fn oraclemcp_db::CompileParseUnproven::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::CompileParseUnproven
+pub fn oraclemcp_db::CompileParseUnproven::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::CompileParseUnproven
+impl core::marker::Send for oraclemcp_db::CompileParseUnproven
+impl core::marker::Sync for oraclemcp_db::CompileParseUnproven
+impl core::marker::Unpin for oraclemcp_db::CompileParseUnproven
+impl core::marker::UnsafeUnpin for oraclemcp_db::CompileParseUnproven
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::CompileParseUnproven
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::CompileParseUnproven
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::CompileParseUnproven where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::CompileParseUnproven where T: 'a
+impl<Q, K> equivalent::Comparable<K> for oraclemcp_db::CompileParseUnproven where Q: core::cmp::Ord + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseUnproven::compare(&self, &K) -> core::cmp::Ordering
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::CompileParseUnproven where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseUnproven::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::CompileParseUnproven where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::CompileParseUnproven where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::CompileParseUnproven where U: core::convert::From<T>
+pub fn oraclemcp_db::CompileParseUnproven::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::CompileParseUnproven where U: core::convert::Into<T>
+pub type oraclemcp_db::CompileParseUnproven::Error = core::convert::Infallible
+pub fn oraclemcp_db::CompileParseUnproven::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::CompileParseUnproven where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::CompileParseUnproven::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::CompileParseUnproven::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::CompileParseUnproven where T: core::clone::Clone
+pub type oraclemcp_db::CompileParseUnproven::Owned = T
+pub fn oraclemcp_db::CompileParseUnproven::clone_into(&self, &mut T)
+pub fn oraclemcp_db::CompileParseUnproven::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::CompileParseUnproven
+impl<T> core::any::Any for oraclemcp_db::CompileParseUnproven where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseUnproven::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::CompileParseUnproven where T: ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseUnproven::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::CompileParseUnproven where T: ?core::marker::Sized
+pub fn oraclemcp_db::CompileParseUnproven::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::CompileParseUnproven where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::CompileParseUnproven::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::CompileParseUnproven
+pub fn oraclemcp_db::CompileParseUnproven::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::CompileParseUnproven
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::CompileParseUnproven where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::CompileParseUnproven
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::CompileParseUnproven
+impl<T> typenum::type_operators::Same for oraclemcp_db::CompileParseUnproven
+pub type oraclemcp_db::CompileParseUnproven::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::CompileParseUnproven where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::CompileParseUnproven where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::CompileParseUnproven::vzip(self) -> V
 pub struct oraclemcp_db::CqnDriverNotification
 impl oraclemcp_db::CqnDriverNotification
 pub const fn oraclemcp_db::CqnDriverNotification::for_registration(u64) -> Self
@@ -8891,6 +9226,7 @@ impl oraclemcp_db::OracleCatalogResolver
 pub fn oraclemcp_db::OracleCatalogResolver::is_empty(&self) -> bool
 pub fn oraclemcp_db::OracleCatalogResolver::len(&self) -> usize
 pub async fn oraclemcp_db::OracleCatalogResolver::load(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &[oraclemcp_guard::resolver::RawName], &oraclemcp_guard::resolver::ResolveCtx) -> core::result::Result<Self, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::OracleCatalogResolver::load_for_schema(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &[oraclemcp_guard::resolver::RawName], &oraclemcp_guard::resolver::ResolveCtx, &str) -> core::result::Result<Self, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::OracleCatalogResolver::resolve_routine_call(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &oraclemcp_guard::purity::RoutineRef, &[oraclemcp_guard::purity::RoutineArgument], &oraclemcp_guard::resolver::ResolveCtx) -> core::result::Result<core::option::Option<oraclemcp_guard::purity::RoutineRef>, oraclemcp_db::DbError>
 impl core::clone::Clone for oraclemcp_db::OracleCatalogResolver
 pub fn oraclemcp_db::OracleCatalogResolver::clone(&self) -> oraclemcp_db::OracleCatalogResolver
@@ -14497,6 +14833,10 @@ pub const oraclemcp_db::VECTOR_MIN_MAJOR: u8
 pub trait oraclemcp_db::ClosureFactStore
 pub fn oraclemcp_db::ClosureFactStore::load(&self, &str, &oraclemcp_db::catalog_facts::ClosureFactKey) -> core::result::Result<core::option::Option<oraclemcp_db::catalog_facts::ClosureFacts>, alloc::string::String>
 pub fn oraclemcp_db::ClosureFactStore::save(&self, &str, &oraclemcp_db::catalog_facts::ClosureFacts) -> core::result::Result<(), alloc::string::String>
+pub trait oraclemcp_db::CompileParseEffectOracle: oraclemcp_db::mutation_closure::MutationEffectOracle
+pub fn oraclemcp_db::CompileParseEffectOracle::static_sql(&self, &str) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_guard::mutation_closure::MutationUnavailableReason>
+impl oraclemcp_db::CompileParseEffectOracle for oraclemcp_db::mutation_closure::UnknownMutationEffects
+pub fn oraclemcp_db::mutation_closure::UnknownMutationEffects::static_sql(&self, &str) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_guard::mutation_closure::MutationUnavailableReason>
 pub trait oraclemcp_db::CqnNotificationReceiver
 pub fn oraclemcp_db::CqnNotificationReceiver::next_notification<'life0, 'life1, 'async_trait>(&'life0 mut self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::CqnNotificationOutcome, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub trait oraclemcp_db::IamTokenSource
@@ -14668,6 +15008,7 @@ pub fn oraclemcp_db::catalog_extract_rowsets(bool) -> alloc::vec::Vec<oraclemcp_
 pub const fn oraclemcp_db::catalog_object_types() -> &'static [&'static str]
 pub fn oraclemcp_db::classify_type(&str) -> oraclemcp_db::TypeRepr
 pub fn oraclemcp_db::classify_wallet(&std::path::Path, &[alloc::string::String], core::option::Option<&str>) -> core::result::Result<oraclemcp_db::WalletContents, oraclemcp_db::OciError>
+pub async fn oraclemcp_db::collect_compile_parse_effect_closure(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, core::option::Option<&oraclemcp_guard::mutation_closure::MutationDatabaseIdentity>, &dyn oraclemcp_db::CompileParseEffectOracle) -> oraclemcp_db::CompileParseEffectClosureV1
 pub fn oraclemcp_db::compare_schemas(&oraclemcp_db::SchemaSnapshot, &oraclemcp_db::SchemaSnapshot) -> core::result::Result<oraclemcp_db::SchemaDiff, oraclemcp_db::SchemaDiffError>
 pub async fn oraclemcp_db::compile_errors(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::compile_object_statements(&str, &str, &str, bool, bool) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_db::DbError>
