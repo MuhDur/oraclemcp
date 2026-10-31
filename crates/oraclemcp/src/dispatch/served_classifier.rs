@@ -1173,15 +1173,26 @@ mod engine {
             // set, distinct from Unknown.
             assert!(names(&calls.calls[0].1).is_empty());
             assert!(calls.unknown_reasons.is_empty());
-            // The served proof refuses a closure it cannot fully prove (here a
-            // COMMIT under an autonomous transaction): Unknown, never a guess.
-            let mut writes = prepared_for(
+            // Source-proven transaction control and autonomous work stay
+            // definite refusals even when their graph edges are Medium.
+            let writes = prepared_for(
                 "FUNCTION FX(n NUMBER) RETURN NUMBER IS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN COMMIT; RETURN n; END;",
             );
-            writes.reason = Some("engine_closure_unknown");
             let calls = writes.call_effects("SELECT APP.FX(1) FROM DUAL").unwrap();
-            assert_eq!(names(&calls.calls[0].1), [RoutineEffect::Unknown]);
-            assert_eq!(calls.unknown_reasons, ["APP.FX: engine_closure_unknown"]);
+            assert_eq!(
+                names(&calls.calls[0].1),
+                [RoutineEffect::TxnControl, RoutineEffect::Autonomous]
+            );
+            assert!(calls.unknown_reasons.is_empty());
+            assert_eq!(
+                oraclemcp_guard::admit(
+                    &calls.calls[0].1,
+                    oraclemcp_guard::AdmissionContext::CustomToolCall
+                ),
+                Err(oraclemcp_guard::EffectRefusal::AlwaysRefused(
+                    RoutineEffect::TxnControl
+                ))
+            );
         }
 
         #[test]

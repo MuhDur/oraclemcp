@@ -460,13 +460,30 @@ impl PlsqlSideEffectOracle {
             return unknown_effects();
         }
         let mut effects = map_engine_effects(&closure.effects);
+        // A clean source closure independently proves these effects can never
+        // be admitted. Graph uncertainty cannot turn that definite refusal
+        // into an unknown result. This does not reconcile any edge for an
+        // otherwise admissible closure: it still needs the full High proof.
+        let source_refuses = effects.iter().any(|effect| {
+            matches!(
+                effect,
+                RoutineEffect::Autonomous | RoutineEffect::TxnControl
+            )
+        });
         for member in &closure.units {
+            if self.catalog_unit_invalid(member) {
+                return unknown_effects();
+            }
+            if source_refuses {
+                continue;
+            }
             let Some(node) = self.resolve_candidates(std::slice::from_ref(member)) else {
                 return unknown_effects();
             };
-            if self.outgoing_edges(node.id).iter().any(|edge| {
-                !is_high_confidence(edge) && !self.source_proves_autonomous_edge(member, edge)
-            }) || self.catalog_unit_invalid(member)
+            if self
+                .outgoing_edges(node.id)
+                .iter()
+                .any(|edge| !is_high_confidence(edge))
             {
                 return unknown_effects();
             }
@@ -530,24 +547,6 @@ impl PlsqlSideEffectOracle {
             }
         }
         effects
-    }
-
-    fn source_proves_autonomous_edge(&self, member: &str, edge: &Edge) -> bool {
-        // The engine emits primitive effect edges at Medium confidence. A
-        // redundant autonomous edge cannot erase an independently proven,
-        // always-refused effect from this exact unit's clean source. Every
-        // other graph uncertainty keeps the ordinary fail-closed rule.
-        edge.kind == EdgeKind::Autonomous
-            && edge.confidence.level == ConfidenceLevel::Medium
-            && self
-                .invocations
-                .local_effects(member)
-                .iter()
-                .any(|effect| *effect == plsql_engine::RoutineEffect::Autonomous)
-            && self.graph.nodes.get(&edge.to).is_some_and(|target| {
-                target.logical_id.as_str() == "EFFECT::Autonomous"
-                    && target.identity_kind == NodeIdentityKind::Unknown
-            })
     }
 
     fn read_relation_has_callbacks(&self, node_id: NodeId) -> bool {
@@ -3880,6 +3879,102 @@ mod tests {
     }
 
     #[test]
+    fn adapter_source_refusal_dominates_medium_writes_and_transaction_control() {
+        let project = tempfile::tempdir().unwrap();
+        for (declaration, expected) in [
+            (
+                "PRAGMA AUTONOMOUS_TRANSACTION;",
+                vec![
+                    RoutineEffect::Dml,
+                    RoutineEffect::TxnControl,
+                    RoutineEffect::Autonomous,
+                ],
+            ),
+            ("", vec![RoutineEffect::Dml, RoutineEffect::TxnControl]),
+        ] {
+            std::fs::write(project.path().join("change.sql"), format!(
+                "CREATE OR REPLACE TRIGGER APP.CHANGE BEFORE UPDATE ON APP.T FOR EACH ROW DECLARE {declaration} BEGIN INSERT INTO APP.CANARY (ID) VALUES (7); COMMIT; END;\n"
+            )).unwrap();
+            let mut run = analyze_project(AnalysisRequest {
+                project_root: project.path().to_owned(),
+                cache: plsql_engine::CacheConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(
+                run.completeness.posture,
+                CompletenessPosture::Clean,
+                "{:?}",
+                run.completeness
+            );
+            run.catalog = Some(empty_catalog());
+            for kind in [EdgeKind::Writes, EdgeKind::TransactionControl] {
+                let edges: Vec<_> = run
+                    .dep_graph
+                    .edges
+                    .iter_mut()
+                    .filter(|edge| edge.kind == kind)
+                    .collect();
+                assert!(!edges.is_empty(), "real source must produce {kind:?}");
+                for edge in edges {
+                    edge.confidence.level = ConfidenceLevel::Medium;
+                }
+            }
+            let closure = run.invocation_index.closure(&InvocationShapeV1 {
+                routine_id: "APP.CHANGE".into(),
+                ..Default::default()
+            });
+            assert!(
+                closure.clean && closure.unknown_reasons.is_empty(),
+                "{closure:?}"
+            );
+            assert_eq!(
+                map_engine_effects(&closure.effects),
+                RoutineEffectsV1::new(expected.clone())
+            );
+            let effects = PlsqlSideEffectOracle::from_analysis_run(&run)
+                .routine_effects(&adapter_reference("CHANGE"));
+            assert_eq!(effects, RoutineEffectsV1::new(expected));
+            assert_eq!(
+                oraclemcp_guard::admit(
+                    &effects,
+                    oraclemcp_guard::AdmissionContext::DmlMutationClosure
+                ),
+                Err(oraclemcp_guard::EffectRefusal::AlwaysRefused(
+                    RoutineEffect::TxnControl
+                ))
+            );
+
+            run.invocation_index
+                .units
+                .get_mut("APP.CHANGE")
+                .unwrap()
+                .source_complete = false;
+            assert_eq!(
+                PlsqlSideEffectOracle::from_analysis_run(&run)
+                    .routine_effects(&adapter_reference("CHANGE")),
+                unknown_effects(),
+                "a refusal must still have a clean source proof"
+            );
+        }
+    }
+
+    #[test]
+    fn adapter_medium_writes_cannot_promote_source_read_db() {
+        let mut run = adapter_read_run();
+        add_edge(&mut run.dep_graph, 2, 1, 2, EdgeKind::Writes);
+        run.dep_graph.edges.last_mut().unwrap().confidence.level = ConfidenceLevel::Medium;
+        assert_eq!(
+            PlsqlSideEffectOracle::from_analysis_run(&run)
+                .routine_effects(&adapter_reference("LOOKUP")),
+            unknown_effects()
+        );
+    }
+
+    #[test]
     fn adapter_source_proven_autonomous_effect_survives_its_medium_effect_edge() {
         let project = tempfile::tempdir().unwrap();
         std::fs::write(project.path().join("trigger.sql"),
@@ -3940,7 +4035,8 @@ mod tests {
             .logical_id = LogicalObjectId::new("EFFECT::OTHER");
         assert_eq!(
             PlsqlSideEffectOracle::from_analysis_run(&wrong_target).routine_effects(&reference),
-            unknown_effects()
+            effects,
+            "graph target uncertainty cannot erase a source-proven refusal"
         );
 
         let mut low_confidence = run;
@@ -3954,7 +4050,8 @@ mod tests {
             .level = ConfidenceLevel::Low;
         assert_eq!(
             PlsqlSideEffectOracle::from_analysis_run(&low_confidence).routine_effects(&reference),
-            unknown_effects()
+            effects,
+            "graph confidence cannot erase a source-proven refusal"
         );
     }
 

@@ -214,11 +214,25 @@ with oracledb.connect(user='sys', password=os.environ['ORACLEMCP_TEST_PASSWORD']
         assert!(!hidden.is_complete(), "lost FK visibility cannot produce a smaller complete closure");
         assert!(hidden.observations.iter().any(|observation| observation.source == MutationCatalogSource::IncomingForeignKeys && matches!(observation.computation, MutationComputation::Unavailable {reason: MutationUnavailableReason::CatalogUnreadable})));
         catalog_grants(&schema, true);
-        ddl(&cx, &admin, &format!("CREATE OR REPLACE TRIGGER {schema}.TR_ROW BEFORE UPDATE OF C2 ON {schema}.ROOT FOR EACH ROW DECLARE PRAGMA AUTONOMOUS_TRANSACTION; BEGIN NULL; END;")).await;
+        ddl(&cx, &admin, &format!("CREATE TABLE {schema}.AUTO_CANARY (ID NUMBER)")).await;
+        ddl(&cx, &admin, &format!("INSERT INTO {schema}.ROOT (C1, C2) VALUES (1007, 0)")).await;
+        admin.commit(&cx).await.unwrap();
+        ddl(&cx, &admin, &format!("CREATE OR REPLACE TRIGGER {schema}.TR_ROW BEFORE UPDATE OF C2 ON {schema}.ROOT FOR EACH ROW DECLARE PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO {schema}.AUTO_CANARY (ID) VALUES (1007); COMMIT; END;")).await;
         let autonomous = collect_mutation_effect_closure(&cx, &reader, request(MutationStatementKind::Update, MutationColumns::Named(BTreeSet::from(["C2".into()]))), &EngineMutationEffects).await;
+        let canary = admin.query_rows(&cx, &format!("SELECT COUNT(*) AS N FROM {schema}.AUTO_CANARY"), &[]).await.unwrap();
+        assert_eq!(canary[0].parse_i64("N"), Some(0), "collection must not run the autonomous INSERT/COMMIT");
         assert!(autonomous.is_complete(), "autonomous effects must be observed: {autonomous:?}");
-        assert_eq!(autonomous.admit(), Err(MutationClosureRefusal::Effect(EffectRefusal::AlwaysRefused(RoutineEffect::Autonomous))));
+        let trigger = autonomous.mechanisms.iter().find(|fact| fact.name == "TR_ROW").unwrap();
+        assert!(trigger.effects.iter().any(|effect| effect == RoutineEffect::Autonomous));
+        assert!(trigger.effects.iter().any(|effect| effect == RoutineEffect::TxnControl));
+        assert_eq!(autonomous.admit(), Err(MutationClosureRefusal::Effect(EffectRefusal::AlwaysRefused(RoutineEffect::TxnControl))));
         assert_ne!(autonomous.fingerprint(), before_source_change.unwrap());
+        // Positive fixture control: the real body fires and commits even when
+        // the caller rolls its update back. The proof above must never do this.
+        ddl(&cx, &admin, &format!("UPDATE {schema}.ROOT SET C2=1 WHERE C1=1007")).await;
+        admin.rollback(&cx).await.unwrap();
+        let fired = admin.query_rows(&cx, &format!("SELECT COUNT(*) AS N FROM {schema}.AUTO_CANARY"), &[]).await.unwrap();
+        assert_eq!(fired[0].parse_i64("N"), Some(1), "autonomous fixture must really INSERT and COMMIT");
         eprintln!("{}", serde_json::json!({"case":"mutation_closure_live_fixture_matches_expected", "phase":"verified", "lane":"FREE23", "native_driver":true, "mechanisms":observed.len(), "column_cases":2, "visibility_refused":true, "autonomous_refused":true}));
         reader.close(&cx).await.unwrap();
         ddl(&cx, &admin, &format!("DROP USER {schema} CASCADE")).await;
