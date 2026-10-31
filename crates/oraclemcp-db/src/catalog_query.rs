@@ -228,8 +228,8 @@ macro_rules! dependents_visibility_sql {
 macro_rules! dependents_source_rows_sql {
     // ALL_SOURCE can build every visible source line before this outer join.
     // Split the owning schema from foreign objects so the common case reads
-    // only USER_SOURCE/USER_VIEWS. Both schema identities must agree; schema
-    // switching and cross-schema dependencies retain the original ALL_* path.
+    // only USER_SOURCE/USER_VIEWS, which follow CURRENT_USER. Conservatively
+    // retain the original ALL_* path for schema switches and foreign owners.
     (owner_sources) => {
         r#"  SELECT o.owner, o.object_name, o.object_type, o.object_id, s.line, s.text,
          COUNT(s.line) OVER (PARTITION BY o.object_id) AS source_lines,

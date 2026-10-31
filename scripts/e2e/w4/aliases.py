@@ -6,6 +6,7 @@ the fixture and runs the real steps, mutation rereads and audit verification.
 
 import copy
 import datetime
+import hashlib
 import itertools
 import json
 import re
@@ -28,6 +29,337 @@ ALIAS_FRESHNESS_PATHS = {
     ("dependents", "value", "dependency_hash"): "sha256",
     ("dependents", "value", "roots", "*", "last_ddl_time"): "ddl_timestamp",
 }
+
+VERIFIED_FRESHNESS_PATHS = {
+    ("binding", "decisive", "envelope_digest"): "envelope",
+    ("binding", "decisive", "objects", "value", "*", "dependency_hash"): "dependencies",
+}
+
+
+def _digest_bytes(api, value):
+    _freshness_digest(api, value)
+    return bytes(value)
+
+
+def _binding_digest(api, binding):
+    """Reference the public V1 byte encoding; never infer an opaque digest."""
+    unavailable = ("level_below_required untrusted_triggers unsupported_dml_shape engine_not_wired "
+        "read_only_txn hard_parse_callbacks vpd no_privilege plan_table_unverified timeout truncated "
+        "not_wired catalog_unavailable unresolved_dependency engine_failed object_not_found syntax_error "
+        "connection_failed runtime_state_required challenge_required repreview_required lease_required "
+        "forbidden_statement busy session_busy at_capacity invalid_arguments policy_denied request_cancelled "
+        "transient flashback_retention_exceeded flashback_definition_changed flashback_not_flashbackable "
+        "flashback_capability_unavailable snapshot_too_old internal").split()
+    not_applicable = "not_dml no_object no_source no_effect level_below_required untrusted_triggers".split()
+    action_fields = ("envelope object_identities object_status mutation_effect_closure rows edition "
+        "current_schema profile_generation lane_generation dependents predicted_invalid_set ddl_effect_closure "
+        "source_effects reversibility profile_ceiling oauth_ceiling closure_fact_key routine_effects "
+        "masking_profile_output edition_manifest changed_edition_manifest db_identity default_equals_base "
+        "edition_parentage edition_exposure service_editions scope_digest policy_floor").split()
+
+    def integer(value, width=8):
+        api.require(type(value) is int and 0 <= value < 1 << (8 * width), "invalid impact integer")
+        return value.to_bytes(width, "big")
+
+    def blob(value):
+        return integer(len(value)) + value
+
+    def text(value):
+        api.require(isinstance(value, str), "invalid impact text")
+        return blob(value.encode())
+
+    def digest(value):
+        return blob(_digest_bytes(api, value))
+
+    def status(value, encode):
+        api.require(isinstance(value, dict), "invalid impact field")
+        tag = value.get("status")
+        if tag in {"computed", "estimated"}:
+            api.require(set(value) == {"status", "value"}, "invalid valued impact field")
+            return bytes([1 if tag == "computed" else 2]) + encode(value["value"])
+        reasons = unavailable if tag == "unavailable" else not_applicable if tag == "not_applicable" else []
+        api.require(set(value) == {"status", "reason"} and value.get("reason") in reasons,
+                    "invalid unvalued impact field")
+        return bytes([3 if tag == "unavailable" else 4, reasons.index(value["reason"]) + 1])
+
+    def objects(values):
+        api.require(isinstance(values, list), "invalid impact objects")
+        encoded = [b"".join(status(value[key], encoder) for key, encoder in [
+            ("identity", text), ("status", text), ("source_hash", digest),
+            ("dependency_hash", digest), ("trigger_hash", digest)]) for value in values]
+        return integer(len(encoded)) + b"".join(blob(value) for value in sorted(encoded))
+
+    encoders = [
+        ("envelope_digest", digest), ("statement_digest", digest), ("bind_hmac", digest),
+        ("objects", objects), ("edition", text), ("compiler_facts", text),
+        ("compile_parse_closure_digest", digest), ("engine_version", text), ("ruleset_digest", digest),
+        ("effective_plan_digest", digest), ("policy_schema_digest", digest), ("policy_ruleset_digest", digest),
+        ("matched_policy_rule_ids", lambda ids: integer(len(ids)) + b"".join(text(v) for v in ids)),
+        ("rewrite_algorithm_version", lambda v: integer(v, 2)),
+        ("db_identity", lambda v: integer(v["dbid"]) + integer(v["con_uid"])),
+        ("current_schema", text), ("profile_generation", integer), ("lane_generation", integer),
+        ("scope_digest", lambda v: b"\0" if v is None else b"\1" + digest(v)),
+    ]
+    api.require(binding.get("version") == 1, "unsupported impact binding version")
+    facts = binding["decisive"]
+    api.require(set(facts) == {key for key, _ in encoders} | {"action_fields"},
+                "unknown or missing decisive impact field")
+    encoded = blob(b"omcp/impact-binding/decisive/v1") + b"\1"
+    encoded += b"".join(status(facts[key], encode) for key, encode in encoders)
+    supplied = facts["action_fields"]
+    api.require(isinstance(supplied, dict) and set(supplied) <= set(action_fields),
+                "unknown action-specific impact field")
+    encoded += integer(len(supplied))
+    for field in action_fields:
+        if field in supplied:
+            encoded += blob(json.dumps(field).encode()) + status(supplied[field], digest)
+    return hashlib.sha256(encoded).digest()
+
+
+def _dependency_digest(api, graph):
+    """Independent encoding of the published DependentsClosure commitment."""
+    def fields(value, names):
+        api.require(isinstance(value, dict) and set(names) <= value.keys(),
+                    "incomplete dependency commitment facts")
+        return {key: value[key] for key in names}
+
+    def obj(value):
+        return fields(value, ("owner", "name", "object_type")) if value is not None else None
+
+    def node(value):
+        result = fields(value, ("object", "depth", "object_id", "status", "last_ddl_time", "source_hash"))
+        result["object"] = obj(result["object"])
+        source = result["source_hash"]
+        keys = {"computed": ("status", "sha256"), "unavailable": ("status", "reason"),
+                "not_applicable": ("status",)}.get(source.get("status"))
+        api.require(keys is not None, "invalid dependency source status")
+        result["source_hash"] = fields(source, keys)
+        return result
+
+    result = fields(graph, ("requested_roots", "roots", "nodes", "edges", "caps", "truncated",
+                            "truncation", "uncertainties", "dependency_hash"))
+    result["requested_roots"] = [obj(value) for value in result["requested_roots"]]
+    for key in ("roots", "nodes"):
+        result[key] = [node(value) for value in result[key]]
+    result["edges"] = [fields(value, ("dependent", "referenced", "referenced_object_id",
+        "referenced_link_name", "dependency_type")) for value in result["edges"]]
+    for edge in result["edges"]:
+        edge["dependent"], edge["referenced"] = obj(edge["dependent"]), obj(edge["referenced"])
+    result["caps"] = fields(result["caps"], ("max_depth", "max_count"))
+    # predict_invalid_set replaces this display list with tagged catalog gaps
+    # plus lineage warnings. Only catalog gaps entered the collector digest;
+    # every warning remains unchanged in the separate equivalence comparison.
+    gaps = []
+    for value in result["uncertainties"]:
+        if value.get("source") == "lineage":
+            api.require(set(value) == {"source", "reason", "description", "owner", "name"},
+                        "invalid lineage warning in dependency display")
+            continue
+        api.require("source" not in value or value["source"] == "catalog",
+                    "unknown dependency uncertainty producer")
+        gaps.append(fields(value, ("reason", "object")))
+    result["uncertainties"] = gaps
+    for gap in result["uncertainties"]:
+        gap["object"] = obj(gap["object"])
+    result["dependency_hash"] = [0] * 32
+    encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
+    return hashlib.sha256(b"omcp/dependents-closure/v1\0" + encoded).digest()
+
+
+def _native_dependency_facts(api, connection, graph):
+    digest = _dependency_digest(api, graph)
+    api.require(digest == _digest_bytes(api, graph["dependency_hash"]),
+                "dependency_hash differs from its complete dependency facts")
+    observed = []
+    for node in [*graph["roots"], *graph["nodes"]]:
+        obj = node["object"]
+        cursor = connection.cursor()
+        rows = cursor.execute("SELECT OBJECT_ID, STATUS, TO_CHAR(LAST_DDL_TIME, 'YYYY-MM-DD\"T\"HH24:MI:SS') "
+            "FROM SYS.ALL_OBJECTS WHERE OWNER=:1 AND OBJECT_NAME=:2 AND OBJECT_TYPE=:3 "
+            "AND SUBOBJECT_NAME IS NULL", (obj["owner"], obj["name"], obj["object_type"])).fetchall()
+        api.require(rows == [(node["object_id"], node["status"], node["last_ddl_time"])],
+                    "dependency identity/status/timestamp differs from native reread")
+        source = node["source_hash"]
+        if source["status"] == "computed":
+            if obj["object_type"] == "VIEW":
+                lines = cursor.execute("SELECT TEXT_VC FROM SYS.ALL_VIEWS WHERE OWNER=:1 AND VIEW_NAME=:2",
+                    (obj["owner"], obj["name"])).fetchall()
+            else:
+                lines = cursor.execute("SELECT TEXT FROM SYS.ALL_SOURCE WHERE OWNER=:1 AND NAME=:2 "
+                    "AND TYPE=:3 ORDER BY LINE", (obj["owner"], obj["name"], obj["object_type"])).fetchall()
+            api.require(lines and all(isinstance(row[0], str) for row in lines),
+                        "computed source is unavailable in native reread")
+            actual = hashlib.sha256("".join(row[0] for row in lines).encode()).digest()
+            api.require(actual == _digest_bytes(api, source["sha256"]),
+                        "dependency source hash differs from native reread")
+        observed.append({"object": obj, "object_id": rows[0][0], "status": rows[0][1],
+                         "last_ddl_time": rows[0][2], "source_hash": source})
+    return digest, observed
+
+
+def _validate_impact_preview(api, connection, payload, reread_graph=None):
+    impact = payload.get("impact", {})
+    if "binding" not in impact:
+        return None
+    token = (payload.get("confirmation") or payload.get("execute_confirmation") or {}).get("confirm")
+    if not isinstance(token, str):
+        return None
+    facts = impact["binding"]["decisive"]
+    envelope = facts["envelope_digest"]
+    api.require(envelope.get("status") == "computed", "confirmation lacks computed envelope digest")
+    parts = token.rsplit(".", 1)[0].rsplit("~", 2)
+    api.require(len(parts) == 3 and re.fullmatch(r"[0-9a-f]{64}", parts[1])
+                and re.fullmatch(r"[0-9a-f]{64}", parts[2]), "invalid impact-bound grant reference")
+    api.require(_digest_bytes(api, facts["statement_digest"]["value"]).hex() == parts[1],
+                "statement digest differs from the confirmation's execution material")
+    api.require(_binding_digest(api, impact["binding"]).hex() == parts[2],
+                "decisive facts, including envelope_digest, differ from the confirmation binding")
+    record = {"payload_digest": hashlib.sha256(api.compact(api.scrub(payload)).encode()).hexdigest(),
+              "envelope": _digest_bytes(api, envelope["value"]).hex()}
+    graph = reread_graph or impact.get("dependents", {}).get("value")
+    if isinstance(graph, dict) and "dependency_hash" in graph:
+        digest, observed = _native_dependency_facts(api, connection, graph)
+        objects = facts["objects"]
+        api.require(objects.get("status") in {"computed", "estimated"}
+                    and len(objects["value"]) == len(observed), "binding dependency object count differs")
+        for fact, node in zip(objects["value"], [*graph["roots"], *graph["nodes"]]):
+            obj = node["object"]
+            api.require(fact["identity"].get("status") == "computed"
+                        and json.loads(fact["identity"]["value"]) == [
+                            obj["owner"], obj["name"], obj["object_type"], node["object_id"]],
+                        "binding object identity differs from native dependency facts")
+            status = fact["dependency_hash"]
+            api.require(status.get("status") in {"computed", "estimated"}
+                        and _digest_bytes(api, status["value"]) == digest,
+                        "binding dependency_hash differs from native-checked dependency facts")
+        record.update(dependencies=digest.hex(), native_objects=observed)
+    return record
+
+
+def binding_freshness_selftest(api):
+    """Checker units; live alias runs perform the actual independent reads."""
+    source = "PROCEDURE P AS BEGIN NULL; END;\n"
+    obj = {"owner": "APP", "name": "P", "object_type": "PROCEDURE"}
+
+    class NativeRows:
+        def __init__(self, timestamp):
+            self.timestamp = timestamp
+
+        def cursor(self):
+            return self
+
+        def execute(self, sql, binds):
+            api.require(binds[:2] == ("APP", "P"), "unexpected checker-unit object")
+            self.rows = ([(7, "VALID", self.timestamp)] if "SYS.ALL_OBJECTS" in sql else [(source,)])
+            return self
+
+        def fetchall(self):
+            return self.rows
+
+    def fixture(byte, timestamp):
+        graph = {"requested_roots": [obj], "roots": [{"object": obj, "depth": 0,
+            "object_id": 7, "status": "VALID", "last_ddl_time": timestamp,
+            "source_hash": {"status": "computed", "sha256": list(hashlib.sha256(source.encode()).digest())}}],
+            "nodes": [], "edges": [], "caps": {"max_depth": 10, "max_count": 1000},
+            "truncated": False, "truncation": [], "uncertainties": [], "dependency_hash": [0] * 32}
+        graph["dependency_hash"] = list(_dependency_digest(api, graph))
+        envelope = [byte] * 32
+        body = {"impact": {"binding": {"version": 1, "decisive": {
+            "envelope_digest": {"status": "computed", "value": envelope},
+            "compile_parse_closure_digest": {"status": "computed", "value": [8] * 32},
+            "objects": {"status": "computed", "value": [{
+                "identity": {"status": "computed", "value": json.dumps(["APP", "P", "PROCEDURE", 7])},
+                "status": {"status": "computed", "value": "VALID"},
+                "source_hash": {"status": "computed", "value": graph["roots"][0]["source_hash"]["sha256"]},
+                "trigger_hash": {"status": "unavailable", "reason": "not_wired"},
+                "dependency_hash": {"status": "computed", "value": graph["dependency_hash"]}}]} }},
+            "dependents": {"status": "estimated", "value": graph}},
+            "confirmation": {"confirm": "xgrant-1~" + bytes(envelope).hex() + "~" + "a" * 64 + "." + "b" * 64}}
+        # The real wire decoder creates distinct arrays at distinct JSON paths.
+        body = json.loads(json.dumps(body))
+        facts = body["impact"]["binding"]["decisive"]
+        for key in ("statement_digest bind_hmac edition compiler_facts engine_version ruleset_digest "
+                    "effective_plan_digest policy_schema_digest policy_ruleset_digest matched_policy_rule_ids "
+                    "rewrite_algorithm_version db_identity current_schema profile_generation lane_generation "
+                    "scope_digest").split():
+            facts[key] = {"status": "unavailable", "reason": "not_wired"}
+        facts["statement_digest"] = {"status": "computed", "value": [3] * 32}
+        facts["action_fields"] = {}
+        body["confirmation"]["confirm"] = ("xgrant-1~" + bytes([3] * 32).hex() + "~"
+            + _binding_digest(api, body["impact"]["binding"]).hex() + "." + "b" * 64)
+        checked = _validate_impact_preview(api, NativeRows(timestamp), body)
+        payload = {"isError": False, "structuredContent": body,
+                   "content": [{"type": "text", "text": json.dumps(body)}]}
+        return body, {"case": {"actual": payload}, "audit_semantics": [],
+                      "native_impact_facts": [checked]}
+
+    before, left = fixture(1, "2026-10-31T12:00:00")
+    after, right = fixture(2, "2026-10-31T12:00:01")
+    verify_equivalent_runs(api, left, right, {})
+    for path in ("envelope_digest", "dependency_hash", "native_timestamp"):
+        bad = copy.deepcopy(after)
+        facts = bad["impact"]["binding"]["decisive"]
+        if path == "envelope_digest":
+            facts["envelope_digest"]["value"][0] ^= 1
+        elif path == "dependency_hash":
+            facts["objects"]["value"][0]["dependency_hash"]["value"][0] ^= 1
+        else:
+            graph = bad["impact"]["dependents"]["value"]
+            graph["roots"][0]["last_ddl_time"] = "2020-01-01T00:00:00"
+            graph["dependency_hash"] = list(_dependency_digest(api, graph))
+            facts["objects"]["value"][0]["dependency_hash"]["value"] = graph["dependency_hash"]
+        if path != "envelope_digest":
+            bad["confirmation"]["confirm"] = ("xgrant-1~" + bytes([3] * 32).hex() + "~"
+                + _binding_digest(api, bad["impact"]["binding"]).hex() + "." + "b" * 64)
+        try:
+            _validate_impact_preview(api, NativeRows("2026-10-31T12:00:01"), bad)
+        except api.DriverError:
+            continue
+        raise api.DriverError(f"native alias fact checker accepted wrong {path}")
+    unwitnessed = {**right, "native_impact_facts": []}
+    try:
+        verify_equivalent_runs(api, left, unwitnessed, {})
+    except api.DriverError:
+        pass
+    else:
+        raise api.DriverError("alias comparator accepted an unverified binding digest")
+    print(api.compact({"selftest": "alias_native_dependency_envelope_and_timestamp_facts", "verdict": "pass"}))
+
+
+class _NativeImpactClient:
+    """Observe each preview before the next step can change its Oracle facts."""
+    def __init__(self, api, client, connection):
+        self.api, self.client, self.connection, self.records = api, client, connection, []
+
+    def __getattr__(self, name):
+        return getattr(self.client, name)
+
+    def rpc(self, method, params=None, **kwargs):
+        reply = self.client.rpc(method, params, **kwargs)
+        if method == "tools/call":
+            payload = self.api.tool_payload(reply).get("structuredContent", {})
+            impact = payload.get("impact", {})
+            facts = impact.get("binding", {}).get("decisive", {})
+            graph = None
+            if not isinstance(impact.get("dependents", {}).get("value"), dict):
+                objects = facts.get("objects", {}).get("value", [])
+                # deploy_ddl returns the bound facts but omits the advisory
+                # graph. Read a fresh, nonexecuting preview of the same root;
+                # recompute that graph and independently read its node facts.
+                if objects and objects[0].get("source_hash", {}).get("status") == "computed":
+                    identity = objects[0]["identity"]
+                    self.api.require(identity.get("status") == "computed", "missing reread identity")
+                    owner, name, kind, _ = json.loads(identity["value"])
+                    fresh = self.client.rpc("tools/call", {"name": "oracle_compile_object", "arguments": {
+                        "owner": owner, "name": name, "object_type": kind, "execute": False}})
+                    self.api.verify_expect({"json_subset": {"preview": True, "compiled": False}}, fresh)
+                    graph = self.api.tool_payload(fresh).get("structuredContent", {}).get(
+                        "impact", {}).get("dependents", {}).get("value")
+                    self.api.require(isinstance(graph, dict), "fresh dependency graph unavailable")
+            checked = _validate_impact_preview(self.api, self.connection, payload, graph)
+            if checked is not None:
+                self.records.append(self.api.scrub(checked))
+        return reply
 
 
 def load_rules(api):
@@ -317,13 +649,15 @@ def _freshness_digest(api, value):
     return "<freshness_sha256>"
 
 
-def _impact_freshness(api, value, path=()):
+def _impact_freshness(api, value, path=(), verified=()):
     if path in {("binding",), ("binding", "decisive"), ("dependents",),
                 ("dependents", "value"), ("dependents", "value", "roots", "*")}:
         api.require(isinstance(value, dict), "invalid alias impact freshness container")
     if path == ("dependents", "value", "roots"):
         api.require(isinstance(value, list), "invalid alias dependency roots")
     rule = ALIAS_FRESHNESS_PATHS.get(path)
+    if VERIFIED_FRESHNESS_PATHS.get(path) in verified:
+        rule = "status_sha256"
     if rule == "status_sha256":
         api.require(isinstance(value, dict) and value.get("status") in {
             "computed", "estimated", "unavailable", "not_applicable"},
@@ -352,27 +686,39 @@ def _impact_freshness(api, value, path=()):
             ("dependents", "value", "roots", "*"): {"last_ddl_time"},
         }.get(path, set())
         api.require(required <= value.keys(), "missing alias impact freshness field")
-        return {key: _impact_freshness(api, item, path + (key,))
+        return {key: _impact_freshness(api, item, path + (key,), verified)
                 for key, item in value.items()}
     if isinstance(value, list):
         return [_impact_freshness(api, item, path + (
-            "*" if path == ("dependents", "value", "roots") else str(index),))
+            "*" if path in {("dependents", "value", "roots"),
+                            ("binding", "decisive", "objects", "value")} else str(index),), verified)
                 for index, item in enumerate(value)]
     return value
 
 
 def _equivalence_result(api, run, index):
     actual = run["case"]
+    verified = {}
+    for observed in [actual, *actual.get("steps", [])]:
+        result = observed.get("actual")
+        payload = result.get("structuredContent") if isinstance(result, dict) else None
+        if isinstance(payload, dict):
+            key = hashlib.sha256(api.compact(payload).encode()).hexdigest()
+            verified[key] = next((record for record in run.get("native_impact_facts", [])
+                                  if record["payload_digest"] == key), {})
     normalized = _normal(api, {key: actual[key] for key in (
         "actual", "steps", "db_reread_actual") if key in actual}, index)
     # _normal must compare the two wire representations before freshness is
     # projected across executions. A corrupt text/structured pair still fails.
-    for observed in [normalized, *normalized.get("steps", [])]:
+    for original, observed in zip([actual, *actual.get("steps", [])],
+                                  [normalized, *normalized.get("steps", [])]):
         result = observed.get("actual")
         payload = result.get("structuredContent") if isinstance(result, dict) else None
         if isinstance(payload, dict) and "impact" in payload:
             api.require(isinstance(payload["impact"], dict), "invalid alias impact object")
-            payload["impact"] = _impact_freshness(api, payload["impact"])
+            raw = original["actual"]["structuredContent"]
+            key = hashlib.sha256(api.compact(raw).encode()).hexdigest()
+            payload["impact"] = _impact_freshness(api, payload["impact"], verified=verified[key])
     return normalized
 
 
@@ -633,12 +979,14 @@ def run_proof(api, client, case, row, transport, lane, capabilities, connection,
                 # generated names and DDL timestamps. Clean up after the pair.
                 inner["cleanup"] = []
             before = _audit_offset(audit_path)
-            observed = (_negative_run(api, client, inner, spec, connection, binary, audit_path, env)
+            checked_client = _NativeImpactClient(api, client, connection)
+            observed = (_negative_run(api, checked_client, inner, spec, connection, binary, audit_path, env)
                         if side == "alias" and spec["kind"] not in {"tool", "equivalent"} else
-                        api.run_case(client, inner, transport, lane, capabilities, connection, barriers,
+                        api.run_case(checked_client, inner, transport, lane, capabilities, connection, barriers,
                                      binary, audit_path, env, descriptors.get(inner["tool"])))
             records = _audit_since(audit_path, before)
             row["actual"]["runs"].append({"side": side, "case": observed,
+                "native_impact_facts": checked_client.records,
                 "audit": api.scrub(records), "audit_semantics": _audit_projection(records, index)})
             api.require(observed["verdict"] == "pass", f"{side} alias scenario failed: {observed.get('verification_failure', observed.get('failure'))}")
             _verify_mask_bindings(api, observed, records)

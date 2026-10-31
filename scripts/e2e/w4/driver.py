@@ -5462,6 +5462,7 @@ def alias_and_refusal_verifiers_selftest():
             continue
         raise DriverError(f"alias comparator scrubbed semantic row column {column}")
     aliases.freshness_equivalence_selftest(sys.modules[__name__])
+    aliases.binding_freshness_selftest(sys.modules[__name__])
     certificate = {"audit_entry_hash": "sha256:" + "a" * 64, "profile": "free23", "decisions": []}
     masking = {key: value for key, value in certificate.items() if key != "audit_entry_hash"}
     masked = {"case": {"actual": {"structuredContent": {"mask_certificate": certificate}}},
