@@ -393,6 +393,8 @@ fi
 # installer invocation did not create a prefix. A fixed root lets stale prefixes
 # from a prior run make a correct rejection look like it installed.
 SMOKE_ROOT="${ORACLEMCP_INSTALLER_SMOKE_ROOT:-$ROOT/target/installer-smoke-$$}"
+# A present, always-succeeding cosign stand-in (/bin/true is absent on macOS).
+TRUE_BIN="$(type -P true)"
 PREFIX="$SMOKE_ROOT/prefix"
 HOME_DIR="$SMOKE_ROOT/home"
 CONFIG_HOME="$SMOKE_ROOT/config"
@@ -575,7 +577,7 @@ log_pass "dry-run surfaces the cosign fail-closed gap under posture require"
 
 with_cosign_dry_output="$(
   env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
-    ORACLEMCP_COSIGN="/bin/true" \
+    ORACLEMCP_COSIGN="$TRUE_BIN" \
     bash install.sh \
       --dry-run \
       --version "$SMOKE_VERSION" \
@@ -872,7 +874,7 @@ printf '{"mediaType":"application/vnd.dev.sigstore.trustedroot+json;version=0.1"
 set +e
 missing_trusted_root_output="$(
   env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
-    ORACLEMCP_COSIGN=/bin/true \
+    ORACLEMCP_COSIGN="$TRUE_BIN" \
     bash install.sh \
       --offline "$NO_COSIGN_ARCHIVE" \
       --version "$SMOKE_VERSION" \
