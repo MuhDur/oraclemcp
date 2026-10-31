@@ -2552,6 +2552,97 @@ impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::exec_grant::GrantMate
 pub fn oraclemcp_guard::exec_grant::GrantMaterial::vzip(self) -> V
 pub const oraclemcp_guard::exec_grant::MAX_LIVE_GRANTS: usize
 pub mod oraclemcp_guard::impact_binding
+pub enum oraclemcp_guard::impact_binding::DecisiveField
+pub oraclemcp_guard::impact_binding::DecisiveField::ChangedEditionManifest
+pub oraclemcp_guard::impact_binding::DecisiveField::ClosureFactKey
+pub oraclemcp_guard::impact_binding::DecisiveField::CurrentSchema
+pub oraclemcp_guard::impact_binding::DecisiveField::DbIdentity
+pub oraclemcp_guard::impact_binding::DecisiveField::DdlEffectClosure
+pub oraclemcp_guard::impact_binding::DecisiveField::DefaultEqualsBase
+pub oraclemcp_guard::impact_binding::DecisiveField::Dependents
+pub oraclemcp_guard::impact_binding::DecisiveField::Edition
+pub oraclemcp_guard::impact_binding::DecisiveField::EditionExposure
+pub oraclemcp_guard::impact_binding::DecisiveField::EditionManifest
+pub oraclemcp_guard::impact_binding::DecisiveField::EditionParentage
+pub oraclemcp_guard::impact_binding::DecisiveField::Envelope
+pub oraclemcp_guard::impact_binding::DecisiveField::LaneGeneration
+pub oraclemcp_guard::impact_binding::DecisiveField::MaskingProfileOutput
+pub oraclemcp_guard::impact_binding::DecisiveField::MutationEffectClosure
+pub oraclemcp_guard::impact_binding::DecisiveField::OAuthCeiling
+pub oraclemcp_guard::impact_binding::DecisiveField::ObjectIdentities
+pub oraclemcp_guard::impact_binding::DecisiveField::ObjectStatus
+pub oraclemcp_guard::impact_binding::DecisiveField::PolicyFloor
+pub oraclemcp_guard::impact_binding::DecisiveField::PredictedInvalidSet
+pub oraclemcp_guard::impact_binding::DecisiveField::ProfileCeiling
+pub oraclemcp_guard::impact_binding::DecisiveField::ProfileGeneration
+pub oraclemcp_guard::impact_binding::DecisiveField::Reversibility
+pub oraclemcp_guard::impact_binding::DecisiveField::RoutineEffects
+pub oraclemcp_guard::impact_binding::DecisiveField::Rows
+pub oraclemcp_guard::impact_binding::DecisiveField::ScopeDigest
+pub oraclemcp_guard::impact_binding::DecisiveField::ServiceEditions
+pub oraclemcp_guard::impact_binding::DecisiveField::SourceEffects
+impl core::clone::Clone for oraclemcp_guard::impact_binding::DecisiveField
+pub fn oraclemcp_guard::impact_binding::DecisiveField::clone(&self) -> oraclemcp_guard::impact_binding::DecisiveField
+impl core::cmp::Eq for oraclemcp_guard::impact_binding::DecisiveField
+impl core::cmp::Ord for oraclemcp_guard::impact_binding::DecisiveField
+pub fn oraclemcp_guard::impact_binding::DecisiveField::cmp(&self, &oraclemcp_guard::impact_binding::DecisiveField) -> core::cmp::Ordering
+impl core::cmp::PartialEq for oraclemcp_guard::impact_binding::DecisiveField
+pub fn oraclemcp_guard::impact_binding::DecisiveField::eq(&self, &oraclemcp_guard::impact_binding::DecisiveField) -> bool
+impl core::cmp::PartialOrd for oraclemcp_guard::impact_binding::DecisiveField
+pub fn oraclemcp_guard::impact_binding::DecisiveField::partial_cmp(&self, &oraclemcp_guard::impact_binding::DecisiveField) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for oraclemcp_guard::impact_binding::DecisiveField
+pub fn oraclemcp_guard::impact_binding::DecisiveField::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::impact_binding::DecisiveField
+impl core::marker::StructuralPartialEq for oraclemcp_guard::impact_binding::DecisiveField
+impl serde_core::ser::Serialize for oraclemcp_guard::impact_binding::DecisiveField
+pub fn oraclemcp_guard::impact_binding::DecisiveField::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::impact_binding::DecisiveField
+pub fn oraclemcp_guard::impact_binding::DecisiveField::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::impact_binding::DecisiveField
+impl core::marker::Send for oraclemcp_guard::impact_binding::DecisiveField
+impl core::marker::Sync for oraclemcp_guard::impact_binding::DecisiveField
+impl core::marker::Unpin for oraclemcp_guard::impact_binding::DecisiveField
+impl core::marker::UnsafeUnpin for oraclemcp_guard::impact_binding::DecisiveField
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::impact_binding::DecisiveField
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::impact_binding::DecisiveField
+impl<Q, K> equivalent::Comparable<K> for oraclemcp_guard::impact_binding::DecisiveField where Q: core::cmp::Ord + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveField::compare(&self, &K) -> core::cmp::Ordering
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::impact_binding::DecisiveField where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveField::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::impact_binding::DecisiveField where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::impact_binding::DecisiveField where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::impact_binding::DecisiveField where U: core::convert::From<T>
+pub fn oraclemcp_guard::impact_binding::DecisiveField::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::impact_binding::DecisiveField where U: core::convert::Into<T>
+pub type oraclemcp_guard::impact_binding::DecisiveField::Error = core::convert::Infallible
+pub fn oraclemcp_guard::impact_binding::DecisiveField::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::impact_binding::DecisiveField where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::impact_binding::DecisiveField::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::impact_binding::DecisiveField::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::impact_binding::DecisiveField where T: core::clone::Clone
+pub type oraclemcp_guard::impact_binding::DecisiveField::Owned = T
+pub fn oraclemcp_guard::impact_binding::DecisiveField::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::impact_binding::DecisiveField::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::impact_binding::DecisiveField
+impl<T> core::any::Any for oraclemcp_guard::impact_binding::DecisiveField where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveField::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::impact_binding::DecisiveField where T: ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveField::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::impact_binding::DecisiveField where T: ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveField::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::impact_binding::DecisiveField where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::impact_binding::DecisiveField::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::impact_binding::DecisiveField
+pub fn oraclemcp_guard::impact_binding::DecisiveField::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::impact_binding::DecisiveField
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::impact_binding::DecisiveField where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::impact_binding::DecisiveField
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::impact_binding::DecisiveField
+impl<T> typenum::type_operators::Same for oraclemcp_guard::impact_binding::DecisiveField
+pub type oraclemcp_guard::impact_binding::DecisiveField::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::impact_binding::DecisiveField where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::impact_binding::DecisiveField where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::impact_binding::DecisiveField::vzip(self) -> V
 pub enum oraclemcp_guard::impact_binding::FieldStatus<T>
 pub oraclemcp_guard::impact_binding::FieldStatus::Computed
 pub oraclemcp_guard::impact_binding::FieldStatus::Computed::value: T
@@ -2954,6 +3045,7 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::impact_binding::DbIdentity where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::impact_binding::DbIdentity::vzip(self) -> V
 pub struct oraclemcp_guard::impact_binding::DecisiveFacts
+pub oraclemcp_guard::impact_binding::DecisiveFacts::action_fields: alloc::collections::btree::map::BTreeMap<oraclemcp_guard::impact_binding::DecisiveField, oraclemcp_guard::impact_binding::FieldStatus<[u8; 32]>>
 pub oraclemcp_guard::impact_binding::DecisiveFacts::bind_hmac: oraclemcp_guard::impact_binding::FieldStatus<[u8; 32]>
 pub oraclemcp_guard::impact_binding::DecisiveFacts::compile_parse_closure_digest: oraclemcp_guard::impact_binding::FieldStatus<[u8; 32]>
 pub oraclemcp_guard::impact_binding::DecisiveFacts::compiler_facts: oraclemcp_guard::impact_binding::FieldStatus<alloc::string::String>
@@ -19053,6 +19145,7 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::impact_binding::DbIdentity where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::impact_binding::DbIdentity::vzip(self) -> V
 pub struct oraclemcp_guard::DecisiveFacts
+pub oraclemcp_guard::DecisiveFacts::action_fields: alloc::collections::btree::map::BTreeMap<oraclemcp_guard::impact_binding::DecisiveField, oraclemcp_guard::impact_binding::FieldStatus<[u8; 32]>>
 pub oraclemcp_guard::DecisiveFacts::bind_hmac: oraclemcp_guard::impact_binding::FieldStatus<[u8; 32]>
 pub oraclemcp_guard::DecisiveFacts::compile_parse_closure_digest: oraclemcp_guard::impact_binding::FieldStatus<[u8; 32]>
 pub oraclemcp_guard::DecisiveFacts::compiler_facts: oraclemcp_guard::impact_binding::FieldStatus<alloc::string::String>

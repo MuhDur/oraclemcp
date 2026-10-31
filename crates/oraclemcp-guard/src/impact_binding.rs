@@ -191,6 +191,42 @@ pub struct DbIdentity {
     pub con_uid: u64,
 }
 
+/// Closed identifiers shared by admission and the existing fact producers.
+/// Producer-owned proofs are commitments, never raw source or bind values.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisiveField {
+    Envelope,
+    ObjectIdentities,
+    ObjectStatus,
+    MutationEffectClosure,
+    Rows,
+    Edition,
+    CurrentSchema,
+    ProfileGeneration,
+    LaneGeneration,
+    Dependents,
+    PredictedInvalidSet,
+    DdlEffectClosure,
+    SourceEffects,
+    Reversibility,
+    ProfileCeiling,
+    #[serde(rename = "oauth_ceiling")]
+    OAuthCeiling,
+    ClosureFactKey,
+    RoutineEffects,
+    MaskingProfileOutput,
+    EditionManifest,
+    ChangedEditionManifest,
+    DbIdentity,
+    DefaultEqualsBase,
+    EditionParentage,
+    EditionExposure,
+    ServiceEditions,
+    ScopeDigest,
+    PolicyFloor,
+}
+
 /// Facts that must be rechecked against the same identity before execution.
 /// The envelope digest already includes the keyed bind HMAC; `bind_hmac`
 /// remains explicit so a preview can show its status without exposing values.
@@ -219,6 +255,9 @@ pub struct DecisiveFacts {
     pub lane_generation: FieldStatus<u64>,
     /// Opaque until W13 supplies its own typed scope fingerprint.
     pub scope_digest: FieldStatus<Option<[u8; 32]>>,
+    /// Commitments supplied by action-specific producers. An absent entry is
+    /// unavailable, never an implicit empty proof or a configuration waiver.
+    pub action_fields: BTreeMap<DecisiveField, FieldStatus<[u8; 32]>>,
 }
 
 impl Default for DecisiveFacts {
@@ -243,6 +282,7 @@ impl Default for DecisiveFacts {
             profile_generation: FieldStatus::not_wired(),
             lane_generation: FieldStatus::not_wired(),
             scope_digest: FieldStatus::not_wired(),
+            action_fields: BTreeMap::new(),
         }
     }
 }
@@ -514,5 +554,13 @@ impl DecisiveFacts {
             }
             None => out.push(0),
         });
+        out.extend_from_slice(&(self.action_fields.len() as u64).to_be_bytes());
+        for (field, status) in &self.action_fields {
+            put_bytes(
+                out,
+                &serde_json::to_vec(field).expect("closed field identifier"),
+            );
+            put_status(out, status, |out, digest| put_bytes(out, digest));
+        }
     }
 }

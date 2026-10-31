@@ -1,9 +1,9 @@
 use std::time::{Duration, Instant};
 
 use oraclemcp_guard::impact_binding::{
-    DbIdentity, DecisiveFacts, FieldBudget, FieldCaps, FieldMeasure, FieldStatus, ImpactBindingV1,
-    ImpactV1, NotApplicableReason, ObjectFact, RowEstimate, RowEstimateKind, ScnBounds,
-    UnavailableReason,
+    DbIdentity, DecisiveFacts, DecisiveField, FieldBudget, FieldCaps, FieldMeasure, FieldStatus,
+    ImpactBindingV1, ImpactV1, NotApplicableReason, ObjectFact, RowEstimate, RowEstimateKind,
+    ScnBounds, UnavailableReason,
 };
 use proptest::prelude::*;
 use serde_json::{Value, json};
@@ -43,9 +43,130 @@ fn sample() -> ImpactBindingV1 {
             profile_generation: computed(1),
             lane_generation: computed(1),
             scope_digest: computed(None),
+            action_fields: Default::default(),
         },
         ..ImpactBindingV1::default()
     }
+}
+
+#[test]
+fn decisive_action_commitments_are_signed_facts() {
+    let original = sample();
+    let mut changed = original.clone();
+    changed
+        .decisive
+        .action_fields
+        .insert(DecisiveField::DdlEffectClosure, computed([2; 32]));
+    assert_ne!(original.decisive_digest(), changed.decisive_digest());
+    let committed = changed.decisive_digest();
+    changed
+        .decisive
+        .action_fields
+        .insert(DecisiveField::DdlEffectClosure, computed([3; 32]));
+    assert_ne!(committed, changed.decisive_digest());
+    changed.decisive.action_fields.insert(
+        DecisiveField::DdlEffectClosure,
+        FieldStatus::Estimated { value: [2; 32] },
+    );
+    assert_ne!(committed, changed.decisive_digest());
+}
+
+#[test]
+fn decisive_action_commitments_preserve_unavailable_and_truncated_statuses() {
+    for reason in [
+        UnavailableReason::NoPrivilege,
+        UnavailableReason::Truncated,
+        UnavailableReason::Timeout,
+    ] {
+        let mut binding = sample();
+        let original = binding.decisive_digest();
+        binding.decisive.action_fields.insert(
+            DecisiveField::DdlEffectClosure,
+            FieldStatus::Unavailable { reason },
+        );
+        let encoded = serde_json::to_value(&binding).unwrap();
+        assert_eq!(
+            encoded["decisive"]["action_fields"]["ddl_effect_closure"]["status"],
+            "unavailable"
+        );
+        assert_eq!(
+            encoded["decisive"]["action_fields"]["ddl_effect_closure"]["reason"],
+            serde_json::to_value(reason).unwrap()
+        );
+        let decoded: ImpactBindingV1 = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            decoded
+                .decisive
+                .action_fields
+                .get(&DecisiveField::DdlEffectClosure),
+            Some(&FieldStatus::Unavailable { reason })
+        );
+        assert_ne!(original, decoded.decisive_digest());
+    }
+}
+
+#[test]
+fn decisive_action_map_cannot_override_typed_base_facts() {
+    let mut binding = sample();
+    binding
+        .decisive
+        .action_fields
+        .insert(DecisiveField::Envelope, computed([9; 32]));
+    binding
+        .decisive
+        .action_fields
+        .insert(DecisiveField::ObjectIdentities, computed([9; 32]));
+    let original = binding.decisive_digest();
+    binding.decisive.envelope_digest = FieldStatus::Unavailable {
+        reason: UnavailableReason::Timeout,
+    };
+    let FieldStatus::Computed { value: objects } = &mut binding.decisive.objects else {
+        unreachable!()
+    };
+    objects[0].identity = FieldStatus::Unavailable {
+        reason: UnavailableReason::NoPrivilege,
+    };
+    let decoded: ImpactBindingV1 =
+        serde_json::from_value(serde_json::to_value(&binding).unwrap()).unwrap();
+    assert_eq!(
+        decoded.decisive.envelope_digest,
+        FieldStatus::Unavailable {
+            reason: UnavailableReason::Timeout
+        }
+    );
+    let FieldStatus::Computed { value: objects } = &decoded.decisive.objects else {
+        panic!("typed object facts disappeared")
+    };
+    assert_eq!(
+        objects[0].identity,
+        FieldStatus::Unavailable {
+            reason: UnavailableReason::NoPrivilege
+        }
+    );
+    assert_ne!(original, decoded.decisive_digest());
+}
+
+#[test]
+fn decisive_action_map_encoding_is_independent_of_insertion_order() {
+    let mut first = sample();
+    first
+        .decisive
+        .action_fields
+        .insert(DecisiveField::DdlEffectClosure, computed([3; 32]));
+    first
+        .decisive
+        .action_fields
+        .insert(DecisiveField::MutationEffectClosure, computed([4; 32]));
+    let mut second = sample();
+    second
+        .decisive
+        .action_fields
+        .insert(DecisiveField::MutationEffectClosure, computed([4; 32]));
+    second
+        .decisive
+        .action_fields
+        .insert(DecisiveField::DdlEffectClosure, computed([3; 32]));
+    assert_eq!(first.decisive_digest(), second.decisive_digest());
 }
 
 #[test]
