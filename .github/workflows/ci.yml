@@ -951,6 +951,7 @@ jobs:
       - name: 23ai matrix lane, VECTOR_DISTANCE, and PL/SQL round-trip smoke
         id: free23-matrix
         env:
+          E2E_LOG: "1"
           ORACLEMCP_LIVE_XE: "1"
           ORACLEMCP_ORACLE_MATRIX_BINARY: target/debug/oraclemcp
           ORACLE_MATRIX_FREE23_DSN: localhost:1522/FREEPDB1
@@ -993,7 +994,9 @@ jobs:
         if: always()
         with:
           name: e2e-oracle-free23-matrix-${{ github.run_number }}
-          path: target/e2e/oracle-version-matrix-free23.log
+          path: |
+            target/e2e/oracle-version-matrix-free23.log
+            target/e2e/oracle_version_matrix/**/ladder*.jsonl
           if-no-files-found: error
           retention-days: 30
 

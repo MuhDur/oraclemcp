@@ -15936,8 +15936,20 @@ mod dependents_preview {
             if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
                 return Ok(rows);
             }
-            let verified = sql == CatalogQueryId::DependentsTransitive.spec().sql;
-            if !verified && sql != CatalogQueryId::DependentsTransitiveVisible.spec().sql {
+            let verified = [
+                CatalogQueryId::DependentsTransitive,
+                CatalogQueryId::DependentsTransitiveAllSources,
+            ]
+            .iter()
+            .any(|id| sql == id.spec().sql);
+            if !verified
+                && ![
+                    CatalogQueryId::DependentsTransitiveVisible,
+                    CatalogQueryId::DependentsTransitiveVisibleAllSources,
+                ]
+                .iter()
+                .any(|id| sql == id.spec().sql)
+            {
                 return Ok(Vec::new());
             }
             if self.lost {

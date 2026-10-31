@@ -230,9 +230,9 @@ use oraclemcp_db::{
 use oraclemcp_guard::{DbIdentity, DecisiveFacts, FieldStatus, ObjectFact, UnavailableReason};
 
 /// Fact reads only: no optimizer, effect analysis, SAST or candidate execution.
-/// Two context reads, one exact identity read, at most twelve dependency frontiers, one compiler read,
+/// Two context reads, one exact identity read, at most fourteen dependency reads, one compiler read,
 /// one trigger list and at most 64 trigger-source reads.
-const MAX_REVALIDATION_QUERIES: usize = 81;
+const MAX_REVALIDATION_QUERIES: usize = 83;
 const MAX_TRIGGER_FACTS: usize = 64;
 
 #[derive(Clone, Copy)]
@@ -505,8 +505,8 @@ impl DecisiveFactProbe {
                     return Err(error.into_envelope());
                 }
                 Err(_) => {
-                    // The collector owns a hard max_depth + 2 bound even on an error.
-                    queries += 12;
+                    // The collector owns a hard max_depth + 4 bound even on an error.
+                    queries += 14;
                     exact_count = false;
                 }
             }

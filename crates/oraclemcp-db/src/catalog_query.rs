@@ -209,8 +209,103 @@ pub(crate) const VPD_RLS_POLICY_BY_OBJECT_SQL: &str = "SELECT object_owner, obje
     WHERE ROWNUM <= :3";
 
 // Both visibility modes share the bounded frontier and source projection.
+macro_rules! dependents_visibility_sql {
+    () => {
+        r#"  SELECT d.owner, d.name, d.type, d.referenced_owner, d.referenced_name,
+         d.referenced_type, d.referenced_link_name, d.dependency_type
+  FROM SYS.dba_dependencies d JOIN frontier f
+    ON (d.owner = f.owner AND d.name = f.object_name AND d.type = f.object_type)
+    OR ((d.referenced_owner = f.owner OR d.referenced_owner IS NULL)
+      AND d.referenced_name = f.object_name
+      AND (d.referenced_type = f.object_type OR d.referenced_type IS NULL
+        OR d.referenced_type = 'NON-EXISTENT'))
+  MINUS
+  SELECT owner, name, type, referenced_owner, referenced_name,
+         referenced_type, referenced_link_name, dependency_type FROM dependencies"#
+    };
+}
+
+macro_rules! dependents_source_rows_sql {
+    // ALL_SOURCE can build every visible source line before this outer join.
+    // Split the owning schema from foreign objects so the common case reads
+    // only USER_SOURCE/USER_VIEWS. Both schema identities must agree; schema
+    // switching and cross-schema dependencies retain the original ALL_* path.
+    (owner_sources) => {
+        r#"  SELECT o.owner, o.object_name, o.object_type, o.object_id, s.line, s.text,
+         COUNT(s.line) OVER (PARTITION BY o.object_id) AS source_lines,
+         LENGTHB(s.text) AS source_length
+  FROM objects o LEFT JOIN SYS.user_source s
+    ON s.name = o.object_name AND s.type = o.object_type
+  WHERE o.object_type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION',
+                         'TRIGGER', 'TYPE', 'TYPE BODY', 'JAVA SOURCE')
+    AND o.owner = SYS_CONTEXT('USERENV','SESSION_USER')
+    AND SYS_CONTEXT('USERENV','CURRENT_SCHEMA') = SYS_CONTEXT('USERENV','SESSION_USER')
+  UNION ALL
+  SELECT o.owner, o.object_name, o.object_type, o.object_id, s.line, s.text,
+         COUNT(s.line) OVER (PARTITION BY o.object_id) AS source_lines,
+         LENGTHB(s.text) AS source_length
+  FROM objects o LEFT JOIN SYS.all_source s
+    ON s.owner = o.owner AND s.name = o.object_name AND s.type = o.object_type
+  WHERE o.object_type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION',
+                         'TRIGGER', 'TYPE', 'TYPE BODY', 'JAVA SOURCE')
+    AND (o.owner <> SYS_CONTEXT('USERENV','SESSION_USER')
+      OR SYS_CONTEXT('USERENV','CURRENT_SCHEMA') <> SYS_CONTEXT('USERENV','SESSION_USER')
+      OR SYS_CONTEXT('USERENV','CURRENT_SCHEMA') IS NULL
+      OR SYS_CONTEXT('USERENV','SESSION_USER') IS NULL)
+    AND EXISTS (SELECT 1 FROM objects f
+      WHERE f.object_type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION',
+                             'TRIGGER', 'TYPE', 'TYPE BODY', 'JAVA SOURCE')
+        AND (f.owner <> SYS_CONTEXT('USERENV','SESSION_USER')
+          OR SYS_CONTEXT('USERENV','CURRENT_SCHEMA') <> SYS_CONTEXT('USERENV','SESSION_USER')
+          OR SYS_CONTEXT('USERENV','CURRENT_SCHEMA') IS NULL
+          OR SYS_CONTEXT('USERENV','SESSION_USER') IS NULL))
+  UNION ALL
+  SELECT o.owner, o.object_name, o.object_type, o.object_id, 1, v.text_vc,
+         1, v.text_length
+  FROM objects o LEFT JOIN SYS.user_views v ON v.view_name = o.object_name
+  WHERE o.object_type = 'VIEW'
+    AND o.owner = SYS_CONTEXT('USERENV','SESSION_USER')
+    AND SYS_CONTEXT('USERENV','CURRENT_SCHEMA') = SYS_CONTEXT('USERENV','SESSION_USER')
+  UNION ALL
+  SELECT o.owner, o.object_name, o.object_type, o.object_id, 1, v.text_vc,
+         1, v.text_length
+  FROM objects o LEFT JOIN SYS.all_views v
+    ON v.owner = o.owner AND v.view_name = o.object_name
+  WHERE o.object_type = 'VIEW'
+    AND (o.owner <> SYS_CONTEXT('USERENV','SESSION_USER')
+      OR SYS_CONTEXT('USERENV','CURRENT_SCHEMA') <> SYS_CONTEXT('USERENV','SESSION_USER')
+      OR SYS_CONTEXT('USERENV','CURRENT_SCHEMA') IS NULL
+      OR SYS_CONTEXT('USERENV','SESSION_USER') IS NULL)
+    AND EXISTS (SELECT 1 FROM objects f WHERE f.object_type = 'VIEW'
+      AND (f.owner <> SYS_CONTEXT('USERENV','SESSION_USER')
+        OR SYS_CONTEXT('USERENV','CURRENT_SCHEMA') <> SYS_CONTEXT('USERENV','SESSION_USER')
+        OR SYS_CONTEXT('USERENV','CURRENT_SCHEMA') IS NULL
+        OR SYS_CONTEXT('USERENV','SESSION_USER') IS NULL))"#
+    };
+    // A privilege fallback, not an empty-source substitute: every original
+    // metadata, source, visibility and truncation fact is still collected.
+    (all_sources) => {
+        r#"  SELECT o.owner, o.object_name, o.object_type, o.object_id, s.line, s.text,
+         COUNT(s.line) OVER (PARTITION BY o.object_id) AS source_lines,
+         LENGTHB(s.text) AS source_length
+  FROM objects o LEFT JOIN SYS.all_source s
+    ON s.owner = o.owner AND s.name = o.object_name AND s.type = o.object_type
+  WHERE o.object_type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION',
+                         'TRIGGER', 'TYPE', 'TYPE BODY', 'JAVA SOURCE')
+  UNION ALL
+  SELECT o.owner, o.object_name, o.object_type, o.object_id, 1, v.text_vc,
+         1, v.text_length
+  FROM objects o LEFT JOIN SYS.all_views v
+    ON v.owner = o.owner AND v.view_name = o.object_name
+  WHERE o.object_type = 'VIEW'"#
+    };
+}
+
 macro_rules! dependents_frontier_sql {
-    ($visibility:literal) => {
+    ($visibility:expr) => {
+        dependents_frontier_sql!($visibility, owner_sources)
+    };
+    ($visibility:expr, $sources:ident) => {
         // Keep ID and name lookup branches disjoint. Explicit null guards let
         // Oracle prune the unused dictionary scan for each requested object.
         concat!(
@@ -259,19 +354,9 @@ macro_rules! dependents_frontier_sql {
     WHERE d.referenced_owner = f.owner AND d.referenced_name = f.object_name
       AND d.referenced_type = f.object_type)
 ), sources AS (
-  SELECT o.owner, o.object_name, o.object_type, o.object_id, s.line, s.text,
-         COUNT(s.line) OVER (PARTITION BY o.object_id) AS source_lines,
-         LENGTHB(s.text) AS source_length
-  FROM objects o LEFT JOIN SYS.all_source s
-    ON s.owner = o.owner AND s.name = o.object_name AND s.type = o.object_type
-  WHERE o.object_type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION',
-                         'TRIGGER', 'TYPE', 'TYPE BODY', 'JAVA SOURCE')
-  UNION ALL
-  SELECT o.owner, o.object_name, o.object_type, o.object_id, 1, v.text_vc,
-         1, v.text_length
-  FROM objects o LEFT JOIN SYS.all_views v
-    ON v.owner = o.owner AND v.view_name = o.object_name
-  WHERE o.object_type = 'VIEW'
+"#,
+            dependents_source_rows_sql!($sources),
+            r#"
 ), bounded_sources AS (
   SELECT * FROM (SELECT * FROM sources ORDER BY object_id, line)
   WHERE ROWNUM <= :3
@@ -534,6 +619,10 @@ pub enum CatalogQueryId {
     DependentsTransitive,
     /// Session-visible dependency frontier when full visibility cannot be verified.
     DependentsTransitiveVisible,
+    /// Full visibility check without relying on USER_SOURCE/USER_VIEWS grants.
+    DependentsTransitiveAllSources,
+    /// Session-visible facts without relying on USER_SOURCE/USER_VIEWS grants.
+    DependentsTransitiveVisibleAllSources,
     /// Metadata for one index.
     IndexMetadata,
     /// Ordered columns of one index.
@@ -722,7 +811,7 @@ pub enum ReadQueryProvenance {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 198] = [
+    pub const ALL: [Self; 200] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::PolicyObservationSessionContext,
@@ -808,6 +897,8 @@ impl CatalogQueryId {
         Self::OrientHotObjectsPage,
         Self::DependentsTransitive,
         Self::DependentsTransitiveVisible,
+        Self::DependentsTransitiveAllSources,
+        Self::DependentsTransitiveVisibleAllSources,
         Self::IndexMetadata,
         Self::IndexColumns,
         Self::IndexExpressions,
@@ -1820,19 +1911,7 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::DependentsTransitive => (
-                dependents_frontier_sql!(
-                    r#"  SELECT d.owner, d.name, d.type, d.referenced_owner, d.referenced_name,
-         d.referenced_type, d.referenced_link_name, d.dependency_type
-  FROM SYS.dba_dependencies d JOIN frontier f
-    ON (d.owner = f.owner AND d.name = f.object_name AND d.type = f.object_type)
-    OR ((d.referenced_owner = f.owner OR d.referenced_owner IS NULL)
-      AND d.referenced_name = f.object_name
-      AND (d.referenced_type = f.object_type OR d.referenced_type IS NULL
-        OR d.referenced_type = 'NON-EXISTENT'))
-  MINUS
-  SELECT owner, name, type, referenced_owner, referenced_name,
-         referenced_type, referenced_link_name, dependency_type FROM dependencies"#
-                ),
+                dependents_frontier_sql!(dependents_visibility_sql!()),
                 TII,
                 "read one bounded transitive dependency frontier with source and visibility facts",
                 DictionaryMetadata,
@@ -1842,6 +1921,20 @@ impl CatalogQueryId {
                 dependents_frontier_sql!("SELECT 1 FROM SYS.dual WHERE 1=0"),
                 TII,
                 "read one bounded session-visible dependency frontier without verifying full visibility",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::DependentsTransitiveAllSources => (
+                dependents_frontier_sql!(dependents_visibility_sql!(), all_sources),
+                TII,
+                "read bounded dependency facts with full visibility and ALL source views",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::DependentsTransitiveVisibleAllSources => (
+                dependents_frontier_sql!("SELECT 1 FROM SYS.dual WHERE 1=0", all_sources),
+                TII,
+                "read bounded session-visible dependency facts with ALL source views",
                 DictionaryMetadata,
                 Diagnostic,
             ),
@@ -3368,6 +3461,166 @@ mod dictionary_shadow_live_tests {
     fn hard_parse_guard_ignores_application_all_policies_shadow() {
         live_shadow_contract(false);
     }
+
+    async fn source_projection_rows(
+        cx: &Cx,
+        conn: &dyn OracleConnection,
+        owner: &str,
+        name: &str,
+        kind: &str,
+        source_cap: i64,
+    ) -> Result<Vec<OracleRow>, String> {
+        let binds = [
+            OracleBind::String(
+                serde_json::json!([{
+                    "owner": owner, "name": name, "type": kind
+                }])
+                .to_string(),
+            ),
+            OracleBind::I64(8001),
+            OracleBind::I64(source_cap),
+        ];
+        let mut last = Vec::new();
+        for (optimized, original) in [
+            (
+                CatalogQueryId::DependentsTransitive,
+                CatalogQueryId::DependentsTransitiveAllSources,
+            ),
+            (
+                CatalogQueryId::DependentsTransitiveVisible,
+                CatalogQueryId::DependentsTransitiveVisibleAllSources,
+            ),
+        ] {
+            let rows = run_catalog_query(cx, conn, optimized, &binds)
+                .await
+                .map_err(|error| error.to_string())?;
+            let expected = run_catalog_query(cx, conn, original, &binds)
+                .await
+                .map_err(|error| error.to_string())?;
+            let canonical = |rows: &[OracleRow]| {
+                let mut rows: Vec<_> = rows
+                    .iter()
+                    .map(|row| serde_json::to_string(row).unwrap())
+                    .collect();
+                rows.sort();
+                rows
+            };
+            check(
+                canonical(&rows) == canonical(&expected),
+                &format!("{kind} {name}: optimized source projection differs from ALL_*"),
+            )?;
+            check(
+                rows.iter().any(|row| {
+                    row.text("ROW_KIND") == Some("object")
+                        && row.text("NAME") == Some(name)
+                        && row.text("STATUS") == Some("VALID")
+                }),
+                "fixture must have a real valid object identity",
+            )?;
+            last = rows;
+        }
+        Ok(last)
+    }
+
+    #[test]
+    #[ignore = "requires a local Oracle lab admin; creates and drops one isolated source schema"]
+    fn owning_source_projection_matches_all_sources_across_schema_and_caps() {
+        let dsn = std::env::var("ORACLEMCP_TEST_DSN").expect("local lab DSN required");
+        assert!(dsn.starts_with("localhost:") || dsn.starts_with("127.0.0.1:"));
+        let options = crate::OracleConnectOptions {
+            connect_string: dsn,
+            username: Some(std::env::var("ORACLEMCP_TEST_USER").expect("lab admin user")),
+            password: Some(std::env::var("ORACLEMCP_TEST_PASSWORD").expect("lab admin password")),
+            ..Default::default()
+        };
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let cx = Cx::current().expect("runtime Cx");
+            let admin = crate::connect_oracle(&cx, options.clone()).await.expect("lab admin");
+            let mut random = [0u8; 10];
+            getrandom::getrandom(&mut random).unwrap();
+            let suffix: String = random.iter().map(|byte| format!("{byte:02X}")).collect();
+            let owner = format!("OMCP_SRC_{suffix}");
+            let password = format!("Src{suffix}!");
+            let mut created = false;
+            let mut app = None;
+            let result: Result<(), String> = async {
+                admin.execute(&cx, &format!("CREATE USER {owner} IDENTIFIED BY \"{password}\""), &[])
+                    .await.map_err(|error| error.to_string())?;
+                created = true;
+                admin.execute(&cx, &format!("GRANT CREATE SESSION, CREATE TABLE, CREATE PROCEDURE, CREATE TYPE, CREATE VIEW, UNLIMITED TABLESPACE TO {owner}"), &[])
+                    .await.map_err(|error| error.to_string())?;
+                admin.execute(&cx, &format!("GRANT SELECT_CATALOG_ROLE TO {owner}"), &[])
+                    .await.map_err(|error| format!("fixture dictionary visibility grant: {error}"))?;
+                app = Some(crate::connect_oracle(&cx, crate::OracleConnectOptions {
+                    username: Some(owner.clone()), password: Some(password), ..options
+                }).await.map_err(|error| error.to_string())?);
+                let conn = app.as_ref().unwrap();
+                for sql in [
+                    "CREATE TABLE BASE_DATA (id NUMBER)",
+                    "CREATE PROCEDURE P_SOURCE AS\nBEGIN\n NULL; -- SOURCE_PROOF_CANARY č\nEND;",
+                    "CREATE FUNCTION F_SOURCE RETURN NUMBER AS BEGIN RETURN 3; END;",
+                    "CREATE PACKAGE PKG_SOURCE AS FUNCTION f RETURN NUMBER; END;",
+                    "CREATE PACKAGE BODY PKG_SOURCE AS FUNCTION f RETURN NUMBER AS BEGIN RETURN 3; END; END;",
+                    "CREATE TYPE T_SOURCE AS OBJECT (n NUMBER, MEMBER FUNCTION f RETURN NUMBER)",
+                    "CREATE TYPE BODY T_SOURCE AS MEMBER FUNCTION f RETURN NUMBER AS BEGIN RETURN SELF.n; END; END;",
+                    "CREATE VIEW V_SOURCE AS SELECT id FROM BASE_DATA",
+                ] {
+                    conn.execute(&cx, sql, &[]).await.map_err(|error| error.to_string())?;
+                }
+                let columns = (0..300).map(|n| format!("id AS source_column_{n:03}"))
+                    .collect::<Vec<_>>().join(", ");
+                conn.execute(&cx, &format!("CREATE VIEW WIDE_SOURCE AS SELECT {columns} FROM BASE_DATA"), &[])
+                    .await.map_err(|error| error.to_string())?;
+                for (name, kind, canary) in [
+                    ("P_SOURCE", "PROCEDURE", "SOURCE_PROOF_CANARY č"),
+                    ("F_SOURCE", "FUNCTION", "RETURN 3"),
+                    ("PKG_SOURCE", "PACKAGE", "FUNCTION f"),
+                    ("PKG_SOURCE", "PACKAGE BODY", "RETURN 3"),
+                    ("T_SOURCE", "TYPE", "MEMBER FUNCTION"),
+                    ("T_SOURCE", "TYPE BODY", "SELF.n"),
+                    ("V_SOURCE", "VIEW", "BASE_DATA"),
+                ] {
+                    let own = source_projection_rows(&cx, conn.as_ref(), &owner, name, kind, 4097).await?;
+                    check(own.iter().any(|row| row.text("NAME") == Some(name)
+                        && row.text("TYPE") == Some(kind)
+                        && row.text("TEXT").is_some_and(|text| text.contains(canary))),
+                        "owning source must retain actual source text")?;
+                    let foreign = source_projection_rows(&cx, admin.as_ref(), &owner, name, kind, 4097).await?;
+                    check(foreign.iter().any(|row| row.text("NAME") == Some(name)
+                        && row.text("TYPE") == Some(kind)
+                        && row.text("TEXT").is_some_and(|text| text.contains(canary))),
+                        "foreign source must retain actual source text")?;
+                }
+                let capped = source_projection_rows(&cx, conn.as_ref(), &owner, "P_SOURCE", "PROCEDURE", 1).await?;
+                check(capped.iter().filter(|row| row.text("ROW_KIND") == Some("source")).count() == 1
+                    && capped.iter().any(|row| row.parse_i64("SOURCE_LINES").is_some_and(|lines| lines > 1)),
+                    "a source cap must retain its incomplete-source evidence")?;
+                let wide = source_projection_rows(&cx, conn.as_ref(), &owner, "WIDE_SOURCE", "VIEW", 4097).await?;
+                check(wide.iter().any(|row| row.text("NAME") == Some("WIDE_SOURCE")
+                    && row.parse_i64("SOURCE_LENGTH").is_some_and(|length|
+                        length > row.text("TEXT").unwrap_or_default().len() as i64)),
+                    "a truncated view must retain its original byte-length evidence")?;
+                conn.execute(&cx, "ALTER SESSION SET CURRENT_SCHEMA=SYS", &[]).await
+                    .map_err(|error| error.to_string())?;
+                for (name, kind) in [("P_SOURCE", "PROCEDURE"), ("V_SOURCE", "VIEW")] {
+                    source_projection_rows(&cx, conn.as_ref(), &owner, name, kind, 4097).await?;
+                }
+                Ok(())
+            }.await;
+            let app_close = if let Some(conn) = app { conn.close(&cx).await } else { Ok(()) };
+            let cleanup = if created {
+                admin.execute(&cx, &format!("DROP USER {owner} CASCADE"), &[]).await.map(|_| ())
+            } else { Ok(()) };
+            let admin_close = admin.close(&cx).await;
+            assert!(app_close.is_ok(), "owned source connection cleanup failed");
+            assert!(cleanup.is_ok(), "owned source schema cleanup failed: {cleanup:?}");
+            assert!(admin_close.is_ok(), "admin connection cleanup failed");
+            result.expect("native source projection equivalence");
+        });
+    }
 }
 
 #[cfg(test)]
@@ -3874,6 +4127,46 @@ mod catalog_sql_lexical_tests {
         let (verified_projection, _) = verified.sql.split_once("visibility_gaps AS (").unwrap();
         let (visible_projection, _) = visible.sql.split_once("visibility_gaps AS (").unwrap();
         assert_eq!(verified_projection, visible_projection);
+    }
+
+    #[test]
+    fn owning_source_projection_retains_frontier_visibility_and_all_caps() {
+        for (optimized, fallback) in [
+            (
+                CatalogQueryId::DependentsTransitive,
+                CatalogQueryId::DependentsTransitiveAllSources,
+            ),
+            (
+                CatalogQueryId::DependentsTransitiveVisible,
+                CatalogQueryId::DependentsTransitiveVisibleAllSources,
+            ),
+        ] {
+            let optimized = optimized.spec();
+            let fallback = fallback.spec();
+            assert_eq!(optimized.binds, fallback.binds);
+            assert_eq!(
+                optimized.sql.split_once("), sources AS (").unwrap().0,
+                fallback.sql.split_once("), sources AS (").unwrap().0
+            );
+            assert_eq!(
+                optimized
+                    .sql
+                    .split_once("), bounded_sources AS (")
+                    .unwrap()
+                    .1,
+                fallback
+                    .sql
+                    .split_once("), bounded_sources AS (")
+                    .unwrap()
+                    .1
+            );
+            assert!(optimized.sql.contains("SYS.user_source"));
+            assert!(optimized.sql.contains("SYS.user_views"));
+            assert!(optimized.sql.contains("SYS.all_source"));
+            assert!(optimized.sql.contains("SYS.all_views"));
+            assert!(!fallback.sql.contains("SYS.user_source"));
+            assert!(!fallback.sql.contains("SYS.user_views"));
+        }
     }
 
     #[test]

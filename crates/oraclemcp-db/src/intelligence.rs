@@ -1886,7 +1886,7 @@ pub struct DependentsClosure {
 }
 
 impl DependentsClosure {
-    /// Number of statements, bounded by max_depth + 2 with a visibility retry.
+    /// Number of statements, bounded by max_depth + 4 with privilege fallbacks.
     #[must_use]
     pub fn query_count(&self) -> usize {
         self.query_count
@@ -1971,10 +1971,57 @@ fn dependency_node(row: &OracleRow, depth: usize) -> Option<DependentNode> {
     })
 }
 
+async fn read_dependency_frontier(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    binds: &[OracleBind],
+    visibility_verified: &mut bool,
+    owner_source_views: &mut bool,
+    query_count: &mut usize,
+) -> Result<Vec<OracleRow>, DependentsError> {
+    let mut attempts = vec![(*visibility_verified, *owner_source_views)];
+    if *visibility_verified {
+        attempts.push((false, *owner_source_views));
+    }
+    if *owner_source_views {
+        // USER_* grants are independent of ALL_* grants. Preserve readable
+        // source facts even if an installation restricts the owning views.
+        attempts.push((*visibility_verified, false));
+        if *visibility_verified {
+            attempts.push((false, false));
+        }
+    }
+    for (verified, owned) in attempts {
+        let id = match (verified, owned) {
+            (true, true) => CatalogQueryId::DependentsTransitive,
+            (false, true) => CatalogQueryId::DependentsTransitiveVisible,
+            (true, false) => CatalogQueryId::DependentsTransitiveAllSources,
+            (false, false) => CatalogQueryId::DependentsTransitiveVisibleAllSources,
+        };
+        *query_count += 1;
+        match run_catalog_query(cx, conn, id, binds).await {
+            Ok(rows) => {
+                *visibility_verified = verified;
+                *owner_source_views = owned;
+                return Ok(rows);
+            }
+            Err(error)
+                if matches!(
+                    oraclemcp_error::parse_ora_code(&error.to_string()),
+                    Some(942 | 1031)
+                ) => {}
+            Err(error) => return Err(DependentsError::Database(error)),
+        }
+    }
+    Err(DependentsError::NoPrivilege)
+}
+
 /// Read one successful statement per depth level, including the boundary probe
 /// that distinguishes a leaf at the depth cap from a silently omitted child.
 /// If full visibility cannot be checked, one denied statement precedes the
 /// session-visible fallback; subsequent levels use that fallback directly.
+/// Restricted USER_* grants can require two further denied probes before
+/// retaining the original ALL_* source path. Each fallback is remembered.
 /// Values are bound as a bounded JSON frontier; stored object IDs keep a
 /// 1000-object frontier below Oracle's VARCHAR2 bind ceiling. Source is hashed
 /// and discarded, never returned in the approval payload.
@@ -2012,6 +2059,7 @@ pub async fn probe_dependents_transitive(
     let mut source_lines = 0usize;
     let mut query_count = 0;
     let mut visibility_verified = true;
+    let mut owner_source_views = true;
     for depth in 0..=caps.max_depth {
         if frontier.is_empty() {
             break;
@@ -2026,62 +2074,26 @@ pub async fn probe_dependents_transitive(
             truncation.insert(DependencyTruncation::FrontierBytes);
             break;
         }
-        query_count += 1;
         let binds = [
             OracleBind::from(json),
             OracleBind::I64((MAX_DEPENDENT_EDGES + 1) as i64),
             OracleBind::I64((MAX_DEPENDENT_SOURCE_LINES + 1) as i64),
         ];
-        let rows = match run_catalog_query(
+        let rows = read_dependency_frontier(
             cx,
             conn,
-            if visibility_verified {
-                CatalogQueryId::DependentsTransitive
-            } else {
-                CatalogQueryId::DependentsTransitiveVisible
-            },
             &binds,
+            &mut visibility_verified,
+            &mut owner_source_views,
+            &mut query_count,
         )
-        .await
-        {
-            Ok(rows) => rows,
-            Err(error)
-                if matches!(
-                    oraclemcp_error::parse_ora_code(&error.to_string()),
-                    Some(942 | 1031)
-                ) =>
-            {
-                if !visibility_verified {
-                    return Err(DependentsError::NoPrivilege);
-                }
-                visibility_verified = false;
-                uncertainties.insert(DependencyUncertainty {
-                    reason: DependencyUncertaintyKind::VisibilityUnverified,
-                    object: None,
-                });
-                query_count += 1;
-                match run_catalog_query(
-                    cx,
-                    conn,
-                    CatalogQueryId::DependentsTransitiveVisible,
-                    &binds,
-                )
-                .await
-                {
-                    Ok(rows) => rows,
-                    Err(error)
-                        if matches!(
-                            oraclemcp_error::parse_ora_code(&error.to_string()),
-                            Some(942 | 1031)
-                        ) =>
-                    {
-                        return Err(DependentsError::NoPrivilege);
-                    }
-                    Err(error) => return Err(DependentsError::Database(error)),
-                }
-            }
-            Err(error) => return Err(DependentsError::Database(error)),
-        };
+        .await?;
+        if !visibility_verified {
+            uncertainties.insert(DependencyUncertainty {
+                reason: DependencyUncertaintyKind::VisibilityUnverified,
+                object: None,
+            });
+        }
         if rows
             .iter()
             .any(|row| row.text("ROW_KIND") == Some("visibility_gap"))
@@ -2390,6 +2402,7 @@ mod transitive_dependents_tests {
         calls: AtomicUsize,
         denied: bool,
         verification_denied: bool,
+        owner_source_denied: bool,
         verification_calls: AtomicUsize,
         source: String,
         transform: fn(&mut Vec<OracleRow>),
@@ -2420,6 +2433,7 @@ mod transitive_dependents_tests {
                 calls: AtomicUsize::new(0),
                 denied: false,
                 verification_denied: false,
+                owner_source_denied: false,
                 verification_calls: AtomicUsize::new(0),
                 source: "PROCEDURE P AS BEGIN NULL; END;\n".into(),
                 transform: |_| {},
@@ -2482,18 +2496,34 @@ mod transitive_dependents_tests {
             assert!(
                 [
                     CatalogQueryId::DependentsTransitive,
-                    CatalogQueryId::DependentsTransitiveVisible
+                    CatalogQueryId::DependentsTransitiveVisible,
+                    CatalogQueryId::DependentsTransitiveAllSources,
+                    CatalogQueryId::DependentsTransitiveVisibleAllSources,
                 ]
                 .iter()
                 .any(|id| id.spec().sql == sql),
                 "frontier SQL must stay in the closed dependency projection"
             );
-            let verified = sql == CatalogQueryId::DependentsTransitive.spec().sql;
+            let verified = [
+                CatalogQueryId::DependentsTransitive,
+                CatalogQueryId::DependentsTransitiveAllSources,
+            ]
+            .iter()
+            .any(|id| sql == id.spec().sql);
+            let owned = [
+                CatalogQueryId::DependentsTransitive,
+                CatalogQueryId::DependentsTransitiveVisible,
+            ]
+            .iter()
+            .any(|id| sql == id.spec().sql);
             self.calls.fetch_add(1, Ordering::SeqCst);
             if verified {
                 self.verification_calls.fetch_add(1, Ordering::SeqCst);
             }
-            if self.denied || (verified && self.verification_denied) {
+            if self.denied
+                || (verified && self.verification_denied)
+                || (owned && self.owner_source_denied)
+            {
                 return Err(DbError::Query(
                     "ORA-00942: table or view does not exist".into(),
                 ));
@@ -2722,6 +2752,78 @@ mod transitive_dependents_tests {
                 "three successful batched levels plus one denied verification"
             );
             assert_eq!(result.query_count(), 4);
+        });
+    }
+
+    #[test]
+    fn dependents_restricted_owning_views_preserve_verified_source_facts() {
+        run(|cx| async move {
+            let baseline = GraphConnection::new(&[(2, 1), (3, 2)]);
+            let expected =
+                probe_dependents_transitive(&cx, &baseline, &baseline.root(), DepCaps::default())
+                    .await
+                    .unwrap();
+            let mut restricted = GraphConnection::new(&[(2, 1), (3, 2)]);
+            restricted.owner_source_denied = true;
+            let actual = probe_dependents_transitive(
+                &cx,
+                &restricted,
+                &restricted.root(),
+                DepCaps::default(),
+            )
+            .await
+            .expect("readable ALL_* source facts must not become unavailable");
+            assert_eq!(actual.roots, expected.roots);
+            assert_eq!(actual.nodes, expected.nodes);
+            assert_eq!(actual.edges, expected.edges);
+            assert_eq!(actual.uncertainties, expected.uncertainties);
+            assert_eq!(actual.dependency_hash, expected.dependency_hash);
+            assert!(!actual.truncated);
+            assert_eq!(
+                actual.query_count(),
+                5,
+                "two denied probes then three verified levels"
+            );
+        });
+    }
+
+    #[test]
+    fn dependents_restricted_owning_views_preserve_visibility_and_query_bound() {
+        run(|cx| async move {
+            let edges = (2..=11).map(|id| (id, id - 1)).collect::<Vec<_>>();
+            let mut baseline = GraphConnection::new(&edges);
+            baseline.verification_denied = true;
+            let expected =
+                probe_dependents_transitive(&cx, &baseline, &baseline.root(), DepCaps::default())
+                    .await
+                    .unwrap();
+            let mut restricted = GraphConnection::new(&edges);
+            restricted.verification_denied = true;
+            restricted.owner_source_denied = true;
+            let actual = probe_dependents_transitive(
+                &cx,
+                &restricted,
+                &restricted.root(),
+                DepCaps::default(),
+            )
+            .await
+            .expect("visible ALL_* facts remain available without owning-view grants");
+            assert_eq!(actual.roots, expected.roots);
+            assert_eq!(actual.nodes, expected.nodes);
+            assert_eq!(actual.edges, expected.edges);
+            assert_eq!(actual.uncertainties, expected.uncertainties);
+            assert_eq!(actual.dependency_hash, expected.dependency_hash);
+            assert_eq!(actual.uncertainties.len(), 1);
+            assert_eq!(
+                actual.uncertainties[0].reason,
+                DependencyUncertaintyKind::VisibilityUnverified
+            );
+            assert!(!actual.truncated);
+            assert_eq!(
+                actual.query_count(),
+                14,
+                "eleven levels and at most three denied probes"
+            );
         });
     }
 
