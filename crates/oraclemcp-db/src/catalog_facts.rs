@@ -242,6 +242,86 @@ pub trait ClosureFactStore {
     fn save(&self, profile: &str, facts: &ClosureFacts) -> Result<(), String>;
 }
 
+/// Read the exact source bytes committed by one previously captured member.
+///
+/// The caller must still revalidate the whole closure before execution. This
+/// check binds the engine's input to that closure and rejects a source change
+/// between fact capture and analysis instead of analyzing unbound bytes.
+pub async fn read_verified_closure_source(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    member: &MemberFact,
+) -> Result<String, Revalidation> {
+    validate_member_status(&member.status)?;
+    if member.authid != "DEFINER" {
+        return Err(Revalidation::Unknown(
+            "routine source needs definer-rights binding".into(),
+        ));
+    }
+    let owner = member
+        .routine
+        .schema
+        .as_ref()
+        .filter(|owner| !owner.text.is_empty())
+        .ok_or_else(|| Revalidation::Unknown("routine source owner is unresolved".into()))?;
+    let object = routine_object_name(&member.routine)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| Revalidation::Unknown("routine source object is unresolved".into()))?;
+    if !matches!(
+        member.object_type.as_str(),
+        "FUNCTION" | "PROCEDURE" | "PACKAGE" | "PACKAGE BODY"
+    ) {
+        return Err(Revalidation::Unknown(
+            "unsupported routine source type".into(),
+        ));
+    }
+    let rows = query(
+        cx,
+        conn,
+        CatalogQueryId::ClosureSource,
+        &[
+            text(&owner.text),
+            text(&object),
+            text(&member.object_type),
+            integer((MAX_CLOSURE_SOURCE_ROWS + 1) as i64),
+        ],
+    )
+    .await?;
+    verified_closure_source_text(member, &rows)
+}
+
+fn verified_closure_source_text(
+    member: &MemberFact,
+    rows: &[OracleRow],
+) -> Result<String, Revalidation> {
+    check_cap(rows.len(), MAX_CLOSURE_SOURCE_ROWS, "routine source")?;
+    let expected = member
+        .source_sha256
+        .get(&member.object_type)
+        .filter(|_| member.source_sha256.len() == 1)
+        .ok_or_else(|| {
+            Revalidation::Unknown("routine source hash is absent or ambiguous".into())
+        })?;
+    if hash_source(rows)? != *expected {
+        return Err(Revalidation::Stale(
+            "routine source changed before analysis".into(),
+        ));
+    }
+    // The fact hash commits to line numbers and exact payload bytes. Preserve
+    // every payload, and retain its physical line boundary even when TEXT
+    // omits the trailing newline: otherwise a line comment can hide the next
+    // executable statement from the engine.
+    let mut source = String::new();
+    for row in rows {
+        let text = row.text("TEXT").expect("validated source text");
+        source.push_str(text);
+        if !text.ends_with('\n') {
+            source.push('\n');
+        }
+    }
+    Ok(source)
+}
+
 /// Read a bounded live closure snapshot from ALL_* catalogs.
 pub async fn extract_closure_facts(
     cx: &Cx,
@@ -324,7 +404,7 @@ pub async fn extract_closure_facts(
         }
         let authid_matches = authid_rows
             .iter()
-            .filter(|row| overload_matches(row, input.routine.overload))
+            .filter(|row| subprogram_matches(row, input.routine.overload))
             .collect::<Vec<_>>();
         if authid_matches.len() != 1 {
             return Err(Revalidation::Unknown(
@@ -420,6 +500,7 @@ pub async fn extract_closure_facts(
             "closure dependency",
         )?;
         for row in dependency_rows {
+            require_local_dependency(&row)?;
             dependencies.push(DependencyFact {
                 member: input.routine.clone(),
                 owner: required_text(&row, "REFERENCED_OWNER", "dependency")?,
@@ -529,6 +610,18 @@ pub async fn extract_closure_facts(
     };
     facts.key.fingerprint = fingerprint(&facts)?;
     Ok(facts)
+}
+
+fn require_local_dependency(row: &OracleRow) -> Result<(), Revalidation> {
+    if !row
+        .cell("REFERENCED_LINK_NAME")
+        .is_some_and(|cell| cell.value.is_none())
+    {
+        return Err(Revalidation::Unknown(
+            "dependency database-link observation is missing or remote".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Read the same strict DBID/container/edition identity used by persisted
@@ -700,11 +793,15 @@ fn collect_text_fields(
         .collect()
 }
 
-fn overload_matches(row: &OracleRow, overload: Option<u32>) -> bool {
-    match (overload, row.text("OVERLOAD")) {
-        (None, None) => true,
-        (Some(expected), Some(actual)) => actual.parse::<u32>().ok() == Some(expected),
-        _ => false,
+fn subprogram_matches(row: &OracleRow, identity: Option<u32>) -> bool {
+    // OracleCatalogResolver binds RoutineRef.overload to SUBPROGRAM_ID.
+    // OVERLOAD is nullable (including every standalone function) and is a
+    // different ordinal for package members; it cannot substitute for that ID.
+    match identity {
+        Some(expected) => row.parse_i64("SUBPROGRAM_ID") == Some(i64::from(expected)),
+        None => row
+            .cell("OVERLOAD")
+            .is_some_and(|cell| cell.value.is_none()),
     }
 }
 
@@ -795,6 +892,89 @@ pub fn unquoted_identifier(value: impl Into<String>) -> RoutineIdentifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closure_authid_matches_the_resolved_subprogram_not_the_overload_ordinal() {
+        let mut row = OracleRow {
+            columns: vec![
+                (
+                    "SUBPROGRAM_ID".into(),
+                    crate::OracleCell::new("NUMBER", Some("1".into())),
+                ),
+                ("OVERLOAD".into(), crate::OracleCell::new("VARCHAR2", None)),
+            ],
+        };
+        assert!(subprogram_matches(&row, Some(1)));
+        assert!(!subprogram_matches(&row, Some(2)));
+        row.columns[0].1.value = Some("7".into());
+        row.columns[1].1.value = Some("2".into());
+        assert!(subprogram_matches(&row, Some(7)));
+        assert!(!subprogram_matches(&row, Some(2)));
+        assert!(!subprogram_matches(&row, None));
+        row.columns[0].1.value = None;
+        assert!(!subprogram_matches(&row, Some(7)));
+    }
+
+    fn source_line(line: i64, text: &str) -> OracleRow {
+        OracleRow {
+            columns: vec![
+                (
+                    "LINE".into(),
+                    crate::OracleCell::new("NUMBER", Some(line.to_string())),
+                ),
+                (
+                    "TEXT".into(),
+                    crate::OracleCell::new("VARCHAR2", Some(text.to_owned())),
+                ),
+            ],
+        }
+    }
+
+    #[test]
+    fn verified_source_loader_binds_exact_analyzed_bytes() {
+        let rows = vec![
+            source_line(1, "FUNCTION FX RETURN NUMBER IS\n"),
+            source_line(2, "BEGIN RETURN 2; END;\n"),
+        ];
+        let mut member = fixture().members.remove(0);
+        member.routine.package = None;
+        member.routine.member = unquoted_identifier("FX");
+        member.object_type = "FUNCTION".into();
+        member.source_sha256 = BTreeMap::from([("FUNCTION".into(), hash_source(&rows).unwrap())]);
+        assert_eq!(
+            verified_closure_source_text(&member, &rows).unwrap(),
+            "FUNCTION FX RETURN NUMBER IS\nBEGIN RETURN 2; END;\n"
+        );
+        let changed = vec![
+            rows[0].clone(),
+            source_line(2, "BEGIN COMMIT; RETURN 2; END;\n"),
+        ];
+        assert!(matches!(
+            verified_closure_source_text(&member, &changed),
+            Err(Revalidation::Stale(_))
+        ));
+        assert!(matches!(
+            verified_closure_source_text(&member, &[rows[1].clone(), rows[0].clone()]),
+            Err(Revalidation::Unknown(_))
+        ));
+        let no_newlines = vec![
+            source_line(1, "FUNCTION FX RETURN NUMBER IS BEGIN -- comment"),
+            source_line(2, "UPDATE APP.T SET N=1; RETURN 2; END;"),
+        ];
+        member.source_sha256 =
+            BTreeMap::from([("FUNCTION".into(), hash_source(&no_newlines).unwrap())]);
+        assert!(
+            verified_closure_source_text(&member, &no_newlines)
+                .unwrap()
+                .contains("-- comment\nUPDATE APP.T"),
+            "a physical source row must end a line comment"
+        );
+        member.source_sha256.clear();
+        assert!(matches!(
+            verified_closure_source_text(&member, &rows),
+            Err(Revalidation::Unknown(_))
+        ));
+    }
 
     fn fixture() -> ClosureFacts {
         let root = RoutineRef {
@@ -954,6 +1134,19 @@ mod tests {
         let result: Result<Vec<OracleRow>, DbError> = Err(DbError::Internal("ORA-00942".into()));
         let mapped = map_catalog_read(result);
         assert!(matches!(mapped, Err(Revalidation::Unknown(_))));
+    }
+
+    #[test]
+    fn closure_dependency_needs_an_observed_null_database_link() {
+        let mut row = OracleRow::default();
+        assert!(require_local_dependency(&row).is_err());
+        row.columns.push((
+            "REFERENCED_LINK_NAME".into(),
+            crate::OracleCell::new("VARCHAR2", None),
+        ));
+        assert!(require_local_dependency(&row).is_ok());
+        row.columns[0].1.value = Some("REMOTE_LAB".into());
+        assert!(require_local_dependency(&row).is_err());
     }
 
     fn pdb_identity_row(dbid: Option<&str>, con_uid: Option<&str>) -> OracleRow {

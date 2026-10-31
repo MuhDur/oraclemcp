@@ -116,7 +116,7 @@ pub use catalog_facts::{
     MAX_CLOSURE_TOTAL_TRIGGERS, MAX_CLOSURE_TRIGGERS, MemberFact, PdbIdentity,
     PdbIdentityObservation, PdbIdentityScope, Revalidation, RoutineClosure, TriggerFact,
     extract_closure_facts, fact_record_valid, read_closure_database_identity,
-    read_pdb_identity_scope, revalidate,
+    read_pdb_identity_scope, read_verified_closure_source, revalidate,
 };
 pub use catalog_query::{
     BindSchema, CatalogAuditClass, CatalogBindKind, CatalogOutputPolicy, CatalogQueryId,

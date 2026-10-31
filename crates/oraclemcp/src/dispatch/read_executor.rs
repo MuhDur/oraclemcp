@@ -680,10 +680,34 @@ pub(super) async fn resolve_query_block_read_with_security_policy(
     verified_local_vector_embedding: bool,
     policy: ReadProofPolicy<'_>,
 ) -> Result<ResolvedRead, ErrorEnvelope> {
+    resolve_query_block_read_with_routines(
+        cx,
+        conn,
+        cache,
+        sql,
+        verified_local_vector_embedding,
+        policy,
+        None,
+    )
+    .await
+}
+
+async fn resolve_query_block_read_with_routines(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    cache: &OracleCatalogResolverCache,
+    sql: &str,
+    verified_local_vector_embedding: bool,
+    policy: ReadProofPolicy<'_>,
+    routines: Option<Arc<dyn oraclemcp_guard::SideEffectOracle>>,
+) -> Result<ResolvedRead, ErrorEnvelope> {
+    let routines = routines.unwrap_or_else(|| Arc::new(oraclemcp_guard::UnknownOracle));
+    let precheck = Classifier::engine_free_baseline(ClassifierConfig::new())
+        .with_oracle(Arc::clone(&routines));
     let initial = if verified_local_vector_embedding {
-        SEMANTIC_READ_PRECHECK_CLASSIFIER.classify_verified_local_vector_embedding(sql)
+        precheck.classify_verified_local_vector_embedding(sql)
     } else {
-        SEMANTIC_READ_PRECHECK_CLASSIFIER.classify(sql)
+        precheck.classify(sql)
     };
     ensure_read_only_decision(initial).map_err(|error| attach_parameterization_hint(error, sql))?;
     let plan = semantic_read_plan_checked(sql)
@@ -760,7 +784,10 @@ pub(super) async fn resolve_query_block_read_with_security_policy(
     }
     let classifier =
         Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded())
-            .with_oracle(Arc::new(proof))
+            .with_oracle(Arc::new(super::served_classifier::ReadAndRoutineOracle {
+                read: proof,
+                routines,
+            }))
             .with_statement_unknown_guarded();
     let decision = if verified_local_vector_embedding {
         classifier.classify_verified_local_vector_embedding(sql)
@@ -813,6 +840,7 @@ fn fga_refusal(code: &'static str) -> ErrorEnvelope {
 /// `executed_sql` (classified == executed), and the single read-only gate
 /// result so both paths reuse them. Behavior is identical to the prior code.
 pub(super) struct ReadExecutionPlan {
+    engine_proof: Option<Arc<super::served_classifier::PreparedClassifier>>,
     pub(super) args: QueryArgs,
     /// The served tool that owns this query's audit record.
     pub(super) audit_tool: String,
@@ -1318,17 +1346,24 @@ impl<'a> GuardedReadExecutor<'a> {
             // classifier (SEC-1). The candidate is then re-marked and put
             // through the SAME semantic read gate as any other statement, so a
             // rewrite can never widen what the read path admits.
+            let engine_proof = Arc::new(
+                state
+                    .profile_classifier
+                    .prepare(cx, state.conn.as_ref(), &state.catalog_cache, &parsed.sql)
+                    .await,
+            );
             let base_decision = if verified_local_vector_embedding {
-                SEMANTIC_READ_PRECHECK_CLASSIFIER
+                engine_proof
+                    .precheck
                     .classify_verified_local_vector_embedding(&parsed.sql)
             } else {
-                SEMANTIC_READ_PRECHECK_CLASSIFIER.classify(&parsed.sql)
+                engine_proof.precheck.classify(&parsed.sql)
             };
             let policy = apply_sql_policy(
                 sql_policy.as_ref(),
                 current_schema.as_deref(),
                 context.principal_key(),
-                &SEMANTIC_READ_PRECHECK_CLASSIFIER,
+                &engine_proof.precheck,
                 &base_decision,
                 &parsed.sql,
             )?;
@@ -1369,29 +1404,20 @@ impl<'a> GuardedReadExecutor<'a> {
                     ));
                 }
             }
-            let classified = if verified_local_vector_embedding {
-                resolve_read_only_relations_with_verified_local_vector_embedding_and_security_policy(
-                    cx,
-                    state.conn.as_ref(),
-                    &state.catalog_cache,
-                    &executed_sql,
+            let classified = resolve_query_block_read_with_routines(
+                cx,
+                state.conn.as_ref(),
+                &state.catalog_cache,
+                &executed_sql,
+                verified_local_vector_embedding,
+                super::read_proof_policy(
                     state.fga_evidence_policy,
                     state.require_security_feature_evidence,
                     state.trusted_views.as_ref(),
-                )
-                .await
-            } else {
-                resolve_read_only_relations_with_security_policy(
-                    cx,
-                    state.conn.as_ref(),
-                    &state.catalog_cache,
-                    &executed_sql,
-                    state.fga_evidence_policy,
-                    state.require_security_feature_evidence,
-                    state.trusted_views.as_ref(),
-                )
-                .await
-            };
+                ),
+                Some(Arc::clone(&engine_proof.oracle)),
+            )
+            .await;
             let (
                 gate,
                 verdict_certificate,
@@ -1420,6 +1446,7 @@ impl<'a> GuardedReadExecutor<'a> {
             let hard_parse_relations = rls_vpd_relations.clone();
             (
                 ReadExecutionPlan {
+                    engine_proof: Some(engine_proof),
                     args: parsed,
                     audit_tool,
                     executed_sql,
@@ -1711,12 +1738,18 @@ impl<'a> GuardedReadExecutor<'a> {
                 // classifier (SEC-1). The candidate is then re-marked and put
                 // through the SAME semantic read gate as any other statement, so a
                 // rewrite can never widen what the read path admits.
+                let engine_proof = Arc::new(
+                    state
+                        .profile_classifier
+                        .prepare(cx, state.conn.as_ref(), &state.catalog_cache, &parsed.sql)
+                        .await,
+                );
                 let policy = apply_sql_policy(
                     sql_policy.as_ref(),
                     current_schema.as_deref(),
                     context.principal_key(),
-                    &SEMANTIC_READ_PRECHECK_CLASSIFIER,
-                    &SEMANTIC_READ_PRECHECK_CLASSIFIER.classify(&parsed.sql),
+                    &engine_proof.precheck,
+                    &engine_proof.precheck.classify(&parsed.sql),
                     &parsed.sql,
                 )?;
                 let policy_sql = policy
@@ -1725,7 +1758,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     .unwrap_or_else(|| parsed.sql.clone());
                 let executed_sql =
                     with_audit_marker(&policy_sql, state.active_profile.as_deref(), "oracle_query");
-                let classified = resolve_query_block_read_with_security_policy(
+                let classified = resolve_query_block_read_with_routines(
                     cx,
                     state.conn.as_ref(),
                     &state.catalog_cache,
@@ -1736,6 +1769,7 @@ impl<'a> GuardedReadExecutor<'a> {
                         require_security_feature_evidence: state.require_security_feature_evidence,
                         trusted_views: state.trusted_views.as_ref(),
                     },
+                    Some(Arc::clone(&engine_proof.oracle)),
                 )
                 .await;
                 let (
@@ -1764,6 +1798,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     ),
                 };
                 ReadExecutionPlan {
+                    engine_proof: Some(engine_proof),
                     args: parsed,
                     audit_tool: "oracle_query".to_owned(),
                     executed_sql,
@@ -1997,6 +2032,7 @@ impl<'a> GuardedReadExecutor<'a> {
             request_subject,
         } = runtime;
         let ReadExecutionPlan {
+            engine_proof,
             args: a,
             audit_tool,
             executed_sql,
@@ -2039,6 +2075,9 @@ impl<'a> GuardedReadExecutor<'a> {
                 // executed); reuse the same verdict here. `executed_sql` is the
                 // marked text that gate was computed against.
                 gate?;
+                if let Some(proof) = &engine_proof {
+                    proof.revalidate(cx, conn).await?;
+                }
                 let binds = a
                     .binds
                     .iter()
@@ -2512,6 +2551,7 @@ impl OracleDispatcher {
     ) -> Result<QueryStreamDelivery, ErrorEnvelope> {
         let (prepared, provenance) = admitted.into_parts();
         let ReadExecutionPlan {
+            engine_proof,
             args: a,
             audit_tool: _,
             executed_sql,
@@ -2528,6 +2568,9 @@ impl OracleDispatcher {
         } = prepared;
         dispatch_checkpoint(cx, "oraclemcp.dispatch.query.row_stream.before")?;
         gate?;
+        if let Some(proof) = &engine_proof {
+            proof.revalidate(cx, conn).await?;
+        }
         let binds = a
             .binds
             .iter()

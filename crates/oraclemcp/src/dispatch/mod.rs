@@ -283,6 +283,10 @@ fn standalone_read_only_policy() -> ProfileDispatchPolicy {
 /// governed exactly as it would be after switching to it. A snapshot that
 /// cannot produce a dispatch policy keeps the strict rule.
 fn install_bound_read_evidence_policies(state: &mut DispatcherState) {
+    state.profile_classifier = served_classifier::ProfileClassifier::activate(
+        state.active_profile.clone(),
+        state.profile_generation.as_ref(),
+    );
     if let Some(lease) = state.profile_generation.as_ref() {
         match profile_dispatch_policy(lease) {
             Ok(policy) => {
@@ -301,6 +305,11 @@ fn install_bound_read_evidence_policies(state: &mut DispatcherState) {
             }
         }
     }
+    state.profile_classifier.set_read_policy(
+        state.fga_evidence_policy,
+        state.require_security_feature_evidence,
+        Arc::clone(&state.trusted_views),
+    );
 }
 
 /// R36: the per-profile FGA evidence rule for reads.
@@ -468,6 +477,7 @@ impl ActiveCustomCatalog {
 }
 
 struct DispatcherState {
+    profile_classifier: served_classifier::ProfileClassifier,
     conn: Box<dyn OracleConnection>,
     stateless_conn: Option<Box<dyn OracleConnection>>,
     active_profile: Option<String>,
@@ -774,6 +784,10 @@ impl OracleDispatcher {
             .and_then(|profile| profile_drain.bind_existing_profile(profile));
         OracleDispatcher {
             state: AsyncMutex::new(DispatcherState {
+                profile_classifier: served_classifier::ProfileClassifier::activate(
+                    active_profile.clone(),
+                    profile_generation.as_ref(),
+                ),
                 conn,
                 stateless_conn: None,
                 active_profile,
@@ -871,6 +885,10 @@ impl OracleDispatcher {
             .and_then(|profile| profile_drain.bind_existing_profile(profile));
         OracleDispatcher {
             state: AsyncMutex::new(DispatcherState {
+                profile_classifier: served_classifier::ProfileClassifier::activate(
+                    active_profile.clone(),
+                    profile_generation.as_ref(),
+                ),
                 conn,
                 stateless_conn: stateless.conn,
                 active_profile,
@@ -1202,6 +1220,11 @@ impl OracleDispatcher {
     pub fn with_fga_evidence_policy(mut self, policy: FgaEvidencePolicy) -> Self {
         if let Ok(state) = self.state.get_mut() {
             state.fga_evidence_policy = policy;
+            state.profile_classifier.set_read_policy(
+                policy,
+                state.require_security_feature_evidence,
+                Arc::clone(&state.trusted_views),
+            );
         }
         self
     }
@@ -1210,6 +1233,11 @@ impl OracleDispatcher {
     fn with_security_feature_evidence_requirement(mut self, required: bool) -> Self {
         if let Ok(state) = self.state.get_mut() {
             state.require_security_feature_evidence = required;
+            state.profile_classifier.set_read_policy(
+                state.fga_evidence_policy,
+                required,
+                Arc::clone(&state.trusted_views),
+            );
         }
         self
     }
@@ -1664,6 +1692,10 @@ impl OracleDispatcher {
                     std::mem::replace(&mut state.stateless_conn, stateless_conn);
                 retired_connections = Some((previous_conn, previous_stateless));
                 retired_generation = state.profile_generation.replace(profile_generation);
+                state.profile_classifier = served_classifier::ProfileClassifier::activate(
+                    state.active_profile.clone(),
+                    state.profile_generation.as_ref(),
+                );
                 state.current_schema = None;
                 state.level = level;
                 state.fga_evidence_policy = fga_evidence_policy;
@@ -1671,6 +1703,14 @@ impl OracleDispatcher {
                 state.require_hard_parse_evidence = require_hard_parse_evidence;
                 state.require_query_cost_estimate = require_query_cost_estimate;
                 state.trusted_views = trusted_views;
+                let routine_fga = state.fga_evidence_policy;
+                let routine_security = state.require_security_feature_evidence;
+                let routine_views = Arc::clone(&state.trusted_views);
+                state.profile_classifier.set_read_policy(
+                    routine_fga,
+                    routine_security,
+                    routine_views,
+                );
                 state.custom_catalog = custom_catalog;
                 state.grant_generation = state.grant_generation.saturating_add(1);
                 state.execute_grants.clear();
@@ -1767,14 +1807,6 @@ static READ_PRECHECK_CLASSIFIER: LazyLock<Classifier> = LazyLock::new(|| {
         ClassifierConfig::new().with_unresolved_qualified_calls_guarded(),
     )
 });
-
-/// Syntax-only first pass for reads that immediately enter the exact catalog
-/// proof. An owner-qualified column is indistinguishable from a paren-less
-/// callable at this point. The final classifier in `resolve_query_block_read`
-/// retains the qualified-call guard and admits only columns proved by the
-/// live catalog for every lexical occurrence.
-static SEMANTIC_READ_PRECHECK_CLASSIFIER: LazyLock<Classifier> =
-    LazyLock::new(|| Classifier::engine_free_baseline(ClassifierConfig::new()));
 
 /// Serialize a slice of rows to a JSON array via the canonical row serializer.
 fn rows_to_json(rows: &[oraclemcp_db::OracleRow]) -> Value {
@@ -5059,6 +5091,7 @@ mod audit_marker;
 use audit_marker::with_audit_marker;
 
 mod read_executor;
+mod served_classifier;
 pub use read_executor::{AdmittedRead, ServerSql};
 use read_executor::{
     GeneratedReadAuditCtx, GuardedGeneratedReadConn, GuardedReadExecutor, ReadOnlyBackstop,
@@ -5804,26 +5837,6 @@ async fn resolve_read_only_relations_with_security_policy(
         cache,
         sql,
         false,
-        read_proof_policy(fga_policy, require_security_feature_evidence, trusted_views),
-    )
-    .await
-}
-
-async fn resolve_read_only_relations_with_verified_local_vector_embedding_and_security_policy(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    cache: &OracleCatalogResolverCache,
-    sql: &str,
-    fga_policy: FgaEvidencePolicy,
-    require_security_feature_evidence: bool,
-    trusted_views: &[String],
-) -> Result<read_executor::ResolvedRead, ErrorEnvelope> {
-    resolve_read_only_relations_inner(
-        cx,
-        conn,
-        cache,
-        sql,
-        true,
         read_proof_policy(fga_policy, require_security_feature_evidence, trusted_views),
     )
     .await
@@ -7681,7 +7694,7 @@ fn execute_approved_args(
         && session.evaluate(Some(grant.required_level)) != LevelDecision::Allow
     {
         return Err(execute_gate_error(
-            &DEFAULT_CLASSIFIER.classify(&grant.sql),
+            &state.profile_classifier.fallback_decision(&grant.sql),
             session.evaluate(Some(grant.required_level)),
             session,
         ));
@@ -7789,6 +7802,7 @@ struct AuditEntryCtx<'a> {
 
 #[derive(Clone)]
 struct DbToolCtx<'a> {
+    profile_classifier: &'a served_classifier::ProfileClassifier,
     cx: &'a Cx,
     conn: &'a dyn OracleConnection,
     read_only_backstop: &'a ReadOnlyBackstop,
@@ -9661,8 +9675,9 @@ async fn execute_sql(
     let timeout_seconds = args.timeout_seconds;
     let completion = if args.commit
         || args.hold
-        || DEFAULT_CLASSIFIER
-            .classify(&args.sql)
+        || ctx
+            .profile_classifier
+            .fallback_decision(&args.sql)
             .non_transactional_effect
     {
         // A held statement's effect survives the call inside the open
@@ -9694,7 +9709,17 @@ async fn execute_sql_inner(
     let active_profile = ctx.active_profile;
     let session = ctx.session;
     let audit = ctx.audit;
-    let base = DEFAULT_CLASSIFIER.classify(&args.sql);
+    let proof = ctx
+        .profile_classifier
+        .prepare(cx, conn, ctx.catalog_cache, &args.sql)
+        .await;
+    let classifier = &proof.classifier;
+    let base = classifier.classify(&args.sql);
+    if base.danger != DangerLevel::Forbidden {
+        proof
+            .require_readonly_routine_closures(&args.sql)
+            .map_err(write_not_started)?;
+    }
     // Arc N: base AND policy. A deny refuses HERE — before the level gate, before
     // a grant can be consumed, before the database is touched. A narrow raises the
     // level the gate must satisfy and, when it carries predicates, hands back a
@@ -9705,7 +9730,7 @@ async fn execute_sql_inner(
         ctx.sql_policy,
         ctx.current_schema,
         Some(ctx.grant_binding.subject_id.as_str()),
-        &DEFAULT_CLASSIFIER,
+        classifier,
         &base,
         &args.sql,
     )
@@ -9898,7 +9923,7 @@ async fn execute_sql_inner(
         .map(json_to_bind)
         .collect::<Result<Vec<_>, _>>()
         .map_err(write_not_started)?;
-    let action_material = action_envelope_material(ActionEnvelopeInput {
+    let action_material = proof.bind_material(action_envelope_material(ActionEnvelopeInput {
         sql: &args.sql,
         binds: &binds,
         kind: action_kind_for_tool(audit_tool, statement_level),
@@ -9909,7 +9934,7 @@ async fn execute_sql_inner(
         max_chars: args.dbms_output_max_chars,
         timeout_seconds: args.timeout_seconds,
         scoped_grant: args.scoped_grant.as_deref(),
-    });
+    }));
     let confirmation_required = args.commit || args.hold || decision.non_transactional_effect;
     let confirmation_idempotency_key = if confirmation_required {
         Some(
@@ -9941,7 +9966,7 @@ async fn execute_sql_inner(
     // the AGENT previewed and submitted; the narrowing is a server-side
     // tightening applied after it, and the caller never saw the rewritten text.
     let executed_sql = with_audit_marker(policy_sql, active_profile, audit_tool);
-    if DEFAULT_CLASSIFIER.classify(&executed_sql) != decision {
+    if classifier.classify(&executed_sql) != decision {
         return Err(ErrorEnvelope::new(
             ErrorClass::Internal,
             "audit marker changed the classifier verdict; refusing to execute",
@@ -9983,6 +10008,7 @@ async fn execute_sql_inner(
         db_evidence: db_evidence.as_ref(),
     };
 
+    proof.revalidate(cx, conn).await?;
     // fsync-before-execute (§5.13): durably log the approved statement BEFORE it
     // runs so a crash between here and the execute leaves the log written and the
     // database untouched. A failed durable append fails the call closed.
@@ -12162,7 +12188,6 @@ async fn deploy_ddl(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Value, Er
 }
 
 async fn deploy_ddl_inner(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Value, ErrorEnvelope> {
-    let active_profile = ctx.active_profile;
     let session = ctx.session;
     let ddl = required_non_empty_arg("deploy_ddl", "ddl", args.ddl)?;
     let deploy_name = non_empty_arg(args.name);
@@ -12210,6 +12235,10 @@ async fn deploy_ddl_inner(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Val
     }
 
     if !args.execute {
+        let proof = ctx
+            .profile_classifier
+            .prepare(ctx.cx, ctx.conn, ctx.catalog_cache, &ddl)
+            .await;
         let mut preview = preview_sql(
             &PreviewSqlArgs {
                 sql: ddl.clone(),
@@ -12223,11 +12252,11 @@ async fn deploy_ddl_inner(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Val
                 timeout_seconds: args.timeout_seconds,
             },
             session,
-            active_profile,
             ctx.execute_grants,
             ctx.grant_binding,
             ctx.sql_policy,
             ctx.current_schema,
+            &proof,
         )?;
         if let Value::Object(map) = &mut preview {
             map.insert("preview".to_owned(), json!(true));
@@ -12286,18 +12315,22 @@ async fn deploy_ddl_inner(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Val
 fn preview_sql(
     args: &PreviewSqlArgs,
     session: &SessionLevelState,
-    active_profile: Option<&str>,
     grants: &ExecGrantStore,
     binding: &ExecGrantBinding,
     sql_policy: Option<&SqlPolicyConfig>,
     current_schema: Option<&str>,
+    proof: &served_classifier::PreparedClassifier,
 ) -> Result<Value, ErrorEnvelope> {
     let sql = args.sql.as_str();
+    let active_profile = proof.active_profile();
     // Previewing never admits or executes SQL. Mirror the read path's explicit
     // text precheck so an ordinary read remains previewable; any later execute
     // still re-enters the strict execution gate, and oracle_query still binds
     // live semantic purity before its own effect.
-    let base = READ_PRECHECK_CLASSIFIER.classify(sql);
+    let base = proof.precheck.classify(sql);
+    if base.danger != DangerLevel::Forbidden {
+        proof.require_readonly_routine_closures(sql)?;
+    }
     // Arc N runs at PREVIEW too, and it has to: the grant is minted here, at the
     // required level. If a policy floor raised that level and preview did not know
     // it, the grant would be issued below the bar and refused at execute — the
@@ -12306,7 +12339,7 @@ fn preview_sql(
         sql_policy,
         current_schema,
         binding,
-        &READ_PRECHECK_CLASSIFIER,
+        &proof.precheck,
         &base,
         sql,
     ) {
@@ -12383,7 +12416,7 @@ fn preview_sql(
                 None
             } else {
                 grants.purge_expired();
-                let material = action_envelope_material(ActionEnvelopeInput {
+                let material = proof.bind_material(action_envelope_material(ActionEnvelopeInput {
                     sql,
                     binds: &typed_binds,
                     kind: execute_action_kind(decision.required_level.unwrap_or(level)),
@@ -12394,7 +12427,7 @@ fn preview_sql(
                     max_chars: args.dbms_output_max_chars,
                     timeout_seconds: args.timeout_seconds,
                     scoped_grant: args.scoped_grant.as_deref(),
-                });
+                }));
                 let raw = grants.issue(
                     &material,
                     binding.clone(),
@@ -13530,12 +13563,24 @@ impl OracleDispatcher {
                     // one must never qualify a policy target on it.
                     state.current_schema = None;
                     retired_generation = state.profile_generation.replace(profile_generation);
+                    state.profile_classifier = served_classifier::ProfileClassifier::activate(
+                        state.active_profile.clone(),
+                        state.profile_generation.as_ref(),
+                    );
                     state.level = level;
                     state.fga_evidence_policy = fga_evidence_policy;
                     state.require_security_feature_evidence = require_security_feature_evidence;
                     state.require_hard_parse_evidence = require_hard_parse_evidence;
                     state.require_query_cost_estimate = require_query_cost_estimate;
                     state.trusted_views = trusted_views;
+                    let routine_fga = state.fga_evidence_policy;
+                    let routine_security = state.require_security_feature_evidence;
+                    let routine_views = Arc::clone(&state.trusted_views);
+                    state.profile_classifier.set_read_policy(
+                        routine_fga,
+                        routine_security,
+                        routine_views,
+                    );
                     state.custom_catalog = custom_catalog;
                     state.grant_generation = state.grant_generation.saturating_add(1);
                     state.execute_grants.clear();
@@ -13756,14 +13801,18 @@ impl OracleDispatcher {
         if tool == "oracle_preview_sql" {
             let a: PreviewSqlArgs = parse_args(name, args)?;
             let binding = grant_binding_for_context(&state, context);
+            let proof = state
+                .profile_classifier
+                .prepare(cx, state.conn.as_ref(), &state.catalog_cache, &a.sql)
+                .await;
             let preview = preview_sql(
                 &a,
                 &scoped_level,
-                state.active_profile.as_deref(),
                 &state.execute_grants,
                 &binding,
                 sql_policy.as_ref(),
                 current_schema.as_deref(),
+                &proof,
             )?;
             remember_execute_approved_token(&mut state, &a.sql, &preview);
             return Ok(preview);
@@ -13809,6 +13858,7 @@ impl OracleDispatcher {
                 subject: &subject,
             };
             let tool_ctx = DbToolCtx {
+                profile_classifier: &state.profile_classifier,
                 cx,
                 conn,
                 read_only_backstop: &state.read_only_backstop,
@@ -13849,6 +13899,7 @@ impl OracleDispatcher {
                 subject: &subject,
             };
             let tool_ctx = DbToolCtx {
+                profile_classifier: &state.profile_classifier,
                 cx,
                 conn,
                 read_only_backstop: &state.read_only_backstop,
@@ -14053,9 +14104,21 @@ impl OracleDispatcher {
             return Ok(response);
         }
         if let Some(loaded) = state.custom_catalog.catalog.get(tool)
-            && loaded.required_level <= OperatingLevel::ReadOnly
+            && loaded
+                .def
+                .sql
+                .as_deref()
+                .is_some_and(|sql| oraclemcp_guard::semantic_read_plan_checked(sql).is_ok())
         {
             let loaded = loaded.clone();
+            let declared = match loaded.def.declared_level.as_deref() {
+                Some(value) => OperatingLevel::parse(value)
+                    .ok_or_else(|| invalid_args("custom tool declared level is invalid"))?,
+                None => OperatingLevel::ReadOnly,
+            };
+            if !matches!(scoped_level.evaluate(Some(declared)), LevelDecision::Allow) {
+                return Err(session_level_gate_error(&scoped_level, declared));
+            }
             let binds = bind_params(&loaded.def, &args)?;
             let ToolBody::InlineSql(sql) = loaded.def.body().map_err(|error| {
                 ErrorEnvelope::new(
@@ -14287,6 +14350,7 @@ impl OracleDispatcher {
                     subject: &subject,
                 };
                 let tool_ctx = DbToolCtx {
+                profile_classifier: &state.profile_classifier,
                     cx,
                     conn,
                     read_only_backstop: &state.read_only_backstop,
@@ -14320,6 +14384,7 @@ impl OracleDispatcher {
                     subject: &subject,
                 };
                 let tool_ctx = DbToolCtx {
+                profile_classifier: &state.profile_classifier,
                     cx,
                     conn,
                     read_only_backstop: &state.read_only_backstop,
@@ -14349,6 +14414,7 @@ impl OracleDispatcher {
                     subject: &subject,
                 };
                 let tool_ctx = DbToolCtx {
+                profile_classifier: &state.profile_classifier,
                     cx,
                     conn,
                     read_only_backstop: &state.read_only_backstop,
@@ -14388,6 +14454,7 @@ impl OracleDispatcher {
                     subject: &subject,
                 };
                 let tool_ctx = DbToolCtx {
+                profile_classifier: &state.profile_classifier,
                     cx,
                     conn,
                     read_only_backstop: &state.read_only_backstop,
@@ -14417,6 +14484,7 @@ impl OracleDispatcher {
                     subject: &subject,
                 };
                 let tool_ctx = DbToolCtx {
+                profile_classifier: &state.profile_classifier,
                     cx,
                     conn,
                     read_only_backstop: &state.read_only_backstop,
@@ -14446,6 +14514,7 @@ impl OracleDispatcher {
                     subject: &subject,
                 };
                 let tool_ctx = DbToolCtx {
+                profile_classifier: &state.profile_classifier,
                     cx,
                     conn,
                     read_only_backstop: &state.read_only_backstop,
@@ -14475,6 +14544,7 @@ impl OracleDispatcher {
                     subject: &subject,
                 };
                 let tool_ctx = DbToolCtx {
+                profile_classifier: &state.profile_classifier,
                     cx,
                     conn,
                     read_only_backstop: &state.read_only_backstop,
@@ -14511,6 +14581,13 @@ impl OracleDispatcher {
                     context.is_local_transport(),
                 );
                 if let Value::Object(map) = &mut value {
+                    if let Some(finding) = state.profile_classifier.finding() {
+                        map.insert("routine_classifier_finding".into(), json!({
+                            "code": finding,
+                            "admission": "unknown",
+                            "next_step": "inspect the routine source, complete catalog access and engine diagnostics before retrying"
+                        }));
+                    }
                     map.insert(
                         "effective_access".to_owned(),
                         effective_access_json(&scoped_level),
@@ -15968,6 +16045,7 @@ impl OracleDispatcher {
                             subject: &request_subject,
                         };
                         let tool_ctx = DbToolCtx {
+                            profile_classifier: &state.profile_classifier,
                             cx,
                             conn,
                             read_only_backstop: &state.read_only_backstop,

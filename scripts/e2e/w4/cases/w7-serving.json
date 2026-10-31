@@ -1,0 +1,227 @@
+[
+  {
+    "case_id": "w4_query_proven_udf_returns_rows",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE FUNCTION ${owner}.FN_W7PURE_${run_id}(n NUMBER) RETURN NUMBER AUTHID DEFINER IS BEGIN RETURN n+1; END;"
+      },
+      {
+        "sql": "DECLARE n NUMBER; BEGIN SELECT ${owner}.FN_W7PURE_${run_id}(1) INTO n FROM dual; IF n <> 2 OR n IS NULL THEN RAISE_APPLICATION_ERROR(-20001,'pure fixture control failed'); END IF; END;"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "sql": "SELECT ${owner}.FN_W7PURE_${run_id}(1) AS N FROM dual"
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "N": "2"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ${owner}.FN_W7PURE_${run_id}(1) FROM dual",
+        "rows": [
+          [
+            2
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [
+      "priv:SELECT_V_SQL"
+    ],
+    "expect": {
+      "error_class": "OPERATING_LEVEL_TOO_LOW"
+    },
+    "audit_expect": [],
+    "audit_zero_executions": true,
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "case_id": "w4_query_dml_udf_refused_no_execution",
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE FUNCTION ${owner}.FN_W7DML_${run_id}(n NUMBER) RETURN NUMBER AUTHID DEFINER IS BEGIN INSERT INTO ${owner}.T_AUTO_${run_id}(ID) VALUES (987); RETURN n; END;"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "sql": "SELECT /* W4MARK_4C12C94CE23BD3DB7DD5 */ ${owner}.FN_W7DML_${run_id}(1) AS N FROM dual"
+      },
+      "vsql_absent_marker": "W4MARK_4C12C94CE23BD3DB7DD5"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID FROM ${owner}.T_AUTO_${run_id} WHERE ID=987",
+        "rows": []
+      }
+    ]
+  },
+  {
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [
+      "priv:SELECT_V_SQL"
+    ],
+    "expect": {
+      "error_class": "OPERATING_LEVEL_TOO_LOW"
+    },
+    "audit_expect": [],
+    "audit_zero_executions": true,
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "case_id": "w4_query_nextval_udf_refused",
+    "setup": [
+      {
+        "sql": "CREATE SEQUENCE ${owner}.SW7_${run_id} START WITH 41 INCREMENT BY 1 NOCACHE"
+      },
+      {
+        "sql": "CREATE OR REPLACE FUNCTION ${owner}.FN_W7SEQ_${run_id} RETURN NUMBER AUTHID DEFINER IS n NUMBER; BEGIN SELECT ${owner}.SW7_${run_id}.NEXTVAL INTO n FROM dual; RETURN n; END;"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "sql": "SELECT /* W4MARK_E03C5C22B362A1E69733 */ ${owner}.FN_W7SEQ_${run_id}() AS N FROM dual"
+      },
+      "vsql_absent_marker": "W4MARK_E03C5C22B362A1E69733"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT LAST_NUMBER FROM ALL_SEQUENCES WHERE SEQUENCE_OWNER='${owner}' AND SEQUENCE_NAME='SW7_${run_id}'",
+        "rows": [
+          [
+            41
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "w4_query_proven_default_udf_returns_rows",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE FUNCTION ${owner}.FN_W7LIT_${run_id}(n NUMBER DEFAULT 1) RETURN NUMBER AUTHID DEFINER IS BEGIN RETURN n+1; END;"
+      },
+      {
+        "sql": "DECLARE n NUMBER; BEGIN SELECT ${owner}.FN_W7LIT_${run_id}() INTO n FROM dual; IF n <> 2 OR n IS NULL THEN RAISE_APPLICATION_ERROR(-20001,'default fixture control failed'); END IF; END;"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "sql": "SELECT ${owner}.FN_W7LIT_${run_id}() AS N FROM dual"
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "N": "2"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ${owner}.FN_W7LIT_${run_id}() FROM dual",
+        "rows": [
+          [
+            2
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [
+      "priv:SELECT_V_SQL"
+    ],
+    "expect": {
+      "error_class": "OPERATING_LEVEL_TOO_LOW"
+    },
+    "audit_expect": [],
+    "audit_zero_executions": true,
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "case_id": "w4_query_default_call_udf_refused_no_execution",
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE FUNCTION ${owner}.FN_W7EVIL_${run_id} RETURN NUMBER AUTHID DEFINER IS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_AUTO_${run_id}(ID) VALUES(998); COMMIT; RETURN 1; END;"
+      },
+      {
+        "sql": "CREATE OR REPLACE FUNCTION ${owner}.FN_W7DEF_${run_id}(n NUMBER DEFAULT ${owner}.FN_W7EVIL_${run_id}()) RETURN NUMBER AUTHID DEFINER IS BEGIN RETURN n; END;"
+      },
+      {
+        "sql": "DECLARE n NUMBER; c NUMBER; BEGIN n := ${owner}.FN_W7DEF_${run_id}(); SELECT COUNT(*) INTO c FROM ${owner}.T_AUTO_${run_id} WHERE ID=998; IF n <> 1 OR c <> 1 THEN RAISE_APPLICATION_ERROR(-20001,'default effect fixture control failed'); END IF; END;"
+      },
+      {
+        "sql": "DELETE FROM ${owner}.T_AUTO_${run_id} WHERE ID=998"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "sql": "SELECT /* W4MARK_1092C7712D374EBC91F8 */ ${owner}.FN_W7DEF_${run_id}() AS N FROM dual"
+      },
+      "vsql_absent_marker": "W4MARK_1092C7712D374EBC91F8"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID FROM ${owner}.T_AUTO_${run_id} WHERE ID=998",
+        "rows": []
+      }
+    ]
+  }
+]

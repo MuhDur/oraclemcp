@@ -316,6 +316,13 @@ impl Purity {
 /// explicit engine-free baseline is available only for callers with an
 /// independent semantic-read proof.
 pub trait SideEffectOracle: Send + Sync {
+    /// Complete effects for an exact caller identity already bound by the
+    /// serving consumer. `Some(Unknown)` is an explicit failed proof. `None`
+    /// supplies no additional effect authority beyond the purity port.
+    fn routine_call_effects(&self, routine: &ObjectRef) -> Option<RoutineEffectsV1> {
+        let _ = routine;
+        None
+    }
     /// Confirm that this exact value reference was proved to be a column in
     /// every lexical occurrence before a strict classifier treats a dotted,
     /// parenthesis-free expression as data rather than a possible routine.
@@ -534,6 +541,19 @@ impl OperatorPureFunctionRestriction {
 }
 
 impl SideEffectOracle for OperatorPureFunctionRestriction {
+    fn routine_call_effects(&self, routine: &ObjectRef) -> Option<RoutineEffectsV1> {
+        self.independent
+            .routine_call_effects(routine)
+            .map(|effects| {
+                if effects.iter().all(|effect| effect == RoutineEffect::ReadDb)
+                    && !self.allowlist.permits(routine)
+                {
+                    RoutineEffectsV1::new([RoutineEffect::Unknown])
+                } else {
+                    effects
+                }
+            })
+    }
     fn routine_purity(&self, routine: &ObjectRef) -> Purity {
         match self.independent.routine_purity(routine) {
             Purity::ProvenReadOnly if self.allowlist.permits(routine) => Purity::ProvenReadOnly,

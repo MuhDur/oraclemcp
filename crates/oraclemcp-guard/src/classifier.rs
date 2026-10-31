@@ -41,7 +41,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlparser::ast::{
     Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, OrderByKind, Query,
-    Select, SelectItem, SetExpr, TableAlias, TableFactor, TableWithJoins, Visit, Visitor,
+    Select, SelectItem, SetExpr, Statement, TableAlias, TableFactor, TableWithJoins, Visit,
+    Visitor,
 };
 use sqlparser::dialect::OracleDialect;
 use sqlparser::keywords::Keyword;
@@ -55,8 +56,8 @@ use crate::edition_lifecycle::{EditionLifecycleParse, parse_edition_lifecycle_sq
 use crate::enforcement::alter_session_policy;
 use crate::levels::{DangerLevel, LevelDecision, OperatingLevel, SessionLevelState};
 use crate::purity::{
-    AdmissionContext, ObjectRef, Purity, RoutineArgument, RoutineArgumentValue, RoutineIdentifier,
-    RoutineRef, SideEffectOracle, UnknownOracle, admit,
+    AdmissionContext, ObjectRef, Purity, RoutineArgument, RoutineArgumentValue, RoutineEffect,
+    RoutineIdentifier, RoutineRef, SideEffectOracle, UnknownOracle, admit,
 };
 use crate::resolver::{
     QuoteSemantics, RawName, RawNamePart, SemanticReadPlan, StatementRelation, StatementScope,
@@ -3682,6 +3683,28 @@ fn classify_statement(
             let all_proven = calls
                 .iter()
                 .all(|c| oracle.routine_purity(c).permits_safe());
+            let mut effect_floor = OperatingLevel::ReadOnly;
+            for call in &calls {
+                if let Some(effects) = oracle.routine_call_effects(call) {
+                    let Ok(level) = admit(&effects, AdmissionContext::CustomToolCall) else {
+                        return StatementClass {
+                            danger: DangerLevel::Forbidden,
+                            required: None,
+                            objects: calls.iter().map(|call| call.name.clone()).collect(),
+                            r15_derivation: Some(R15Derivation::UnprovenPresent),
+                        };
+                    };
+                    if effects.iter().any(|effect| effect != RoutineEffect::ReadDb) {
+                        return StatementClass {
+                            danger: DangerLevel::Forbidden,
+                            required: None,
+                            objects: calls.iter().map(|call| call.name.clone()).collect(),
+                            r15_derivation: Some(R15Derivation::UnprovenPresent),
+                        };
+                    }
+                    effect_floor = effect_floor.max(level);
+                }
+            }
             // The engine's trigger/VPD walk also gets a say: a UDF-free SELECT
             // can still fire side-effecting database logic the SQL text never
             // names. The default `UnknownOracle` leaves that statement-level
@@ -3716,6 +3739,7 @@ fn classify_statement(
             };
             let has_unresolved_call = !unresolved_calls.is_empty();
             let stmt_pure = (calls.is_empty() || all_proven)
+                && effect_floor == OperatingLevel::ReadOnly
                 && !stmt_blocks_safe
                 && !has_row_lock
                 && !has_unresolved_call;
@@ -3738,8 +3762,12 @@ fn classify_statement(
                 }
                 objects.extend(unresolved_calls);
                 StatementClass {
-                    danger: DangerLevel::Guarded,
-                    required: Some(OperatingLevel::ReadWrite),
+                    danger: if effect_floor >= OperatingLevel::Ddl {
+                        DangerLevel::Destructive
+                    } else {
+                        DangerLevel::Guarded
+                    },
+                    required: Some(OperatingLevel::ReadWrite.max(effect_floor)),
                     objects,
                     r15_derivation,
                 }
@@ -4109,6 +4137,7 @@ impl Classifier {
     #[must_use]
     pub fn classify(&self, sql: &str) -> GuardDecision {
         let decision = self.classify_raw(sql, false);
+        let decision = self.tighten_dml_routine_effects(sql, decision);
         let certificate = VerdictCertificate::from_decision(sql, &decision);
         decision.with_verdict_certificate(certificate)
     }
@@ -4124,8 +4153,76 @@ impl Classifier {
     #[must_use]
     pub fn classify_verified_local_vector_embedding(&self, sql: &str) -> GuardDecision {
         let decision = self.classify_raw(sql, true);
+        let decision = self.tighten_dml_routine_effects(sql, decision);
         let certificate = VerdictCertificate::from_decision(sql, &decision);
         decision.with_verdict_certificate(certificate)
+    }
+
+    fn tighten_dml_routine_effects(&self, sql: &str, mut decision: GuardDecision) -> GuardDecision {
+        let Some(mut required) = decision.required_level else {
+            return decision;
+        };
+        let Ok(statements) = Parser::parse_sql(&OracleDialect {}, sql) else {
+            return decision;
+        };
+        struct FunctionNames(HashSet<String>);
+        impl Visitor for FunctionNames {
+            type Break = ();
+            fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+                if let Expr::Function(function) = expr {
+                    self.0
+                        .insert(function.name.to_string().to_ascii_uppercase());
+                }
+                ControlFlow::Continue(())
+            }
+        }
+        let mut names = FunctionNames(HashSet::new());
+        for statement in &statements {
+            if matches!(
+                statement,
+                Statement::Insert(_)
+                    | Statement::Update(_)
+                    | Statement::Delete(_)
+                    | Statement::Merge { .. }
+            ) {
+                let _ = statement.visit(&mut names);
+            }
+        }
+        for call in user_defined_calls(sql, false) {
+            let key = match &call.schema {
+                Some(schema) => format!("{schema}.{}", call.name),
+                None => call.name.clone(),
+            }
+            .to_ascii_uppercase();
+            if !names.0.contains(&key) {
+                continue;
+            }
+            if let Some(effects) = self.oracle.routine_call_effects(&call) {
+                let Ok(level) = admit(&effects, AdmissionContext::CustomToolCall) else {
+                    return forbidden_decision(
+                        "DML routine closure has an unproven or prohibited effect".to_owned(),
+                    )
+                    .categorized(
+                        ReasonCategory::UnprovenSideEffect,
+                        Some("routine closure".to_owned()),
+                    );
+                };
+                required = required.max(level);
+            }
+        }
+        if decision.required_level != Some(required) {
+            decision.required_level = Some(required);
+            decision.danger = decision.danger.max(if required >= OperatingLevel::Ddl {
+                DangerLevel::Destructive
+            } else {
+                DangerLevel::Guarded
+            });
+            decision.reason_category = Some(ReasonCategory::RequiresHigherLevel);
+            decision
+                .reason
+                .push_str("; required level raised by the routine closure effects");
+        }
+        decision
     }
 
     /// Classification implementation before the response/audit witness is
@@ -4662,6 +4759,65 @@ mod tests {
     }
 
     struct ExactRoutineOracle(RoutineEffect);
+
+    struct ServedEffects(RoutineEffect);
+    impl SideEffectOracle for ServedEffects {
+        fn routine_purity(&self, _: &ObjectRef) -> Purity {
+            Purity::ProvenReadOnly
+        }
+        fn statement_purity(&self, _: &[ObjectRef]) -> Purity {
+            Purity::ProvenReadOnly
+        }
+        fn routine_call_effects(&self, _: &ObjectRef) -> Option<RoutineEffectsV1> {
+            Some(RoutineEffectsV1::new([self.0]))
+        }
+    }
+
+    #[test]
+    fn served_select_effects_refuse_side_effects_even_with_a_purity_claim() {
+        for effect in [
+            RoutineEffect::ReadDb,
+            RoutineEffect::Dml,
+            RoutineEffect::SessionState,
+            RoutineEffect::Ddl,
+            RoutineEffect::Admin,
+            RoutineEffect::SequenceAdvance,
+            RoutineEffect::Unknown,
+        ] {
+            let classifier = Classifier::default().with_oracle(Arc::new(ServedEffects(effect)));
+            let decision = classifier.classify("SELECT APP.FX(1) FROM DUAL");
+            if effect == RoutineEffect::ReadDb {
+                assert_eq!(decision.required_level, Some(OperatingLevel::ReadOnly));
+            } else {
+                assert_eq!(decision.required_level, None, "{effect:?}");
+                assert_eq!(decision.danger, DangerLevel::Forbidden);
+            }
+        }
+    }
+
+    #[test]
+    fn served_dml_effect_level_is_the_maximum_and_unknown_refuses() {
+        for (effect, expected) in [
+            (RoutineEffect::ReadDb, Some(OperatingLevel::ReadWrite)),
+            (RoutineEffect::Dml, Some(OperatingLevel::ReadWrite)),
+            (RoutineEffect::Ddl, Some(OperatingLevel::Ddl)),
+            (RoutineEffect::Admin, Some(OperatingLevel::Admin)),
+            (RoutineEffect::Unknown, None),
+            (RoutineEffect::Autonomous, None),
+        ] {
+            let classifier = Classifier::default().with_oracle(Arc::new(ServedEffects(effect)));
+            for sql in [
+                "UPDATE APP.T SET N=APP.FX(1) WHERE ID=1",
+                "UPDATE APP.T SET N=APP.FX(1) WHERE ID=1; DELETE FROM APP.T WHERE ID=2",
+            ] {
+                assert_eq!(
+                    classifier.classify(sql).required_level,
+                    expected,
+                    "{effect:?}: {sql}"
+                );
+            }
+        }
+    }
 
     impl SideEffectOracle for ExactRoutineOracle {
         fn resolve_routine(

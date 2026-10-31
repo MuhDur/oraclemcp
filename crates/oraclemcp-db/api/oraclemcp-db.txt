@@ -830,6 +830,7 @@ pub async fn oraclemcp_db::catalog_facts::extract_closure_facts(&asupersync::cx:
 pub fn oraclemcp_db::catalog_facts::fact_record_valid(&oraclemcp_db::catalog_facts::ClosureFacts) -> bool
 pub async fn oraclemcp_db::catalog_facts::read_closure_database_identity(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<oraclemcp_db::catalog_facts::ClosureDatabaseIdentity, oraclemcp_db::catalog_facts::Revalidation>
 pub async fn oraclemcp_db::catalog_facts::read_pdb_identity_scope(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> oraclemcp_db::catalog_facts::PdbIdentityScope
+pub async fn oraclemcp_db::catalog_facts::read_verified_closure_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &oraclemcp_db::catalog_facts::MemberFact) -> core::result::Result<alloc::string::String, oraclemcp_db::catalog_facts::Revalidation>
 pub async fn oraclemcp_db::catalog_facts::revalidate(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &dyn oraclemcp_db::catalog_facts::ClosureFactStore, &str, &oraclemcp_db::catalog_facts::RoutineClosure, &oraclemcp_db::catalog_facts::ClosureFactKey, core::option::Option<u64>) -> oraclemcp_db::catalog_facts::Revalidation
 pub fn oraclemcp_db::catalog_facts::routine_object_name(&oraclemcp_guard::purity::RoutineRef) -> core::option::Option<alloc::string::String>
 pub fn oraclemcp_db::catalog_facts::unquoted_identifier(impl core::convert::Into<alloc::string::String>) -> oraclemcp_guard::purity::RoutineIdentifier
@@ -13856,6 +13857,7 @@ pub async fn oraclemcp_db::read_query(&asupersync::cx::cx::Cx, &dyn oraclemcp_db
 pub async fn oraclemcp_db::read_query_as_of(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &[oraclemcp_db::OracleBind], oraclemcp_db::QueryCaps, usize, &oraclemcp_db::SerializeOptions, &oraclemcp_db::AsOf) -> core::result::Result<oraclemcp_db::QueryResponse, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::read_query_named(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &[(alloc::string::String, oraclemcp_db::OracleBind)], oraclemcp_db::QueryCaps, usize, &oraclemcp_db::SerializeOptions) -> core::result::Result<oraclemcp_db::QueryResponse, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::read_session_security_context(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<oraclemcp_db::OracleSessionSecurityContext, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::read_verified_closure_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &oraclemcp_db::catalog_facts::MemberFact) -> core::result::Result<alloc::string::String, oraclemcp_db::catalog_facts::Revalidation>
 pub fn oraclemcp_db::read_wallet_file_bounded(&std::path::Path) -> core::result::Result<alloc::vec::Vec<u8>, oraclemcp_db::WalletFileReadError>
 pub fn oraclemcp_db::recompile_with_plscope_statements(&str, &str, &str) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_db::DbError>
 pub const fn oraclemcp_db::redacted_named_oracle_binds(&[(alloc::string::String, oraclemcp_db::OracleBind)]) -> oraclemcp_db::RedactedNamedOracleBinds<'_>

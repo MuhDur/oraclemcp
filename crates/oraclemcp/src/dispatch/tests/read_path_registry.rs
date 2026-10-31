@@ -7,9 +7,11 @@ use oraclemcp_db::{CatalogBindKind, ReadQueryProvenance};
 enum ToolRoute {
     NoSql,
     CallerOrServerRead,
+    ProfileRoutineRead,
     CatalogRead,
     TemporaryDml,
     PrivilegedApply,
+    ProfileRoutineApply,
 }
 
 fn registered_route(name: &str) -> Option<ToolRoute> {
@@ -22,20 +24,16 @@ fn registered_route(name: &str) -> Option<ToolRoute> {
         "oracle_query"
         | "query"
         | "oracle_semantic_search"
-        | "oracle_diff"
         | "oracle_sample_rows"
         | "oracle_read_clob"
-        | "get_clob"
-        | "oracle_explain_plan" => Read,
+        | "get_clob" => ToolRoute::ProfileRoutineRead,
+        "oracle_diff" | "oracle_explain_plan" => Read,
         // The preview executes guarded DML under a savepoint and rolls it
         // back; it does not issue a read query to the provenance connection.
         "oracle_preview_dml" => ToolRoute::TemporaryDml,
-        "oracle_preview_sql"
-        | "preview_sql"
-        | "oracle_execute"
-        | "execute_approved"
-        | "deploy_ddl"
-        | "oracle_compile_object"
+        "oracle_preview_sql" | "preview_sql" | "oracle_execute" | "execute_approved"
+        | "deploy_ddl" => ToolRoute::ProfileRoutineApply,
+        "oracle_compile_object"
         | "compile_object"
         | "compile_with_warnings"
         | "oracle_create_or_replace"
@@ -87,7 +85,9 @@ fn registered_route(name: &str) -> Option<ToolRoute> {
 fn registry_accepts(name: &str, reclassified_at_apply: bool) -> Result<(), &'static str> {
     match registered_route(name) {
         None => Err("unregistered path"),
-        Some(ToolRoute::PrivilegedApply) if !reclassified_at_apply => {
+        Some(ToolRoute::PrivilegedApply | ToolRoute::ProfileRoutineApply)
+            if !reclassified_at_apply =>
+        {
             Err("privileged path has no apply-time reclassification")
         }
         Some(_) => Ok(()),
@@ -107,7 +107,7 @@ fn validate_dispatched_provenance(
     let tagged_after = log.tags.lock().expect("provenance log").len();
     if matches!(
         route,
-        ToolRoute::CallerOrServerRead | ToolRoute::CatalogRead
+        ToolRoute::CallerOrServerRead | ToolRoute::ProfileRoutineRead | ToolRoute::CatalogRead
     ) && tagged_after == tagged_before
     {
         return Err("DB read route issued no provenance-tagged query");
@@ -332,8 +332,14 @@ fn privileged_paths_reclassify_at_apply() {
         "patch_view",
         "read_patch_preview",
     ] {
-        assert_eq!(registered_route(name), Some(ToolRoute::PrivilegedApply));
+        let expected = if matches!(name, "oracle_execute" | "execute_approved" | "deploy_ddl") {
+            ToolRoute::ProfileRoutineApply
+        } else {
+            ToolRoute::PrivilegedApply
+        };
+        assert_eq!(registered_route(name), Some(expected));
         assert!(registry_accepts(name, true).is_ok());
+        assert!(registry_accepts(name, false).is_err());
         assert!(
             crate::registry::tool_names().contains(&name),
             "apply path {name} is absent from the advertised registry"
@@ -347,4 +353,31 @@ fn synthetic_privileged_path_without_reclassification_fails() {
         registry_accepts("synthetic_write_without_apply_gate", false),
         Err("privileged path has no apply-time reclassification")
     );
+}
+
+#[test]
+fn served_custom_read_keeps_the_operators_declared_level_floor() {
+    let defs = oraclemcp_core::parse_tools_file("[[tool]]\nname='app_guarded_scalar'\ndescription='Operator restricted read'\nsql='SELECT 1 FROM DUAL'\ndeclared_level='READ_WRITE'\n").unwrap();
+    let loaded = oraclemcp_core::load_tools(
+        &defs,
+        &Classifier::engine_free_baseline(ClassifierConfig::new()),
+        OperatingLevel::ReadWrite,
+    )
+    .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let dispatcher = OracleDispatcher::new_switchable_with_custom_tools(
+        Box::new(ZeroCallOracleConnection {
+            calls: Arc::clone(&calls),
+        }),
+        Some("dev".into()),
+        default_read_only_level(),
+        Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
+        CustomToolCatalog::new(loaded),
+        None,
+    );
+    let error = dispatcher
+        .dispatch("app_guarded_scalar", json!({}))
+        .unwrap_err();
+    assert_eq!(error.error_class, ErrorClass::OperatingLevelTooLow);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }

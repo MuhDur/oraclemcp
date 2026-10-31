@@ -2527,10 +2527,10 @@ order by owner, name, referenced_owner, referenced_name"#
                 Diagnostic,
             ),
             Self::ClosureRoutineAuthid => (
-                "SELECT authid, overload FROM (SELECT authid, overload FROM SYS.all_procedures \
+                "SELECT authid, subprogram_id, overload FROM (SELECT authid, subprogram_id, overload FROM SYS.all_procedures \
                    WHERE owner = :1 AND object_name = :2 \
                      AND ((:3 IS NULL AND procedure_name IS NULL) OR procedure_name = :4) \
-                   ORDER BY overload) WHERE ROWNUM <= :5",
+                   ORDER BY subprogram_id) WHERE ROWNUM <= :5",
                 TTNNI,
                 "read one bounded exact routine AUTHID",
                 DictionaryMetadata,

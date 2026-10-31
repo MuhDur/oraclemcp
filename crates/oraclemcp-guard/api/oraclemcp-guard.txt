@@ -5927,6 +5927,7 @@ pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::new(alloc::sync
 impl oraclemcp_guard::purity::SideEffectOracle for oraclemcp_guard::purity::OperatorPureFunctionRestriction
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::proves_value_column(&self, &oraclemcp_guard::resolver::RawName) -> bool
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::resolve_routine(&self, &oraclemcp_guard::purity::RoutineRef, &[oraclemcp_guard::purity::RoutineArgument]) -> core::option::Option<oraclemcp_guard::purity::RoutineRef>
+pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::routine_call_effects(&self, &oraclemcp_guard::purity::ObjectRef) -> core::option::Option<oraclemcp_guard::purity::RoutineEffectsV1>
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::routine_effects(&self, &oraclemcp_guard::purity::RoutineRef) -> oraclemcp_guard::purity::RoutineEffectsV1
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
@@ -6216,6 +6217,7 @@ impl core::marker::Copy for oraclemcp_guard::purity::UnknownOracle
 impl oraclemcp_guard::purity::SideEffectOracle for oraclemcp_guard::purity::UnknownOracle
 pub fn oraclemcp_guard::purity::UnknownOracle::proves_value_column(&self, &oraclemcp_guard::resolver::RawName) -> bool
 pub fn oraclemcp_guard::purity::UnknownOracle::resolve_routine(&self, &oraclemcp_guard::purity::RoutineRef, &[oraclemcp_guard::purity::RoutineArgument]) -> core::option::Option<oraclemcp_guard::purity::RoutineRef>
+pub fn oraclemcp_guard::purity::UnknownOracle::routine_call_effects(&self, &oraclemcp_guard::purity::ObjectRef) -> core::option::Option<oraclemcp_guard::purity::RoutineEffectsV1>
 pub fn oraclemcp_guard::purity::UnknownOracle::routine_effects(&self, &oraclemcp_guard::purity::RoutineRef) -> oraclemcp_guard::purity::RoutineEffectsV1
 pub fn oraclemcp_guard::purity::UnknownOracle::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
 pub fn oraclemcp_guard::purity::UnknownOracle::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
@@ -6262,18 +6264,21 @@ pub fn oraclemcp_guard::purity::UnknownOracle::vzip(self) -> V
 pub trait oraclemcp_guard::purity::SideEffectOracle: core::marker::Send + core::marker::Sync
 pub fn oraclemcp_guard::purity::SideEffectOracle::proves_value_column(&self, &oraclemcp_guard::resolver::RawName) -> bool
 pub fn oraclemcp_guard::purity::SideEffectOracle::resolve_routine(&self, &oraclemcp_guard::purity::RoutineRef, &[oraclemcp_guard::purity::RoutineArgument]) -> core::option::Option<oraclemcp_guard::purity::RoutineRef>
+pub fn oraclemcp_guard::purity::SideEffectOracle::routine_call_effects(&self, &oraclemcp_guard::purity::ObjectRef) -> core::option::Option<oraclemcp_guard::purity::RoutineEffectsV1>
 pub fn oraclemcp_guard::purity::SideEffectOracle::routine_effects(&self, &oraclemcp_guard::purity::RoutineRef) -> oraclemcp_guard::purity::RoutineEffectsV1
 pub fn oraclemcp_guard::purity::SideEffectOracle::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
 pub fn oraclemcp_guard::purity::SideEffectOracle::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
 impl oraclemcp_guard::purity::SideEffectOracle for oraclemcp_guard::purity::OperatorPureFunctionRestriction
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::proves_value_column(&self, &oraclemcp_guard::resolver::RawName) -> bool
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::resolve_routine(&self, &oraclemcp_guard::purity::RoutineRef, &[oraclemcp_guard::purity::RoutineArgument]) -> core::option::Option<oraclemcp_guard::purity::RoutineRef>
+pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::routine_call_effects(&self, &oraclemcp_guard::purity::ObjectRef) -> core::option::Option<oraclemcp_guard::purity::RoutineEffectsV1>
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::routine_effects(&self, &oraclemcp_guard::purity::RoutineRef) -> oraclemcp_guard::purity::RoutineEffectsV1
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
 impl oraclemcp_guard::purity::SideEffectOracle for oraclemcp_guard::purity::UnknownOracle
 pub fn oraclemcp_guard::purity::UnknownOracle::proves_value_column(&self, &oraclemcp_guard::resolver::RawName) -> bool
 pub fn oraclemcp_guard::purity::UnknownOracle::resolve_routine(&self, &oraclemcp_guard::purity::RoutineRef, &[oraclemcp_guard::purity::RoutineArgument]) -> core::option::Option<oraclemcp_guard::purity::RoutineRef>
+pub fn oraclemcp_guard::purity::UnknownOracle::routine_call_effects(&self, &oraclemcp_guard::purity::ObjectRef) -> core::option::Option<oraclemcp_guard::purity::RoutineEffectsV1>
 pub fn oraclemcp_guard::purity::UnknownOracle::routine_effects(&self, &oraclemcp_guard::purity::RoutineRef) -> oraclemcp_guard::purity::RoutineEffectsV1
 pub fn oraclemcp_guard::purity::UnknownOracle::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
 pub fn oraclemcp_guard::purity::UnknownOracle::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
@@ -17850,6 +17855,7 @@ pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::new(alloc::sync
 impl oraclemcp_guard::purity::SideEffectOracle for oraclemcp_guard::purity::OperatorPureFunctionRestriction
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::proves_value_column(&self, &oraclemcp_guard::resolver::RawName) -> bool
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::resolve_routine(&self, &oraclemcp_guard::purity::RoutineRef, &[oraclemcp_guard::purity::RoutineArgument]) -> core::option::Option<oraclemcp_guard::purity::RoutineRef>
+pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::routine_call_effects(&self, &oraclemcp_guard::purity::ObjectRef) -> core::option::Option<oraclemcp_guard::purity::RoutineEffectsV1>
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::routine_effects(&self, &oraclemcp_guard::purity::RoutineRef) -> oraclemcp_guard::purity::RoutineEffectsV1
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
@@ -20173,6 +20179,7 @@ impl core::marker::Copy for oraclemcp_guard::purity::UnknownOracle
 impl oraclemcp_guard::purity::SideEffectOracle for oraclemcp_guard::purity::UnknownOracle
 pub fn oraclemcp_guard::purity::UnknownOracle::proves_value_column(&self, &oraclemcp_guard::resolver::RawName) -> bool
 pub fn oraclemcp_guard::purity::UnknownOracle::resolve_routine(&self, &oraclemcp_guard::purity::RoutineRef, &[oraclemcp_guard::purity::RoutineArgument]) -> core::option::Option<oraclemcp_guard::purity::RoutineRef>
+pub fn oraclemcp_guard::purity::UnknownOracle::routine_call_effects(&self, &oraclemcp_guard::purity::ObjectRef) -> core::option::Option<oraclemcp_guard::purity::RoutineEffectsV1>
 pub fn oraclemcp_guard::purity::UnknownOracle::routine_effects(&self, &oraclemcp_guard::purity::RoutineRef) -> oraclemcp_guard::purity::RoutineEffectsV1
 pub fn oraclemcp_guard::purity::UnknownOracle::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
 pub fn oraclemcp_guard::purity::UnknownOracle::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
@@ -20409,18 +20416,21 @@ pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::resolve(&self, &ora
 pub trait oraclemcp_guard::SideEffectOracle: core::marker::Send + core::marker::Sync
 pub fn oraclemcp_guard::SideEffectOracle::proves_value_column(&self, &oraclemcp_guard::resolver::RawName) -> bool
 pub fn oraclemcp_guard::SideEffectOracle::resolve_routine(&self, &oraclemcp_guard::purity::RoutineRef, &[oraclemcp_guard::purity::RoutineArgument]) -> core::option::Option<oraclemcp_guard::purity::RoutineRef>
+pub fn oraclemcp_guard::SideEffectOracle::routine_call_effects(&self, &oraclemcp_guard::purity::ObjectRef) -> core::option::Option<oraclemcp_guard::purity::RoutineEffectsV1>
 pub fn oraclemcp_guard::SideEffectOracle::routine_effects(&self, &oraclemcp_guard::purity::RoutineRef) -> oraclemcp_guard::purity::RoutineEffectsV1
 pub fn oraclemcp_guard::SideEffectOracle::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
 pub fn oraclemcp_guard::SideEffectOracle::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
 impl oraclemcp_guard::purity::SideEffectOracle for oraclemcp_guard::purity::OperatorPureFunctionRestriction
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::proves_value_column(&self, &oraclemcp_guard::resolver::RawName) -> bool
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::resolve_routine(&self, &oraclemcp_guard::purity::RoutineRef, &[oraclemcp_guard::purity::RoutineArgument]) -> core::option::Option<oraclemcp_guard::purity::RoutineRef>
+pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::routine_call_effects(&self, &oraclemcp_guard::purity::ObjectRef) -> core::option::Option<oraclemcp_guard::purity::RoutineEffectsV1>
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::routine_effects(&self, &oraclemcp_guard::purity::RoutineRef) -> oraclemcp_guard::purity::RoutineEffectsV1
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
 pub fn oraclemcp_guard::purity::OperatorPureFunctionRestriction::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
 impl oraclemcp_guard::purity::SideEffectOracle for oraclemcp_guard::purity::UnknownOracle
 pub fn oraclemcp_guard::purity::UnknownOracle::proves_value_column(&self, &oraclemcp_guard::resolver::RawName) -> bool
 pub fn oraclemcp_guard::purity::UnknownOracle::resolve_routine(&self, &oraclemcp_guard::purity::RoutineRef, &[oraclemcp_guard::purity::RoutineArgument]) -> core::option::Option<oraclemcp_guard::purity::RoutineRef>
+pub fn oraclemcp_guard::purity::UnknownOracle::routine_call_effects(&self, &oraclemcp_guard::purity::ObjectRef) -> core::option::Option<oraclemcp_guard::purity::RoutineEffectsV1>
 pub fn oraclemcp_guard::purity::UnknownOracle::routine_effects(&self, &oraclemcp_guard::purity::RoutineRef) -> oraclemcp_guard::purity::RoutineEffectsV1
 pub fn oraclemcp_guard::purity::UnknownOracle::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
 pub fn oraclemcp_guard::purity::UnknownOracle::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
