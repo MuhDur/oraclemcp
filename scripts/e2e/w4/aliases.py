@@ -167,10 +167,57 @@ def _dependency_digest(api, graph):
     return hashlib.sha256(b"omcp/dependents-closure/v1\0" + encoded).digest()
 
 
+def _native_dependency_edges(api, connection, graph):
+    """Reread both directions at every published frontier, including missing nodes."""
+    nodes = [*graph["roots"], *graph["nodes"]]
+    objects = [node["object"] for node in nodes]
+    api.require(0 < len(graph["requested_roots"]) <= 32
+                and len(objects) <= 1032, "native dependency frontier exceeds collector bounds")
+    requested = json.dumps(objects, ensure_ascii=False, separators=(",", ":"))
+    api.require(len(requested.encode()) <= 32767, "native dependency frontier exceeds bind bound")
+    rows = connection.cursor().execute("""SELECT * FROM (
+        WITH bound AS (
+            SELECT j.owner, j.name, j.object_type
+            FROM JSON_TABLE(:1, '$[*]' COLUMNS (
+                owner VARCHAR2(128) PATH '$.owner', name VARCHAR2(128) PATH '$.name',
+                object_type VARCHAR2(30) PATH '$.object_type')) j
+        )
+        SELECT DISTINCT d.owner, d.name, d.type, d.referenced_owner, d.referenced_name,
+            d.referenced_type, o.object_id, d.referenced_link_name, d.dependency_type
+        FROM SYS.ALL_DEPENDENCIES d
+        LEFT JOIN SYS.ALL_OBJECTS o ON d.referenced_link_name IS NULL
+            AND o.owner=d.referenced_owner AND o.object_name=d.referenced_name
+            AND o.object_type=d.referenced_type AND o.subobject_name IS NULL
+        WHERE EXISTS (SELECT 1 FROM bound b
+            WHERE (d.owner=b.owner AND d.name=b.name AND d.type=b.object_type)
+            OR ((d.referenced_owner=b.owner OR d.referenced_owner IS NULL)
+                AND d.referenced_name=b.name
+                AND (d.referenced_type=b.object_type OR d.referenced_type IS NULL
+                    OR d.referenced_type='NON-EXISTENT')))
+        ) WHERE ROWNUM <= 8001""", (requested,)).fetchall()
+    api.require(len(rows) <= 8000, "native dependency edge reread exceeds collector bound")
+
+    def obj(values):
+        return dict(zip(("owner", "name", "object_type"), values)) if all(values) else None
+
+    observed = [{"dependent": obj(row[:3]), "referenced": obj(row[3:6]),
+                 "referenced_object_id": row[6], "referenced_link_name": row[7],
+                 "dependency_type": row[8]} for row in rows]
+    api.require(sorted(map(api.compact, observed)) == sorted(map(api.compact, graph["edges"])),
+                "dependency edge set differs from native ALL_DEPENDENCIES reread")
+    if not graph["truncated"]:
+        identities = {api.compact(value) for value in objects}
+        for edge in observed:
+            if edge["referenced_link_name"] is None and api.compact(edge["referenced"]) in identities:
+                api.require(api.compact(edge["dependent"]) in identities,
+                            "complete dependency closure omits a native dependent")
+
+
 def _native_dependency_facts(api, connection, graph):
     digest = _dependency_digest(api, graph)
     api.require(digest == _digest_bytes(api, graph["dependency_hash"]),
                 "dependency_hash differs from its complete dependency facts")
+    _native_dependency_edges(api, connection, graph)
     observed = []
     for node in [*graph["roots"], *graph["nodes"]]:
         obj = node["object"]
@@ -239,25 +286,34 @@ def _validate_impact_preview(api, connection, payload, reread_graph=None):
 
 def binding_freshness_selftest(api):
     """Checker units; live alias runs perform the actual independent reads."""
+    api.require(VERIFIED_FRESHNESS_PATHS == {
+        ("binding", "decisive", "envelope_digest"): "envelope",
+        ("binding", "decisive", "objects", "value", "*", "dependency_hash"): "dependencies",
+    }, "verified freshness paths widened beyond the two independently checked digests")
     source = "PROCEDURE P AS BEGIN NULL; END;\n"
     obj = {"owner": "APP", "name": "P", "object_type": "PROCEDURE"}
 
     class NativeRows:
-        def __init__(self, timestamp):
+        def __init__(self, timestamp, edges=()):
             self.timestamp = timestamp
+            self.edges = list(edges)
 
         def cursor(self):
             return self
 
         def execute(self, sql, binds):
-            api.require(binds[:2] == ("APP", "P"), "unexpected checker-unit object")
-            self.rows = ([(7, "VALID", self.timestamp)] if "SYS.ALL_OBJECTS" in sql else [(source,)])
+            if "SYS.ALL_DEPENDENCIES" in sql:
+                api.require(json.loads(binds[0]) == [obj], "unexpected checker-unit frontier")
+                self.rows = self.edges
+            else:
+                api.require(binds[:2] == ("APP", "P"), "unexpected checker-unit object")
+                self.rows = ([(7, "VALID", self.timestamp)] if "SYS.ALL_OBJECTS" in sql else [(source,)])
             return self
 
         def fetchall(self):
             return self.rows
 
-    def fixture(byte, timestamp):
+    def fixture(byte, timestamp, decisive_changes=None):
         graph = {"requested_roots": [obj], "roots": [{"object": obj, "depth": 0,
             "object_id": 7, "status": "VALID", "last_ddl_time": timestamp,
             "source_hash": {"status": "computed", "sha256": list(hashlib.sha256(source.encode()).digest())}}],
@@ -286,6 +342,7 @@ def binding_freshness_selftest(api):
             facts[key] = {"status": "unavailable", "reason": "not_wired"}
         facts["statement_digest"] = {"status": "computed", "value": [3] * 32}
         facts["action_fields"] = {}
+        facts.update(decisive_changes or {})
         body["confirmation"]["confirm"] = ("xgrant-1~" + bytes([3] * 32).hex() + "~"
             + _binding_digest(api, body["impact"]["binding"]).hex() + "." + "b" * 64)
         checked = _validate_impact_preview(api, NativeRows(timestamp), body)
@@ -315,13 +372,26 @@ def binding_freshness_selftest(api):
         raise api.DriverError("reference codec accepted an unknown public reason")
     after, right = fixture(2, "2026-10-31T12:00:01")
     verify_equivalent_runs(api, left, right, {})
-    for path in ("envelope_digest", "dependency_hash", "native_timestamp"):
+    for field, values in {
+        "lane_generation": (3, 4), "ruleset_digest": ([4] * 32, [5] * 32),
+    }.items():
+        runs = [fixture(2, "2026-10-31T12:00:01", {
+            field: {"status": "computed", "value": value}})[1] for value in values]
+        try:
+            verify_equivalent_runs(api, *runs, {})
+        except api.DriverError:
+            pass
+        else:
+            raise api.DriverError(f"alias comparator masked non-freshness decisive field {field}")
+    for path in ("envelope_digest", "dependency_hash", "graph_dependency_hash", "native_timestamp"):
         bad = copy.deepcopy(after)
         facts = bad["impact"]["binding"]["decisive"]
         if path == "envelope_digest":
             facts["envelope_digest"]["value"][0] ^= 1
         elif path == "dependency_hash":
             facts["objects"]["value"][0]["dependency_hash"]["value"][0] ^= 1
+        elif path == "graph_dependency_hash":
+            bad["impact"]["dependents"]["value"]["dependency_hash"][0] ^= 1
         else:
             graph = bad["impact"]["dependents"]["value"]
             graph["roots"][0]["last_ddl_time"] = "2020-01-01T00:00:00"
@@ -335,6 +405,31 @@ def binding_freshness_selftest(api):
         except api.DriverError:
             continue
         raise api.DriverError(f"native alias fact checker accepted wrong {path}")
+    outgoing = ("APP", "P", "PROCEDURE", "APP", "T", "TABLE", 11, None, "HARD")
+    incoming = ("APP", "Q", "PROCEDURE", "APP", "P", "PROCEDURE", 7, None, "HARD")
+    for label, declared, native, accepted in [
+        ("matching native edge", [outgoing], [outgoing], True),
+        ("omitted outgoing edge", [], [outgoing], False),
+        ("omitted dependent edge", [], [incoming], False),
+        ("omitted dependent node", [incoming], [incoming], False),
+    ]:
+        bad = copy.deepcopy(after)
+        graph = bad["impact"]["dependents"]["value"]
+        graph["edges"] = [{"dependent": dict(zip(("owner", "name", "object_type"), row[:3])),
+            "referenced": dict(zip(("owner", "name", "object_type"), row[3:6])),
+            "referenced_object_id": row[6], "referenced_link_name": row[7],
+            "dependency_type": row[8]} for row in declared]
+        graph["dependency_hash"] = list(_dependency_digest(api, graph))
+        bad["impact"]["binding"]["decisive"]["objects"]["value"][0]["dependency_hash"]["value"] = (
+            list(graph["dependency_hash"]))
+        bad["confirmation"]["confirm"] = ("xgrant-1~" + bytes([3] * 32).hex() + "~"
+            + _binding_digest(api, bad["impact"]["binding"]).hex() + "." + "b" * 64)
+        try:
+            _validate_impact_preview(api, NativeRows("2026-10-31T12:00:01", native), bad)
+        except api.DriverError:
+            api.require(not accepted, f"native edge verifier refused {label}")
+        else:
+            api.require(accepted, f"native edge verifier accepted {label}")
     unwitnessed = {**right, "native_impact_facts": []}
     try:
         verify_equivalent_runs(api, left, unwitnessed, {})

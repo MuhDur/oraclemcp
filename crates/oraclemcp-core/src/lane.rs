@@ -2461,12 +2461,16 @@ fn run_lane_loop_with_factory(
                     let borrowed_context = context
                         .as_dispatch_context()
                         .with_request_budget(&dispatch_budget);
-                    let may_change_session_context =
-                        matches!(name.as_str(), "oracle_execute" | "execute_approved")
-                            && args
-                                .get("sql")
-                                .and_then(Value::as_str)
-                                .is_some_and(is_allowed_alter_session);
+                    let sql = args.get("sql").and_then(Value::as_str);
+                    let may_change_session_context = match name.as_str() {
+                        "oracle_execute" => sql.is_some_and(is_allowed_alter_session),
+                        // Dispatch resolves token-only SQL from the stored preview.
+                        // Until that SQL is visible here, invalidate conservatively.
+                        "execute_approved" => sql.is_none_or(|sql| {
+                            sql.trim().is_empty() || is_allowed_alter_session(sql)
+                        }),
+                        _ => false,
+                    };
                     let result = match run_with_caller_signal(
                         &cx,
                         &caller,
@@ -6036,25 +6040,56 @@ mod tests {
             }
         }
 
-        for tool in ["oracle_execute", "execute_approved"] {
+        for (tool, args, changes_context) in [
+            (
+                "oracle_execute",
+                json!({"sql": "INSERT INTO APP.T (ID) VALUES (1)"}),
+                false,
+            ),
+            (
+                "execute_approved",
+                json!({"sql": "INSERT INTO APP.T (ID) VALUES (1)"}),
+                false,
+            ),
+            (
+                "oracle_execute",
+                json!({"sql": "ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD'"}),
+                true,
+            ),
+            (
+                "execute_approved",
+                json!({"sql": "ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD'"}),
+                true,
+            ),
+            (
+                "execute_approved",
+                json!({"token": "approved-preview"}),
+                true,
+            ),
+            (
+                "execute_approved",
+                json!({"token": "approved-preview", "sql": ""}),
+                true,
+            ),
+            (
+                "execute_approved",
+                json!({"token": "approved-preview", "sql": " \t\n"}),
+                true,
+            ),
+        ] {
             let lane = LaneRuntime::spawn("alter-session-generation", Arc::new(ExecutedResult), 4);
             let initial = lane.generation();
-            for sql in [
-                "INSERT INTO APP.T (ID) VALUES (1)",
-                "ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD'",
-            ] {
-                let result = block_on_lane_bridge(async {
-                    let cx = Cx::current().expect("bridge installs Cx");
-                    lane.dispatch(&cx, DispatchContext::default(), tool, json!({ "sql": sql }))
-                        .await
-                });
-                assert!(matches!(result, Outcome::Ok(_)));
-                assert_eq!(
-                    lane.generation(),
-                    initial + u64::from(sql.starts_with("ALTER SESSION")),
-                    "{tool}: {sql}"
-                );
-            }
+            let result = block_on_lane_bridge(async {
+                let cx = Cx::current().expect("bridge installs Cx");
+                lane.dispatch(&cx, DispatchContext::default(), tool, args.clone())
+                    .await
+            });
+            assert!(matches!(result, Outcome::Ok(_)));
+            assert_eq!(
+                lane.generation(),
+                initial + u64::from(changes_context),
+                "{tool}: {args}"
+            );
         }
     }
 
