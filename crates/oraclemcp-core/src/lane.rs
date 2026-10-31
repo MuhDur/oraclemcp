@@ -5222,6 +5222,61 @@ mod tests {
         assert!(!registry.lifecycle.lock().creating_lanes.contains(&key));
     }
 
+    #[test]
+    fn construction_wait_caps_long_or_absent_caller_deadlines() {
+        for timeout in [Some(Duration::from_secs(3_600)), None] {
+            let harness = LifecycleRaceHarness::new();
+            let owner = harness.spawn_dispatch("capped-construction", "principal");
+            harness.builder_entered.wait();
+            let registry = Arc::clone(&harness.registry);
+            let follower = thread::spawn(move || {
+                let cx = timeout.map_or_else(Cx::for_testing, testing_cx_with_timeout);
+                let key = LaneKey::new("capped-construction", "principal");
+                let ticket = registry.begin_lane_resolution(key.clone());
+                let started = Instant::now();
+                let reads = AtomicU64::new(0);
+                let result = registry.acquire_creation_turn_with_clock(&cx, &key, &ticket, || {
+                    match reads.fetch_add(1, Ordering::SeqCst) {
+                        0 => started,
+                        1 => started + DEFAULT_REQUEST_TIMEOUT + Duration::from_millis(1),
+                        _ => panic!("construction wait continued beyond DEFAULT_REQUEST_TIMEOUT"),
+                    }
+                });
+                let Err(error) = result else {
+                    panic!("a follower cannot acquire the paused owner's lane");
+                };
+                assert_eq!(error.error_class, ErrorClass::Timeout, "{timeout:?}");
+                assert_eq!(reads.load(Ordering::SeqCst), 2);
+                assert!(registry.lifecycle.lock().creating_lanes.contains(&key));
+                assert_eq!(registry.lane_count(), 0);
+            });
+            let followed = follower.join();
+            let before_release = (
+                harness.builder_runs.load(Ordering::SeqCst),
+                harness.factory_runs.load(Ordering::SeqCst),
+                harness.dispatch_runs.load(Ordering::SeqCst),
+            );
+            // Release the real owner even when the follower detects a fault.
+            harness.release_builder.wait();
+            let owned = owner.join().expect("owner joined");
+            followed.expect("construction wait stops at the default cap");
+            assert_eq!(before_release, (1, 0, 0));
+            assert!(matches!(owned, Outcome::Ok(_)), "{owned:?}");
+            assert_eq!(harness.builder_runs.load(Ordering::SeqCst), 1);
+            assert_eq!(harness.factory_runs.load(Ordering::SeqCst), 1);
+            assert_eq!(harness.dispatch_runs.load(Ordering::SeqCst), 1);
+            assert!(
+                harness
+                    .registry
+                    .close_session("capped-construction", "principal")
+            );
+            assert_eq!(
+                harness.admission.available_global(),
+                harness.admission.regular_global_cap()
+            );
+        }
+    }
+
     // ---- QA100 .92: linearize credential revocation with lane admission ----
 
     /// A stateful lane registry whose factory build and dispatcher execution are
