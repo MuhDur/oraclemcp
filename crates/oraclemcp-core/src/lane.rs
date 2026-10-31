@@ -33,8 +33,7 @@ use parking_lot::{Condvar, Mutex};
 use serde_json::Value;
 
 use crate::admission::{
-    AdmissionController, AdmissionPermit, CapacitySnapshot, DEFAULT_FAIR_ADMISSION_WAIT_MS,
-    DEFAULT_RETRY_AFTER_MS,
+    AdmissionController, AdmissionPermit, CapacitySnapshot, DEFAULT_RETRY_AFTER_MS,
 };
 use crate::capability::narrow_to_lane;
 use crate::http::{
@@ -1455,9 +1454,27 @@ impl StatefulLaneDispatch {
         key: &LaneKey,
         ticket: &LaneResolutionTicket<'_>,
     ) -> Result<LaneCreationTurn<'a>, ErrorEnvelope> {
-        let wait_deadline = Instant::now()
-            .checked_add(Duration::from_millis(DEFAULT_FAIR_ADMISSION_WAIT_MS))
-            .unwrap_or_else(Instant::now);
+        self.acquire_creation_turn_with_clock(cx, key, ticket, Instant::now)
+    }
+
+    fn acquire_creation_turn_with_clock<'a>(
+        &'a self,
+        cx: &Cx,
+        key: &LaneKey,
+        ticket: &LaneResolutionTicket<'_>,
+        now: impl Fn() -> Instant,
+    ) -> Result<LaneCreationTurn<'a>, ErrorEnvelope> {
+        // This caller joins work that already owns the creation turn; it is
+        // not competing for another capacity slot. Charge that wait to its
+        // request budget, rather than the unrelated fair-admission timer.
+        let wait_budget = LaneCallerBudget::capture(cx)
+            .tighten_timeout(DEFAULT_REQUEST_TIMEOUT)
+            .deadline_after_admission
+            .expect("request timeout supplies a bounded construction wait");
+        let wait_started = now();
+        let wait_deadline = wait_started
+            .checked_add(wait_budget)
+            .unwrap_or(wait_started);
         loop {
             cx.checkpoint()
                 .map_err(|_| lane_resolution_cancelled_error())?;
@@ -1490,12 +1507,8 @@ impl StatefulLaneDispatch {
                 }
                 return Ok(LaneCreationTurn::Create(guard));
             }
-            let Some(remaining) = wait_deadline.checked_duration_since(Instant::now()) else {
-                return Err(ErrorEnvelope::new(
-                    ErrorClass::Busy,
-                    "timed out waiting for concurrent construction of the same stateful lane",
-                )
-                .with_retry_after_ms(DEFAULT_RETRY_AFTER_MS));
+            let Some(remaining) = wait_deadline.checked_duration_since(now()) else {
+                return Err(lane_resolution_cancelled_error());
             };
             self.creation_changed
                 .wait_for(&mut lifecycle, remaining.min(Duration::from_millis(5)));
@@ -5106,6 +5119,107 @@ mod tests {
                 .registry
                 .close_session("reinitialized-session", "rotated-principal")
         );
+    }
+
+    #[test]
+    fn same_key_construction_joins_within_the_caller_budget() {
+        let harness = LifecycleRaceHarness::new();
+        let owner = harness.spawn_dispatch("constructing-session", "principal");
+        harness.builder_entered.wait();
+        let registry = Arc::clone(&harness.registry);
+        let (waiting_tx, waiting_rx) = std_mpsc::channel();
+        let follower = thread::spawn(move || {
+            let cx = testing_cx_with_timeout(Duration::from_secs(5));
+            let key = LaneKey::new("constructing-session", "principal");
+            let ticket = registry.begin_lane_resolution(key.clone());
+            let started = Instant::now();
+            let reads = AtomicU64::new(0);
+            let turn = registry.acquire_creation_turn_with_clock(&cx, &key, &ticket, || {
+                if reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                    started
+                } else {
+                    if reads.load(Ordering::SeqCst) == 2 {
+                        waiting_tx.send(()).expect("coordinator observes the wait");
+                    }
+                    // Advance past capacity admission's window without sleeping.
+                    started
+                        + Duration::from_millis(
+                            crate::admission::DEFAULT_FAIR_ADMISSION_WAIT_MS + 1,
+                        )
+                }
+            });
+            match turn {
+                Ok(LaneCreationTurn::Existing(lane)) => Ok(lane),
+                Ok(LaneCreationTurn::Create(_)) => panic!("the existing owner keeps its turn"),
+                Err(error) => Err(error),
+            }
+        });
+        let waiting = waiting_rx.recv_timeout(Duration::from_secs(5));
+        harness.release_builder.wait();
+        let owner = owner.join().expect("owner joined");
+        let follower = follower.join().expect("follower joined");
+        waiting.expect("follower reached the construction wait");
+        assert!(matches!(owner, Outcome::Ok(_)), "{owner:?}");
+        let follower = follower.expect("valid caller joins the same construction");
+        let registered = harness
+            .registry
+            .reusable_lane(&LaneKey::new("constructing-session", "principal"))
+            .expect("one lane was published");
+        assert!(Arc::ptr_eq(&follower.inner, &registered.inner));
+        assert_eq!(harness.builder_runs.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.factory_runs.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.dispatch_runs.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.registry.lane_count(), 1);
+        drop(follower);
+        drop(registered);
+        assert!(
+            harness
+                .registry
+                .close_session("constructing-session", "principal")
+        );
+        assert_eq!(
+            harness.admission.available_global(),
+            harness.admission.regular_global_cap()
+        );
+    }
+
+    #[test]
+    fn construction_wait_honors_caller_deadline_and_cancellation() {
+        let builders = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = counting_stateful_registry(&builders, &executions);
+        let key = LaneKey::new("constructing-session", "principal");
+        let owner_ticket = registry.begin_lane_resolution(key.clone());
+        let owner = registry
+            .acquire_creation_turn(&Cx::for_testing(), &key, &owner_ticket)
+            .expect("one owner acquires the creation turn");
+        assert!(matches!(owner, LaneCreationTurn::Create(_)));
+        for cancelled in [false, true] {
+            let cx = testing_cx_with_timeout(Duration::from_millis(10));
+            let ticket = registry.begin_lane_resolution(key.clone());
+            let started = Instant::now();
+            let reads = AtomicU64::new(0);
+            let result = registry.acquire_creation_turn_with_clock(&cx, &key, &ticket, || {
+                if reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                    started
+                } else if cancelled {
+                    cx.set_cancel_requested(true);
+                    started
+                } else {
+                    started + Duration::from_millis(11)
+                }
+            });
+            let Err(error) = result else {
+                panic!("expired or cancelled follower cannot acquire a lane");
+            };
+            assert_eq!(error.error_class, ErrorClass::Timeout);
+            assert!(registry.lifecycle.lock().creating_lanes.contains(&key));
+            assert_eq!(registry.lane_count(), 0);
+            assert_eq!(builders.load(Ordering::SeqCst), 0);
+            assert_eq!(executions.load(Ordering::SeqCst), 0);
+        }
+        drop(owner);
+        assert!(!registry.lifecycle.lock().creating_lanes.contains(&key));
     }
 
     // ---- QA100 .92: linearize credential revocation with lane admission ----
