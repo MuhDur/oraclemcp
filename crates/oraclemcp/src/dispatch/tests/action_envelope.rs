@@ -248,10 +248,9 @@ fn assert_alter_session_invalidates_confirmation(sql: &str) {
             json!({"sql": UPDATE, "commit": true, "confirm": old_token}),
         )
         .expect_err("old confirmation must be invalidated");
-    assert!(matches!(
-        error.error_class,
-        ErrorClass::ChallengeRequired | ErrorClass::RepreviewRequired
-    ));
+    // ALTER SESSION revokes the old generation and clears its grants; this is
+    // a revoked reference, distinct from a live grant whose facts drifted.
+    assert_eq!(error.error_class, ErrorClass::ChallengeRequired);
     assert_eq!(state.executed.lock().expect("executed mutex").len(), 1);
 }
 
