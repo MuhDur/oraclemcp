@@ -535,11 +535,14 @@ jobs:
         if: runner.os == 'macOS'
         run: echo 'RUSTC_WRAPPER=' >> "$GITHUB_ENV"
       # macOS TMPDIR sits under the root-owned /var -> /private/var symlink, and
-      # the audit sink refuses symlinked components; test fixtures use the real
-      # path (product behaviour for system symlinks is tracked in oraclemcp-drc9d).
-      - name: Resolve TMPDIR to its real path on macOS
+      # the audit sink refuses symlinked components (oraclemcp-drc9d); its long
+      # /private/var/folders path also overflows the 104-byte sun_path for broker
+      # sockets (oraclemcp-7feb4). Use a short, real, private directory.
+      - name: Use a short real TMPDIR on macOS
         if: runner.os == 'macOS'
-        run: echo "TMPDIR=$(cd "${TMPDIR:-/tmp}" && pwd -P)" >> "$GITHUB_ENV"
+        run: |
+          mkdir -m 700 -p /private/tmp/omcp
+          echo "TMPDIR=/private/tmp/omcp" >> "$GITHUB_ENV"
       - name: Refuse nightly runtime features on every target
         shell: bash
         run: |
