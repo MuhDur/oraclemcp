@@ -419,33 +419,66 @@ fn open_endpoint_directory(path: &Path) -> Result<std::fs::File, ErrorEnvelope> 
 }
 
 #[cfg(unix)]
-fn short_endpoint_directory(store: &FileStore) -> Result<PathBuf, ErrorEnvelope> {
+fn verify_endpoint_socket(path: &Path, expected_uid: u32) -> Result<(), ErrorEnvelope> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let socket = std::fs::symlink_metadata(path).map_err(transient)?;
+    if !socket.file_type().is_socket()
+        || socket.uid() != expected_uid
+        || socket.mode() & 0o777 != 0o600
+    {
+        return Err(unsafe_endpoint_directory(
+            path,
+            "socket ownership, type or mode differs",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn verify_endpoint_temp_parent(path: &Path, expected_uid: u32) -> Result<(), ErrorEnvelope> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path).map_err(internal)?;
+    if !metadata.is_dir()
+        || (metadata.uid() != 0 && metadata.uid() != expected_uid)
+        || (metadata.mode() & 0o022 != 0 && metadata.mode() & 0o1000 == 0)
+    {
+        return Err(unsafe_endpoint_directory(
+            path,
+            "temporary parent is not trusted or sticky",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn endpoint_namespace(uid: u32, canonical_root: &Path, device: u64, inode: u64) -> String {
     use base64::Engine;
     use std::os::unix::ffi::OsStrExt;
+    let mut hash = Sha256::new();
+    hash.update(b"oraclemcp:broker-endpoint-directory:v1");
+    hash.update(uid.to_be_bytes());
+    hash.update(canonical_root.as_os_str().as_bytes());
+    hash.update(device.to_be_bytes());
+    hash.update(inode.to_be_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash.finalize())
+}
+
+#[cfg(unix)]
+fn short_endpoint_directory(store: &FileStore) -> Result<PathBuf, ErrorEnvelope> {
     use std::os::unix::fs::MetadataExt;
     // A fixed base gives independently launched clients the same namespace,
     // including when their TMPDIR values differ or are themselves too long.
     let base = Path::new("/tmp").canonicalize().map_err(internal)?;
-    let metadata = std::fs::symlink_metadata(&base).map_err(internal)?;
     let uid = rustix::process::geteuid().as_raw();
-    if !metadata.is_dir()
-        || (metadata.uid() != 0 && metadata.uid() != uid)
-        || (metadata.mode() & 0o022 != 0 && metadata.mode() & 0o1000 == 0)
-    {
-        return Err(unsafe_endpoint_directory(
-            &base,
-            "temporary parent is not trusted or sticky",
-        ));
-    }
-    let mut hash = Sha256::new();
-    hash.update(b"oraclemcp:broker-endpoint-directory:v1");
-    hash.update(uid.to_be_bytes());
-    hash.update(store.root().as_os_str().as_bytes());
+    verify_endpoint_temp_parent(&base, uid)?;
     let state_directory = open_endpoint_directory(store.root())?;
     let state_identity = state_directory.metadata().map_err(internal)?;
-    hash.update(state_identity.dev().to_be_bytes());
-    hash.update(state_identity.ino().to_be_bytes());
-    let name = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash.finalize());
+    let name = endpoint_namespace(
+        uid,
+        store.root(),
+        state_identity.dev(),
+        state_identity.ino(),
+    );
     Ok(base.join(format!("oraclemcp-{name}")))
 }
 
@@ -859,20 +892,10 @@ pub fn attach(store: &FileStore, request: &AttachRequest) -> Result<AttachedStre
     }
     #[cfg(unix)]
     let endpoint_directory = {
-        use std::os::unix::fs::{FileTypeExt, MetadataExt};
         let path = Path::new(&locator.endpoint);
         checked_endpoint_path(path)?;
         let directory = open_endpoint_directory(path.parent().expect("validated endpoint parent"))?;
-        let socket = std::fs::symlink_metadata(path).map_err(transient)?;
-        if !socket.file_type().is_socket()
-            || socket.uid() != rustix::process::geteuid().as_raw()
-            || socket.mode() & 0o777 != 0o600
-        {
-            return Err(unsafe_endpoint_directory(
-                path,
-                "socket ownership, type or mode differs",
-            ));
-        }
+        verify_endpoint_socket(path, rustix::process::geteuid().as_raw())?;
         directory
     };
     let stream = connect_endpoint(&locator.endpoint).map_err(transient)?;
@@ -1172,8 +1195,65 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn broker_endpoint_socket_refuses_a_foreign_uid_with_valid_type_and_mode() {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+        let root = tempfile::tempdir_in(Path::new("/tmp").canonicalize().unwrap()).unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        open_endpoint_directory(root.path()).unwrap();
+        let path = root.path().join("endpoint.sock");
+        let _socket = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        assert!(metadata.file_type().is_socket());
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+        let uid = rustix::process::geteuid().as_raw();
+        assert_eq!(metadata.uid(), uid);
+        verify_endpoint_socket(&path, uid).unwrap();
+        // Inject the expected authority, keeping the real socket otherwise valid.
+        let error = verify_endpoint_socket(&path, uid ^ 1).unwrap_err();
+        assert_eq!(error.error_class, ErrorClass::PolicyDenied);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn broker_endpoint_temp_parent_requires_sticky_when_shared() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let parent = root.path().join("temporary-parent");
+        std::fs::create_dir(&parent).unwrap();
+        let uid = rustix::process::geteuid().as_raw();
+        for mode in [0o700, 0o1777, 0o777] {
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(mode)).unwrap();
+            let metadata = std::fs::symlink_metadata(&parent).unwrap();
+            assert!(metadata.is_dir());
+            assert_eq!(metadata.uid(), uid);
+            assert_eq!(metadata.mode() & 0o7777, mode);
+            let result = verify_endpoint_temp_parent(&parent, uid);
+            if mode == 0o777 {
+                assert_eq!(result.unwrap_err().error_class, ErrorClass::PolicyDenied);
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn broker_endpoint_namespace_binds_uid_with_identical_root_identity() {
+        use std::os::unix::fs::MetadataExt;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().canonicalize().unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let namespace = |uid| endpoint_namespace(uid, &path, metadata.dev(), metadata.ino());
+        assert_eq!(namespace(42), namespace(42));
+        assert_ne!(namespace(42), namespace(43));
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn broker_endpoint_rejects_shared_or_symlinked_runtime_directories() {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let root = tempfile::tempdir().unwrap();
         for mode in [0o755, 0o777] {
             let store = FileStore::open(
@@ -1195,6 +1275,11 @@ mod tests {
         }
         let store = FileStore::open(root.path().join("symlink-long-state".repeat(10))).unwrap();
         let victim = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(victim.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let metadata = std::fs::symlink_metadata(victim.path()).unwrap();
+        assert_eq!(metadata.uid(), rustix::process::geteuid().as_raw());
+        assert_eq!(metadata.mode() & 0o777, 0o700);
+        open_endpoint_directory(victim.path()).unwrap();
         let link = short_endpoint_directory(&store).unwrap();
         std::os::unix::fs::symlink(victim.path(), &link).unwrap();
         let Err(error) = BrokerListener::bind(&store, identity()) else {
