@@ -19054,3 +19054,62 @@ fn opted_in_edition_anti_bypass_refuses_before_any_oracle_connection_call() {
         assert_eq!(calls.load(Ordering::SeqCst), 0, "{tool} reached Oracle");
     }
 }
+
+#[test]
+fn operator_edition_opt_out_rechecks_current_profile_before_any_connection_call() {
+    let config = |enabled: bool| {
+        OracleMcpConfig::from_toml_str(&format!(
+            r#"
+            [[profiles]]
+            name="edition-work"
+            connect_string="localhost:1521/fake"
+            max_level="ADMIN"
+            edition_change_requests={enabled}
+        "#
+        ))
+        .unwrap()
+    };
+    let before = config(true);
+    let after = config(false);
+    let drain = ProfileDrainState::from_config(before.clone());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ZeroCallOracleConnection {
+            calls: Arc::clone(&calls),
+        }),
+        Some("edition-work".into()),
+        SessionLevelState::new(OperatingLevel::Admin, false),
+    )
+    .with_profile_drain_state(drain.clone());
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let enabled = || {
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            dispatcher
+                .surface_state_with_cx(&cx, DispatchContext::default(), McpSurfaceDetail::LevelOnly)
+                .await
+                .unwrap()
+                .edition_change_requests
+        })
+    };
+    assert!(enabled());
+    drain
+        .apply_config_reload_plan(
+            &oraclemcp_config::ConfigReloadPlan::between(&before, &after),
+            &before,
+            &after,
+        )
+        .unwrap();
+    // The lane still holds its old opted-in snapshot. Current accepted policy
+    // must win rather than letting that lease retain edition authority.
+    assert!(!enabled());
+    let error = dispatcher
+        .dispatch(
+            oraclemcp_core::server::OPERATOR_EDITION_INTERNAL_DISPATCH,
+            json!({"profile":"edition-work", "edition":"SYNTHETIC_CHILD"}),
+        )
+        .expect_err("current opt-out must override an earlier edition request");
+    assert_eq!(error.error_class, ErrorClass::PolicyDenied);
+    assert!(error.message.contains("edition_change_requests"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}

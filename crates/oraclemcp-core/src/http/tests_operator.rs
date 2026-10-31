@@ -3010,6 +3010,8 @@ fn every_browser_action_tool_has_an_explicit_release_policy() {
             policy.tool
         );
         assert_ne!(policy.routes, 0, "{} has no allowed route", policy.tool);
+        assert_ne!(policy.browser_apply, BrowserApplyPolicy::OperatorOnlyEditionFlip,
+            "generic browser tool {} cannot inherit edition-route authority", policy.tool);
     }
     for tool in [
         "oracle_compile_object",
@@ -3493,6 +3495,7 @@ fn edition_proposals_are_persisted_review_requests_not_replayable_authority() {
 fn edition_draft_rejects_client_supplied_pdb_coordination_scope() {
     let (auditor, _sink) = operator_auditor();
     let server = server_with_dispatch(Arc::new(EditionDispatch {
+        edition_change_requests: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         calls: Arc::new(AtomicUsize::new(0)),
         profile: "synthetic_stage",
         deny: false,
@@ -3532,6 +3535,7 @@ fn edition_draft_rejects_client_supplied_pdb_coordination_scope() {
 }
 
 struct EditionDispatch {
+    edition_change_requests: Arc<std::sync::atomic::AtomicBool>,
     calls: Arc<AtomicUsize>,
     profile: &'static str,
     deny: bool,
@@ -3576,6 +3580,7 @@ impl ToolDispatch for EditionDispatch {
                 effective_ceiling: OperatingLevel::Admin,
                 max_level: OperatingLevel::Admin,
                 protected: false,
+                edition_change_requests: self.edition_change_requests.load(AtomicOrdering::SeqCst),
                 active_profile: Some(self.profile.to_owned()),
                 custom_catalog: McpToolCatalogSnapshot {
                     generation: 0,
@@ -3606,6 +3611,7 @@ impl ToolDispatch for EditionDispatch {
 fn operator_executor_not_registered_as_mcp_tool() {
     let calls = Arc::new(AtomicUsize::new(0));
     let server = server_with_dispatch(Arc::new(EditionDispatch {
+        edition_change_requests: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         calls: Arc::clone(&calls),
         profile: "synthetic_stage",
         deny: false,
@@ -3627,6 +3633,7 @@ fn edition_merge_and_rollback_use_executor_not_oracle_execute() {
     let (auditor, _sink) = operator_auditor();
     let calls = Arc::new(AtomicUsize::new(0));
     let server = server_with_dispatch(Arc::new(EditionDispatch {
+        edition_change_requests: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         calls: Arc::clone(&calls),
         profile: "synthetic_stage",
         deny: false,
@@ -3715,6 +3722,7 @@ fn edition_default_flip_requires_admin_confirmation_reclassification_and_audit()
     let (auditor, sink) = operator_auditor();
     let calls = Arc::new(AtomicUsize::new(0));
     let server = server_with_dispatch(Arc::new(EditionDispatch {
+        edition_change_requests: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         calls: Arc::clone(&calls),
         profile: "synthetic_stage",
         deny: false,
@@ -3851,6 +3859,7 @@ fn edition_default_flip_preserves_the_exact_lane_generation() {
     let (auditor, _sink) = operator_auditor();
     let calls = Arc::new(AtomicUsize::new(0));
     let server = server_with_dispatch(Arc::new(EditionDispatch {
+        edition_change_requests: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         calls: Arc::clone(&calls),
         profile: "prod",
         deny: false,
@@ -3941,6 +3950,7 @@ fn edition_default_flip_refuses_forked_or_replayed_review_state() {
     let (auditor, sink) = operator_auditor();
     let calls = Arc::new(AtomicUsize::new(0));
     let server = server_with_dispatch(Arc::new(EditionDispatch {
+        edition_change_requests: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         calls: Arc::clone(&calls),
         profile: "synthetic_stage",
         deny: false,
@@ -4042,6 +4052,7 @@ fn edition_default_flip_refuses_forked_or_replayed_review_state() {
 fn edition_draft_refuses_a_second_live_request_for_the_same_identified_pdb() {
     let (auditor, _sink) = operator_auditor();
     let server = server_with_dispatch(Arc::new(EditionDispatch {
+        edition_change_requests: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         calls: Arc::new(AtomicUsize::new(0)),
         profile: "synthetic_stage",
         deny: false,
@@ -4083,6 +4094,7 @@ fn edition_draft_refuses_a_second_live_request_for_the_same_identified_pdb() {
 fn edition_default_flip_surfaces_a_live_policy_refusal_as_an_audited_block() {
     let (auditor, sink) = operator_auditor();
     let server = server_with_dispatch(Arc::new(EditionDispatch {
+        edition_change_requests: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         calls: Arc::new(AtomicUsize::new(0)),
         profile: "synthetic_stage",
         deny: true,

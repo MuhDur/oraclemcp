@@ -1984,6 +1984,22 @@ impl ProfileGenerationLease {
             .generation_is_draining(&self.profile, self.generation)
     }
 
+    /// Edition authority is revoked by the accepted config or a retired lane
+    /// generation, even while this lease retains its original opted-in snapshot.
+    fn edition_change_requests_enabled(&self) -> bool {
+        let Ok(guard) = self.state.inner.lock() else {
+            return false;
+        };
+        guard.profiles.get(&self.profile).is_some_and(|lifecycle| {
+            lifecycle.current_generation == Some(self.generation)
+                && !lifecycle.manually_drained.contains(&self.generation)
+        }) && guard
+            .accepted_config
+            .as_deref()
+            .and_then(|config| config.profile(&self.profile))
+            .is_some_and(|profile| profile.edition_change_requests())
+    }
+
     fn belongs_to(&self, state: &ProfileDrainState) -> bool {
         Arc::ptr_eq(&self.state.inner, &state.inner)
     }
@@ -12973,6 +12989,10 @@ impl OracleDispatcher {
             effective_ceiling: scoped_level.effective_ceiling(),
             max_level: scoped_level.max_level(),
             protected: scoped_level.is_protected(),
+            edition_change_requests: state
+                .profile_generation
+                .as_ref()
+                .is_some_and(ProfileGenerationLease::edition_change_requests_enabled),
             active_profile,
             custom_catalog: state.custom_catalog.snapshot(),
             connection,
@@ -13208,6 +13228,17 @@ impl OracleDispatcher {
                     .and_then(|config| config.profile(lease.profile()))
                     .is_some_and(|profile| profile.edition_change_requests())
             });
+            if name == oraclemcp_core::server::OPERATOR_EDITION_INTERNAL_DISPATCH
+                && !state
+                    .profile_generation
+                    .as_ref()
+                    .is_some_and(ProfileGenerationLease::edition_change_requests_enabled)
+            {
+                return Err(ErrorEnvelope::new(
+                    ErrorClass::PolicyDenied,
+                    "edition_change_requests must be enabled on the current operator profile",
+                ));
+            }
             if opted_in {
                 let tool = canonical_tool_name(name);
                 let sql = args
@@ -14188,6 +14219,12 @@ impl OracleDispatcher {
                     subject: &request_subject,
                     db_evidence: db_evidence.as_ref(),
                 };
+                if !state.profile_generation.as_ref()
+                    .is_some_and(ProfileGenerationLease::edition_change_requests_enabled)
+                {
+                    return Err(ErrorEnvelope::new(ErrorClass::PolicyDenied,
+                        "edition_change_requests must be enabled on the current operator profile"));
+                }
                 append_audit(audit_entry, "operator_edition_default_flip", &sql,
                     "ADMIN", None, AuditOutcome::Pending)?;
                 state.catalog_cache.invalidate(CatalogInvalidation::Ddl);

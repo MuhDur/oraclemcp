@@ -73,6 +73,7 @@ pub struct OperatorLanePolicy {
     pub effective_ceiling: OperatingLevel,
     pub current_level: OperatingLevel,
     pub protected: bool,
+    pub edition_change_requests: bool,
 }
 
 impl OperatorLanePolicy {
@@ -84,6 +85,9 @@ impl OperatorLanePolicy {
             || proposal.database_identity.is_none()
         {
             return Err(EditionExecutorRefusal::ProposalNotReviewed);
+        }
+        if !self.edition_change_requests {
+            return Err(EditionExecutorRefusal::ChangeRequestsDisabled);
         }
         if self.protected {
             return Err(EditionExecutorRefusal::ProtectedProfile);
@@ -137,6 +141,8 @@ impl ValidatedEditionIdent {
 pub enum EditionExecutorRefusal {
     Unauthenticated,
     ProtectedProfile,
+    ChangeRequestsDisabled,
+    DecisiveBindingRequired,
     AdminRequired,
     ProfileMismatch,
     ProposalNotReviewed,
@@ -152,6 +158,8 @@ impl EditionExecutorRefusal {
     pub const fn code(self) -> &'static str {
         match self {
             Self::Unauthenticated => "operator_auth_required",
+            Self::DecisiveBindingRequired => "edition_decisive_binding_required",
+            Self::ChangeRequestsDisabled => "edition_change_requests_disabled",
             Self::ProtectedProfile => "protected_profile",
             Self::AdminRequired => "operator_admin_required",
             Self::ProfileMismatch => "edition_profile_mismatch",
@@ -207,6 +215,20 @@ pub struct EditionApplyInput<'a> {
 impl OperatorEditionExecutor {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Browser execution additionally requires W14 decisive admission. The
+    /// producer/revalidation path belongs to .16.7/.16.8; until it is wired,
+    /// neither a review revision nor an operator confirmation substitutes for it.
+    pub(crate) fn require_browser_admission(
+        &self,
+        auth: &OperatorAuth,
+        proposal: &EditionProposal,
+        policy: &OperatorLanePolicy,
+    ) -> Result<(), EditionExecutorRefusal> {
+        auth.key()?;
+        policy.require_admin(proposal)?;
+        Err(EditionExecutorRefusal::DecisiveBindingRequired)
     }
 
     pub fn preview(
@@ -336,7 +358,39 @@ mod tests {
             effective_ceiling: OperatingLevel::Admin,
             current_level: OperatingLevel::Admin,
             protected: false,
+            edition_change_requests: true,
         }
+    }
+
+    #[test]
+    fn executor_opt_out_refuses_persisted_review_and_unconsumed_confirmation() {
+        let proposal = proposal();
+        let auth = OperatorAuth::authenticated("operator".into());
+        let executor = OperatorEditionExecutor::new();
+        let mut lane = policy();
+        let confirmation = executor
+            .preview(&auth, &proposal, EditionFlipTarget::Merge, None, &lane)
+            .unwrap();
+        lane.edition_change_requests = false;
+        assert_eq!(
+            executor
+                .preview(&auth, &proposal, EditionFlipTarget::Merge, None, &lane)
+                .unwrap_err(),
+            EditionExecutorRefusal::ChangeRequestsDisabled
+        );
+        assert_eq!(
+            executor
+                .consume_confirmation(
+                    &auth,
+                    &confirmation.token,
+                    &proposal,
+                    EditionFlipTarget::Merge,
+                    None,
+                    &lane
+                )
+                .unwrap_err(),
+            EditionExecutorRefusal::ChangeRequestsDisabled
+        );
     }
 
     #[test]

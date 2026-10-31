@@ -11,6 +11,7 @@ pub(super) enum BrowserApplyPolicy {
     Allow,
     ClassifySql,
     DdlMutation,
+    OperatorOnlyEditionFlip,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,6 +161,25 @@ pub(super) fn force_preview_mode(tool: &str, arguments: &mut Value) {
     }
 }
 
+/// This class belongs only to the fixed no-SQL edition routes. Tool names
+/// supplied to the general workbench can never select it.
+pub(super) fn browser_apply_policy(
+    route: OperatorRouteKind,
+    tool: &str,
+) -> Option<BrowserApplyPolicy> {
+    match route {
+        OperatorRouteKind::EditionProposalsMerge | OperatorRouteKind::EditionProposalsRollback => {
+            Some(BrowserApplyPolicy::OperatorOnlyEditionFlip)
+        }
+        OperatorRouteKind::ActionPreview
+        | OperatorRouteKind::ActionConfirm
+        | OperatorRouteKind::ActionExecute => {
+            operator_action_tool_policy(tool).map(|p| p.browser_apply)
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn dashboard_workbench_release_gate(
     dashboard_workbench_enabled: bool,
     route: OperatorRouteKind,
@@ -171,17 +191,22 @@ pub(super) fn dashboard_workbench_release_gate(
         OperatorRouteKind::ActionPreview
             | OperatorRouteKind::ActionConfirm
             | OperatorRouteKind::ActionExecute
+            | OperatorRouteKind::EditionProposalsMerge
+            | OperatorRouteKind::EditionProposalsRollback
     ) {
         return None;
     }
-    let Some(policy) = operator_action_tool_policy(tool) else {
+    let Some(policy) = browser_apply_policy(route, tool) else {
         return Some(json!({
             "error": "dashboard_action_policy_missing",
             "message": "browser action has no explicit release policy and was refused before dispatch",
             "tool": tool,
         }));
     };
-    let required_level = match policy.browser_apply {
+    let required_level = match policy {
+        // Authentication, current profile opt-in, review revision and one-use
+        // ADMIN confirmation are checked by the dedicated handler/executor.
+        BrowserApplyPolicy::OperatorOnlyEditionFlip => return None,
         BrowserApplyPolicy::Allow => None,
         BrowserApplyPolicy::DdlMutation => Some(oraclemcp_guard::OperatingLevel::Ddl),
         BrowserApplyPolicy::ClassifySql => {
@@ -199,16 +224,28 @@ pub(super) fn dashboard_workbench_release_gate(
             // remains the admission authority and binds live purity evidence
             // before a read can execute, so preserve the intentional baseline
             // rather than treating this UI precheck as a standalone grant.
-            oraclemcp_guard::Classifier::engine_free_baseline(
+            let decision = oraclemcp_guard::Classifier::engine_free_baseline(
                 oraclemcp_guard::ClassifierConfig::new(),
             )
-            .classify(sql)
-            .required_level
+            .classify(sql);
+            if decision.reason_category
+                == Some(oraclemcp_guard::corpus::ReasonCategory::OperatorOnlyStatement)
+            {
+                return Some(json!({
+                    "error": "dashboard_operator_only_statement",
+                    "message": "default-edition changes require the dedicated no-SQL operator route",
+                    "tool": tool,
+                }));
+            }
+            decision.required_level
         }
     };
     if matches!(
         route,
-        OperatorRouteKind::ActionConfirm | OperatorRouteKind::ActionExecute
+        OperatorRouteKind::ActionConfirm
+            | OperatorRouteKind::ActionExecute
+            | OperatorRouteKind::EditionProposalsMerge
+            | OperatorRouteKind::EditionProposalsRollback
     ) && required_level.is_some_and(|level| level >= oraclemcp_guard::OperatingLevel::Ddl)
     {
         Some(json!({

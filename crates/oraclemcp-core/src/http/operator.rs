@@ -1679,7 +1679,7 @@ fn handle_operator_change_proposal_route(
 /// The stored proposal remains review metadata, never executable authority.
 /// The two lifecycle endpoints below derive a fixed statement from validated
 /// metadata, classify it again at the moment of the request, and forward it
-/// only through the normal guarded `oracle_execute` confirmation path.
+/// only through the private operator edition executor and its ADMIN confirmation.
 fn handle_operator_edition_proposal_route(
     server: &OracleMcpServer,
     config: &HttpTransportConfig,
@@ -1801,6 +1801,16 @@ fn handle_operator_edition_proposal_route(
             }
         }
         OperatorRouteKind::EditionProposalsMerge | OperatorRouteKind::EditionProposalsRollback => {
+            if request_context.dashboard_browser
+                && let Some(refusal) = dashboard_workbench_release_gate(
+                    config.dashboard_workbench,
+                    route,
+                    "",
+                    &Value::Null,
+                )
+            {
+                return operator_json_response(403, &request.path, refusal);
+            }
             let context = ChangeProposalApplyContext {
                 server,
                 config,
@@ -1978,6 +1988,16 @@ fn handle_operator_edition_default_flip(
         }
     };
     let executor = context.config.operator_idempotency.edition_executor();
+    if context.dashboard_browser
+        && let Err(refusal) = executor.require_browser_admission(&auth, &proposal, &policy)
+    {
+        return operator_json_response(
+            409,
+            &context.original_request.path,
+            json!({ "source": "edition_proposals", "error": refusal.code(),
+                "proposal_id": proposal.proposal_id }),
+        );
+    }
     let target_edition = match flip {
         EditionFlipTarget::Merge => &proposal.child_edition,
         EditionFlipTarget::Rollback => &proposal.parent_edition,

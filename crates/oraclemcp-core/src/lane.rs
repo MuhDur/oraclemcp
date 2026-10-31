@@ -5543,6 +5543,7 @@ mod tests {
                         effective_ceiling: OperatingLevel::ReadOnly,
                         max_level: OperatingLevel::ReadOnly,
                         protected: false,
+                        edition_change_requests: false,
                         active_profile: None,
                         custom_catalog: McpToolCatalogSnapshot {
                             generation: 1,

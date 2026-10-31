@@ -396,6 +396,8 @@ pub struct McpSurfaceState {
     pub max_level: OperatingLevel,
     /// Whether the active profile is protected.
     pub protected: bool,
+    /// Current profile opt-in; persisted edition requests cannot retain authority after opt-out.
+    pub edition_change_requests: bool,
     /// Active profile name, if one is selected.
     pub active_profile: Option<String>,
     /// Profile-scoped custom-tool snapshot used by both discovery and dispatch.
@@ -1691,6 +1693,7 @@ impl OracleMcpServer {
                     effective_ceiling: surface.effective_ceiling,
                     current_level: surface.current_level,
                     protected: surface.protected,
+                    edition_change_requests: surface.edition_change_requests,
                 }),
                 Outcome::Ok(None) => Err(ErrorEnvelope::new(
                     ErrorClass::RuntimeStateRequired,

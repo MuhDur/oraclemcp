@@ -1878,6 +1878,7 @@ fn qa45_stateless_http_discovery_and_custom_execution_share_the_control_catalog(
                     effective_ceiling: OperatingLevel::ReadOnly,
                     max_level: OperatingLevel::ReadOnly,
                     protected: false,
+                    edition_change_requests: false,
                     active_profile: Some("dev".to_owned()),
                     custom_catalog: oraclemcp_core::McpToolCatalogSnapshot {
                         generation: 7,
