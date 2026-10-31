@@ -86,7 +86,8 @@ plsql-depgraph = { version = "=0.7.0", default-features = false }
 plsql-lineage = { version = "=0.7.0", default-features = false }
 plsql-project = { version = "=0.7.0", default-features = false }
 plsql-ir = { version = "=0.7.0", default-features = false }
-plsql-parser-antlr = { version = "=0.7.0", default-features = false }
+plsql-parser = { version = "=0.7.0", default-features = false }
+plsql-parser-antlr = { version = "=0.7.0", default-features = false, features = ["antlr-codegen"] }
 plsql-symbols = { version = "=0.7.0", default-features = false }
 plsql-cicd = { version = "=0.7.0", default-features = false }
 plsql-doc = { version = "=0.7.0", default-features = false }
@@ -105,6 +106,7 @@ plsql-depgraph = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "
 plsql-lineage = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "1b79c2d5744072fee35904e56262a62aeea0b613" }
 plsql-project = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "1b79c2d5744072fee35904e56262a62aeea0b613" }
 plsql-ir = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "1b79c2d5744072fee35904e56262a62aeea0b613" }
+plsql-parser = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "1b79c2d5744072fee35904e56262a62aeea0b613" }
 plsql-parser-antlr = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "1b79c2d5744072fee35904e56262a62aeea0b613" }
 plsql-symbols = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "1b79c2d5744072fee35904e56262a62aeea0b613" }
 plsql-cicd = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "1b79c2d5744072fee35904e56262a62aeea0b613" }

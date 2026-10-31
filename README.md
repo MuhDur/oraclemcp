@@ -206,7 +206,7 @@ The tables below are generated from the server's tool registry — the same desc
 | `oracle_top_queries` | Oracle Top Queries | Read-only top-SQL ranked by elapsed/CPU/buffer-gets/disk-reads over the free live cursor cache (V$SQLSTATS); live calls may narrow by exact sql_id or bounded sql_text. | `READ_ONLY` | no |
 | `oracle_plan_timeline` | Oracle Plan Timeline | Read-only historical optimizer plan and relative-cost timeline from AWR snapshots for one SQL ID. | `READ_ONLY` | no |
 | `oracle_db_health` | Oracle Db Health | Read-only DBA health-check suite. | `READ_ONLY` | no |
-| `oracle_plsql_parse` | Oracle Plsql Parse | Parse PL/SQL source with the offline plsql-intelligence lowerer and return declaration and diagnostic counts. | `READ_ONLY` | no |
+| `oracle_plsql_parse` | Oracle Plsql Parse | Parse PL/SQL source offline with the grammar parser and return declarations and diagnostics. | `READ_ONLY` | no |
 | `oracle_plsql_analyze` | Oracle Plsql Analyze | Run the offline plsql-intelligence engine over a local project root and return doctor summaries. | `READ_ONLY` | no |
 | `oracle_plsql_what_breaks` | Oracle Plsql What Breaks | Predict invalidation and recompilation impact for a PL/SQL ChangeSet without touching Oracle. | `READ_ONLY` | no |
 | `oracle_plsql_lineage` | Oracle Plsql Lineage | Run offline dependency-lineage traversal from a logical object id in a local PL/SQL project. | `READ_ONLY` | no |

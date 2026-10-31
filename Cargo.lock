@@ -2586,6 +2586,7 @@ dependencies = [
  "plsql-ir",
  "plsql-lineage",
  "plsql-output",
+ "plsql-parser",
  "plsql-parser-antlr",
  "plsql-project",
  "plsql-sast",

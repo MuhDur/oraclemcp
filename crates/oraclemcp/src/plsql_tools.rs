@@ -37,7 +37,8 @@ use plsql_engine::{
 };
 use plsql_ir::{FactPayload, FactStore, FlowEnv, lower_top_level};
 use plsql_lineage::{LineageDirection, column_readers, column_writers, dependencies, impact};
-use plsql_parser_antlr::lower::lower_source;
+use plsql_parser::{ParseOptions, parse_with_backend};
+use plsql_parser_antlr::Antlr4RustBackend;
 use plsql_sast::{CompletenessSnapshot, Rule, ScanUnit, run_scan};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -78,7 +79,7 @@ pub fn register_tools(registry: &mut ToolRegistry) {
         ToolDescriptor::new(
             "oracle_plsql_parse",
             ToolTier::FoundationStatic,
-            "Parse PL/SQL source with the offline plsql-intelligence lowerer and return declaration and diagnostic counts.",
+            "Parse PL/SQL source offline with the grammar parser and return declarations and diagnostics. Syntax errors or recovered parses return INVALID_ARGUMENTS.",
         )
         .with_input_schema(object_schema(
             json!({
@@ -1179,10 +1180,53 @@ struct BlastRadiusArgs {
 }
 
 fn run_parse(args: ParseArgs) -> Result<Value, ErrorEnvelope> {
-    let ast = lower_source(&args.source, FileId::new(1));
+    // Header scanning alone does not validate a routine's body. Use the same
+    // grammar backend as project analysis, and never lower a recovered parse
+    // into a successful declaration report.
+    let parsed = parse_with_backend(
+        &args.source,
+        FileId::new(1),
+        &Antlr4RustBackend::new(),
+        &ParseOptions::default(),
+    );
+    if !parsed.is_clean() || parsed.was_recovered() {
+        let error_count = parsed
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity >= Severity::Error)
+            .count();
+        let mut error = ErrorEnvelope::new(
+            ErrorClass::InvalidArguments,
+            format!(
+                "invalid PL/SQL source: {error_count} parser error(s); recovered={}",
+                parsed.was_recovered()
+            ),
+        );
+        // Report diagnostic codes and locations without echoing source literals
+        // from parser messages into the error envelope.
+        for diagnostic in parsed.diagnostics.iter().take(8) {
+            let location = diagnostic.primary_span.map_or_else(String::new, |span| {
+                format!(" at line {}, column {}", span.start.line, span.start.column)
+            });
+            error = error.with_next_step(format!(
+                "correct PL/SQL syntax: {}{location}, then retry oracle_plsql_parse",
+                diagnostic.code
+            ));
+        }
+        return Err(error
+            .with_next_step("submit source that parses without syntax errors or parser recovery"));
+    }
     let mut interner = plsql_core::SymbolInterner::new();
-    let lowered = lower_top_level(&ast, &mut interner);
-    let diagnostics: Vec<Value> = lowered.diagnostics.iter().map(diagnostic_summary).collect();
+    let lowered = lower_top_level(&parsed.ast, &mut interner);
+    let all_diagnostics: Vec<_> = parsed
+        .diagnostics
+        .iter()
+        .chain(&lowered.diagnostics)
+        .collect();
+    let diagnostics: Vec<Value> = all_diagnostics
+        .iter()
+        .map(|d| diagnostic_summary(d))
+        .collect();
     let declaration_kinds: Vec<String> = lowered
         .declarations
         .iter()
@@ -1198,14 +1242,12 @@ fn run_parse(args: ParseArgs) -> Result<Value, ErrorEnvelope> {
         "declaration_count": declaration_kinds.len(),
         "declaration_kinds": declaration_kinds,
         "declarations": declarations,
-        "recovered": false,
-        "error_count": lowered
-            .diagnostics
+        "recovered": parsed.was_recovered(),
+        "error_count": all_diagnostics
             .iter()
             .filter(|diagnostic| diagnostic.severity >= Severity::Error)
             .count(),
-        "warning_count": lowered
-            .diagnostics
+        "warning_count": all_diagnostics
             .iter()
             .filter(|diagnostic| diagnostic.severity == Severity::Warn)
             .count(),
@@ -3132,12 +3174,43 @@ mod tests {
         .expect("parse succeeds");
         assert_eq!(value["declaration_count"].as_u64(), Some(1));
         assert_eq!(value["recovered"].as_bool(), Some(false));
-        assert_eq!(value["declarations"][0]["name"].as_str(), Some("p"));
+        // The grammar AST resolves unquoted Oracle identifiers canonically.
+        assert_eq!(value["declarations"][0]["name"].as_str(), Some("P"));
         assert_eq!(value["declarations"][0]["kind"].as_str(), Some("Package"));
         assert_eq!(
             value["declarations"][0]["span"]["start"]["offset"].as_u64(),
             Some(0)
         );
+    }
+
+    #[test]
+    fn parse_refuses_malformed_source_instead_of_returning_header_declarations() {
+        for source in [
+            "CREATE OR REPLACE PROCEDURE w4_broken AS BEGIN SELECT FROM ; END;",
+            "CREATE OR REPLACE PROCEDURE w4_broken AS BEGIN IF THEN NULL; END IF; END;",
+            "CREATE OR REPLACE PROCEDURE w4_broken AS BEGIN NULL;",
+            "CREATE OR REPLACE PACKAGE w4_broken AS PROCEDURE ; END;",
+            "this is not valid PL/SQL @@@",
+        ] {
+            let error = dispatch_static("oracle_plsql_parse", json!({"source": source}))
+                .expect_err("malformed source must not return a successful declaration report");
+            assert_eq!(error.error_class, ErrorClass::InvalidArguments, "{source}");
+            assert!(error.message.contains("parser error"), "{error:?}");
+            assert!(error.next_steps.iter().any(|step| step.contains("syntax")));
+        }
+    }
+
+    #[test]
+    fn parse_accepts_a_valid_routine_body_after_grammar_validation() {
+        let value = dispatch_static(
+            "oracle_plsql_parse",
+            json!({"source": "CREATE OR REPLACE PROCEDURE w4_valid AS n NUMBER; BEGIN SELECT 1 INTO n FROM dual; IF n = 1 THEN NULL; END IF; END;"}),
+        )
+        .expect("valid routine body parses without a database");
+        assert_eq!(value["declaration_count"], 1);
+        assert_eq!(value["error_count"], 0);
+        assert_eq!(value["recovered"], false);
+        assert_eq!(value["declarations"][0]["name"], "W4_VALID");
     }
 
     fn write_view_chain_project() -> tempfile::TempDir {
