@@ -386,6 +386,239 @@ fn decisive_matrix_every_action_kind_has_row() {
 }
 
 #[test]
+fn decisive_matrix_exact_required_fields_for_every_context() {
+    use DecisiveField::*;
+    use std::collections::BTreeSet;
+
+    // Independent approval contracts. Never derive these lists from required()
+    // or the production row constants: that cannot detect an omitted field.
+    let dml: &[DecisiveField] = &[
+        Envelope,
+        ObjectIdentities,
+        ObjectStatus,
+        MutationEffectClosure,
+        Edition,
+        CurrentSchema,
+        ProfileGeneration,
+        LaneGeneration,
+    ];
+    let dml_rows: &[DecisiveField] = &[
+        Envelope,
+        ObjectIdentities,
+        ObjectStatus,
+        MutationEffectClosure,
+        Rows,
+        Edition,
+        CurrentSchema,
+        ProfileGeneration,
+        LaneGeneration,
+    ];
+    let ddl: &[DecisiveField] = &[
+        Envelope,
+        ObjectIdentities,
+        ObjectStatus,
+        DdlEffectClosure,
+        SourceEffects,
+        Reversibility,
+        Edition,
+        CurrentSchema,
+        ProfileGeneration,
+        LaneGeneration,
+    ];
+    let ddl_strict: &[DecisiveField] = &[
+        Envelope,
+        ObjectIdentities,
+        ObjectStatus,
+        Dependents,
+        PredictedInvalidSet,
+        DdlEffectClosure,
+        SourceEffects,
+        Reversibility,
+        Edition,
+        CurrentSchema,
+        ProfileGeneration,
+        LaneGeneration,
+    ];
+    let statement: &[DecisiveField] = &[Envelope, ProfileGeneration, LaneGeneration];
+    let elevation: &[DecisiveField] = &[
+        Envelope,
+        ProfileCeiling,
+        OAuthCeiling,
+        ProfileGeneration,
+        LaneGeneration,
+    ];
+    let package: &[DecisiveField] = &[
+        Envelope,
+        ClosureFactKey,
+        RoutineEffects,
+        MaskingProfileOutput,
+        ProfileGeneration,
+        LaneGeneration,
+    ];
+    let package_ddl: &[DecisiveField] = &[
+        Envelope,
+        ClosureFactKey,
+        RoutineEffects,
+        MaskingProfileOutput,
+        DdlEffectClosure,
+        ProfileGeneration,
+        LaneGeneration,
+    ];
+    let promotion: &[DecisiveField] = &[
+        Envelope,
+        EditionManifest,
+        ChangedEditionManifest,
+        DbIdentity,
+        DefaultEqualsBase,
+        EditionParentage,
+        EditionExposure,
+        ServiceEditions,
+        ProfileGeneration,
+        LaneGeneration,
+    ];
+    let promotion_ddl: &[DecisiveField] = &[
+        Envelope,
+        EditionManifest,
+        ChangedEditionManifest,
+        DbIdentity,
+        DefaultEqualsBase,
+        EditionParentage,
+        EditionExposure,
+        ServiceEditions,
+        DdlEffectClosure,
+        ProfileGeneration,
+        LaneGeneration,
+    ];
+    let grant: &[DecisiveField] = &[
+        Envelope,
+        ScopeDigest,
+        MutationEffectClosure,
+        Rows,
+        PolicyFloor,
+        ProfileGeneration,
+        LaneGeneration,
+    ];
+
+    // Column bits are rows-supported=1, DDL-event=2, statement-scoped=4,
+    // require-impact=8. Each literal column independently pins an exact set,
+    // including flags which must have no effect on the particular action.
+    let contracts: [(ActionKind, [&[DecisiveField]; 16]); 11] = [
+        (
+            ActionKind::ExecuteDml,
+            [
+                dml, dml_rows, dml, dml_rows, statement, statement, statement, statement, dml,
+                dml_rows, dml, dml_rows, statement, statement, statement, statement,
+            ],
+        ),
+        (
+            ActionKind::ExecuteDdlAdmin,
+            [
+                ddl, ddl, ddl, ddl, statement, statement, statement, statement, ddl_strict,
+                ddl_strict, ddl_strict, ddl_strict, statement, statement, statement, statement,
+            ],
+        ),
+        (
+            ActionKind::PreviewDmlSandbox,
+            [
+                dml, dml_rows, dml, dml_rows, dml, dml_rows, dml, dml_rows, dml, dml_rows, dml,
+                dml_rows, dml, dml_rows, dml, dml_rows,
+            ],
+        ),
+        (
+            ActionKind::CompileObject,
+            [
+                ddl, ddl, ddl, ddl, ddl, ddl, ddl, ddl, ddl_strict, ddl_strict, ddl_strict,
+                ddl_strict, ddl_strict, ddl_strict, ddl_strict, ddl_strict,
+            ],
+        ),
+        (
+            ActionKind::CreateOrReplace,
+            [
+                ddl, ddl, ddl, ddl, ddl, ddl, ddl, ddl, ddl_strict, ddl_strict, ddl_strict,
+                ddl_strict, ddl_strict, ddl_strict, ddl_strict, ddl_strict,
+            ],
+        ),
+        (
+            ActionKind::PatchSource,
+            [
+                ddl, ddl, ddl, ddl, ddl, ddl, ddl, ddl, ddl_strict, ddl_strict, ddl_strict,
+                ddl_strict, ddl_strict, ddl_strict, ddl_strict, ddl_strict,
+            ],
+        ),
+        (
+            ActionKind::SetSessionLevel {
+                level: OperatingLevel::Admin,
+                ttl: 60,
+            },
+            [elevation; 16],
+        ),
+        (
+            ActionKind::CustomToolCall,
+            [
+                package,
+                package,
+                package_ddl,
+                package_ddl,
+                package,
+                package,
+                package_ddl,
+                package_ddl,
+                package,
+                package,
+                package_ddl,
+                package_ddl,
+                package,
+                package,
+                package_ddl,
+                package_ddl,
+            ],
+        ),
+        (
+            ActionKind::ChangeRequestPromote,
+            [
+                promotion,
+                promotion,
+                promotion_ddl,
+                promotion_ddl,
+                promotion,
+                promotion,
+                promotion_ddl,
+                promotion_ddl,
+                promotion,
+                promotion,
+                promotion_ddl,
+                promotion_ddl,
+                promotion,
+                promotion,
+                promotion_ddl,
+                promotion_ddl,
+            ],
+        ),
+        (ActionKind::GrantCreate, [grant; 16]),
+        (ActionKind::GrantUse, [grant; 16]),
+    ];
+    for (action, columns) in contracts {
+        for (bits, expected) in columns.into_iter().enumerate() {
+            let context = DecisiveMatrixContext {
+                dml_rows_supported: bits & 1 != 0,
+                has_ddl_event: bits & 2 != 0,
+                statement_scoped: bits & 4 != 0,
+                require_impact: bits & 8 != 0,
+            };
+            let required = DecisiveFieldMatrixV1::required(&action, context);
+            let expected: BTreeSet<_> = expected.iter().copied().collect();
+            let actual: BTreeSet<_> = required.iter().copied().collect();
+            assert_eq!(actual, expected, "{action:?}, {context:?}");
+            assert_eq!(
+                required.len(),
+                expected.len(),
+                "duplicate field: {action:?}, {context:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn decisive_unavailable_refuses_for_each_row_field() {
     for has_ddl_event in [false, true] {
         for dml_rows_supported in [false, true] {
