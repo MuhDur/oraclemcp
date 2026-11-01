@@ -1025,6 +1025,16 @@ env EXPECTED_ARCHIVE="$NO_COSIGN_ARCHIVE" EXPECTED_DIGEST="$NO_COSIGN_DIGEST" \
 checksum_file "$NO_COSIGN_ARCHIVE"
 log_pass "checksum sidecars are bound to the selected archive"
 
+# The planned unit follows the host service manager (install.sh
+# service_unit_path): systemd user units on Linux, LaunchAgents on macOS.
+if [ "$(uname -s)" = "Darwin" ]; then
+  EXPECTED_UNIT="$HOME_DIR/Library/LaunchAgents/io.github.MuhDur.oraclemcp.plist"
+  EXPECTED_NAMED_UNIT="$HOME_DIR/Library/LaunchAgents/oraclemcp.service.plist"
+else
+  EXPECTED_UNIT="$CONFIG_HOME/systemd/user/oraclemcp.service"
+  EXPECTED_NAMED_UNIT="$CONFIG_HOME/systemd/user/oraclemcp.service"
+fi
+
 service_output="$(
   env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
     bash install.sh \
@@ -1038,7 +1048,7 @@ service_output="$(
       --listen 127.0.0.1:7070
 )"
 
-contains "$service_output" "unit: $CONFIG_HOME/systemd/user/oraclemcp.service"
+contains "$service_output" "unit: $EXPECTED_UNIT"
 contains "$service_output" "$PREFIX/bin/oraclemcp service install --yes --name oraclemcp --listen 127.0.0.1:7070 --profile db_ro"
 contains "$service_output" "readyz_gate: curl --fail --silent --show-error --noproxy '*' http://127.0.0.1:7070/readyz"
 log_pass "service dry-run consent plan"
@@ -1055,7 +1065,7 @@ service_name_output="$(
       --service-name oraclemcp.service
 )"
 
-contains "$service_name_output" "unit: $CONFIG_HOME/systemd/user/oraclemcp.service"
+contains "$service_name_output" "unit: $EXPECTED_NAMED_UNIT"
 contains "$service_name_output" "$PREFIX/bin/oraclemcp service install --yes --name oraclemcp.service"
 log_pass "service-name accepts the normal .service form"
 
