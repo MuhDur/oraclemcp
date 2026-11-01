@@ -3271,6 +3271,8 @@ struct ExecState {
     impact_count: Mutex<Option<u64>>,
     impact_read_error: Mutex<Option<DbError>>,
     impact_scn_error: Mutex<Option<(bool, DbError)>>,
+    /// Models a session killed by the DBA: every later round trip fails.
+    wire_lost: AtomicBool,
     executed: Mutex<Vec<(String, Vec<OracleBind>)>>,
     /// Every read that actually reached Oracle. A row-level policy is only
     /// enforced if its predicate is in the SQL the database sees.
@@ -3306,6 +3308,7 @@ impl Default for ExecState {
             impact_count: Mutex::new(Some(0)),
             impact_read_error: Default::default(),
             impact_scn_error: Default::default(),
+            wire_lost: Default::default(),
             executed: Default::default(),
             queried: Default::default(),
             execute_error: Default::default(),
@@ -3687,6 +3690,9 @@ impl OracleConnection for ExecRecordingMock {
 
     async fn describe(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         self.state.describe_calls.fetch_add(1, Ordering::SeqCst);
+        if self.state.wire_lost.load(Ordering::SeqCst) {
+            return Err(killed_wire());
+        }
         if self.state.describe_pending.load(Ordering::SeqCst) != 0 {
             return std::future::pending().await;
         }
@@ -3733,6 +3739,9 @@ impl OracleConnection for ExecRecordingMock {
             .lock()
             .expect("query mutex")
             .push(sql.to_owned());
+        if self.state.wire_lost.load(Ordering::SeqCst) {
+            return Err(killed_wire());
+        }
         if sql == CatalogQueryId::SessionContext.spec().sql
             && self.state.impact_schema_epoch.load(Ordering::SeqCst) != 0
         {
@@ -11471,6 +11480,47 @@ fn issue47_desync_dml_returns_typed_outcome_without_replay() {
         "a mutation with an uncertain wire outcome must never be replayed"
     );
     assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+}
+
+fn killed_wire() -> DbError {
+    DbError::ConnectionLost("ORA-03113: end-of-file on communication channel".to_owned())
+}
+
+#[test]
+fn issue47_killed_session_dml_reports_unexecuted_preflight_without_replay() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+    state.wire_lost.store(true, Ordering::SeqCst);
+
+    let error = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": "UPDATE employees SET name = name WHERE employee_id = 1" }),
+        )
+        .expect_err("a killed session cannot run a governed DML");
+    assert_eq!(error.error_class, ErrorClass::ConnectionFailed, "{error:?}");
+    assert_eq!(
+        error.statement_outcome,
+        Some(StatementOutcome::ProtocolUnsynchronized)
+    );
+    assert!(
+        error.message.contains("no statement was executed"),
+        "{}",
+        error.message
+    );
+    assert!(
+        !error.next_steps.iter().any(|step| step.contains("retry")),
+        "a mutation must not be offered a retry: {:?}",
+        error.next_steps
+    );
+    assert!(
+        state.executed.lock().expect("exec mutex").is_empty(),
+        "the killed DML must never reach execute"
+    );
 }
 
 #[test]

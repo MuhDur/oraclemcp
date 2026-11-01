@@ -604,8 +604,7 @@ impl DecisiveFactProbe {
         match run_catalog_query(context.cx, context.conn, id, binds).await {
             Ok(rows) => Ok(Some(rows)),
             Err(error) if error.is_uncertain_session_state() => {
-                impact::quarantine_dependency_observation(context.quarantine, &error);
-                Err(error.into_envelope())
+                Err(impact_probe_lost_session(context, &error))
             }
             Err(_) => Ok(None),
         }
@@ -786,10 +785,10 @@ impl DecisiveFactProbe {
                 Err(oraclemcp_db::DependentsError::Database(error))
                     if error.is_uncertain_session_state() =>
                 {
-                    impact::quarantine_dependency_observation(context.quarantine, &error);
                     if !context.is_preview {
-                        return Err(error.into_envelope());
+                        return Err(impact_probe_lost_session(context, &error));
                     }
+                    impact::quarantine_dependency_observation(context.quarantine, &error);
                     exact_count = false;
                     decisive
                         .action_fields
@@ -982,6 +981,18 @@ fn dependency_object_facts(closure: &oraclemcp_db::DependentsClosure) -> Vec<Obj
         });
     }
     objects
+}
+
+/// Every guarded statement is preceded by this fact probe. A lost wire here
+/// leaves the session unsynchronized although nothing was sent for execution,
+/// so report exactly that instead of the read path's retryable transport class.
+fn impact_probe_lost_session(context: FactProbeContext<'_>, error: &DbError) -> ErrorEnvelope {
+    impact::quarantine_dependency_observation(context.quarantine, error);
+    quarantined_db_error(
+        QuarantineOutcome::UnknownDiscarded,
+        "impact fact preflight lost a synchronized Oracle session; no statement was executed",
+    )
+    .into_envelope()
 }
 
 pub(super) fn repreview_required() -> ErrorEnvelope {

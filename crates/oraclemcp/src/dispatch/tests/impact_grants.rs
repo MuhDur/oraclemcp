@@ -15,6 +15,7 @@ struct FactConnection {
     forbid_code_catalog: AtomicBool,
     no_triggers: AtomicBool,
     pending_dependents: AtomicBool,
+    lost_dependents: AtomicBool,
     dependent_rows: SyncMutex<Vec<OracleRow>>,
     dependency_owner: SyncMutex<Option<String>>,
 }
@@ -128,6 +129,13 @@ impl OracleConnection for FactConnection {
                 && self.pending_dependents.load(Ordering::Relaxed)
             {
                 return std::future::pending().await;
+            }
+            if sql == CatalogQueryId::DependentsTransitive.spec().sql
+                && self.lost_dependents.load(Ordering::Relaxed)
+            {
+                return Err(DbError::ConnectionLost(
+                    "ORA-03113: end-of-file on communication channel".into(),
+                ));
             }
             assert!(
                 !self.forbid_code_catalog.load(Ordering::Relaxed),
@@ -436,6 +444,53 @@ fn decisive_dependency_timeout_is_typed_and_does_not_mint() {
         assert_eq!(error.impact_decisive.unwrap().field, "dependents");
         assert_eq!(conn.queries.load(Ordering::Relaxed), 4);
         assert!(quarantine.lock().unwrap().is_some());
+    });
+}
+
+#[test]
+fn lost_dependents_wire_reports_an_unexecuted_unsynchronized_preflight() {
+    run_with_cx(|cx| async move {
+        for is_preview in [false, true] {
+            let conn = FactConnection::default();
+            conn.lost_dependents.store(true, Ordering::Relaxed);
+            let identity = ExecGrantBinding::new("lost", "lane", "subject", 1);
+            let scoped = ScopedGrantStore::new();
+            let quarantine = SyncMutex::new(None);
+            let context = FactProbeContext {
+                is_preview,
+                ..context(&cx, &conn, &identity, &scoped, &quarantine)
+            };
+            let captured = BoundImpact::capture(
+                context,
+                "ALTER TABLE APP0.T ADD X NUMBER",
+                "lost-envelope",
+                &[],
+                None,
+                None,
+                None,
+            )
+            .await;
+            // Either way the unsynchronized wire is retired before reuse.
+            assert!(quarantine.lock().unwrap().is_some(), "preview={is_preview}");
+            if is_preview {
+                // R36: a preview keeps the dependency loss as an observation.
+                assert!(captured.is_ok(), "preview stays advisory");
+                continue;
+            }
+            let Err(error) = captured else {
+                panic!("a lost wire produced approval material");
+            };
+            assert_eq!(error.error_class, ErrorClass::ConnectionFailed, "{error:?}");
+            assert_eq!(
+                error.statement_outcome,
+                Some(StatementOutcome::ProtocolUnsynchronized)
+            );
+            assert!(
+                error.message.contains("no statement was executed"),
+                "{}",
+                error.message
+            );
+        }
     });
 }
 
