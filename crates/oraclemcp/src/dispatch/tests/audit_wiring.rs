@@ -143,7 +143,18 @@ fn served_write_appends_pending_then_signed_outcome() {
         .expect("write dispatches");
     assert!(out.is_object());
 
-    let recs = sink.records();
+    let all_recs = sink.records();
+    assert_eq!(
+        all_recs
+            .iter()
+            .filter(|record| record.tool == "impact_probe")
+            .count(),
+        4
+    );
+    let recs = all_recs
+        .into_iter()
+        .filter(|record| record.tool != "impact_probe")
+        .collect::<Vec<_>>();
     assert_eq!(
         recs.len(),
         2,
@@ -185,6 +196,7 @@ fn caller_supplied_identity_cannot_change_audit_subject_or_db_evidence() {
         .expect_err("preview rejects caller-supplied identity");
     assert_eq!(preview_spoof.error_class, ErrorClass::InvalidArguments);
     let confirm = preview_confirm_with_context(&dispatcher, context, sql);
+    let before_rejected = sink.records().len();
 
     let rejected = dispatcher
         .dispatch_with_context(
@@ -203,8 +215,9 @@ fn caller_supplied_identity_cannot_change_audit_subject_or_db_evidence() {
     assert!(rejected.message.contains("agent_identity"), "{rejected:?}");
     assert!(rejected.message.contains("operator_name"), "{rejected:?}");
     assert!(rejected.message.contains("label"), "{rejected:?}");
-    assert!(
-        sink.records().is_empty(),
+    assert_eq!(
+        sink.records().len(),
+        before_rejected,
         "rejected arguments cannot reach the audit or DB write path"
     );
 
@@ -216,7 +229,18 @@ fn caller_supplied_identity_cannot_change_audit_subject_or_db_evidence() {
         )
         .expect("clean write dispatches");
 
-    let recs = sink.records();
+    let all_recs = sink.records();
+    assert_eq!(
+        all_recs
+            .iter()
+            .filter(|record| record.tool == "impact_probe")
+            .count(),
+        4
+    );
+    let recs = all_recs
+        .into_iter()
+        .filter(|record| record.tool != "impact_probe")
+        .collect::<Vec<_>>();
     assert_eq!(recs.len(), 2);
     let expected_subject = AuditSubject::new("oauth", "subject-hash").with_authn_method("oauth");
     for rec in &recs {
@@ -1403,22 +1427,30 @@ fn broker_confirmation_intents_are_distinct_across_sessions_and_generations() {
     let mut intent_ids = Vec::new();
     for (binding, sql) in cases {
         let grants = ExecGrantStore::new();
-        let material = oraclemcp_guard::GrantMaterial::new(
+        let impact = unit_approval_binding(
             sql,
-            &local_impact(
-                sql,
-                ImpactGenerations {
-                    profile: binding.generation,
-                    lane: binding.generation,
-                },
-            ),
+            ImpactGenerations {
+                profile: binding.generation,
+                lane: binding.generation,
+            },
+        );
+        let material = oraclemcp_guard::GrantMaterial::new(sql, &impact).unwrap();
+        let approval = DecisiveApproval::check(
+            &material,
+            &impact,
+            &ActionKind::ExecuteDdlAdmin,
+            DecisiveMatrixContext {
+                dml_rows_supported: false,
+                has_ddl_event: true,
+                ..Default::default()
+            },
         )
         .unwrap();
         let confirm = issue_confirmation_grant(
             &grants,
             &binding,
             Some("shared"),
-            &material,
+            &approval,
             OperatingLevel::Ddl,
         );
         raw_ids.push(
@@ -1427,7 +1459,7 @@ fn broker_confirmation_intents_are_distinct_across_sessions_and_generations() {
                 .raw_id,
         );
         let key = consume_confirmation_grant(ConfirmationGrantRequest {
-            material: &material,
+            approval: &approval,
             required_level: OperatingLevel::Ddl,
             active_profile: Some("shared"),
             grants: &grants,
@@ -1439,7 +1471,7 @@ fn broker_confirmation_intents_are_distinct_across_sessions_and_generations() {
         })
         .unwrap();
         let intent = WriteIntent::new(WriteIntentDetails {
-            idempotency_key_material: &key,
+            idempotency_key_material: &key.confirmation,
             subject: &binding.subject_id,
             active_profile: Some("shared"),
             tool: "oracle_execute",

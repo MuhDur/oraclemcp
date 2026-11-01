@@ -92,6 +92,10 @@ pub enum ErrorClass {
     /// The previewed action envelope differs from the action now requested.
     /// Preview the exact SQL, binds, and execution modes again.
     RepreviewRequired,
+    /// A required impact fact is missing or could not be proved.
+    ImpactDecisiveUnavailable,
+    /// A required impact fact exceeded its completeness bounds.
+    ImpactDecisiveTruncated,
     /// A stateful operation (transaction, savepoint, DBMS_OUTPUT) was attempted
     /// without an active session lease (§5.1).
     LeaseRequired,
@@ -146,7 +150,7 @@ pub enum ErrorClass {
 
 impl ErrorClass {
     /// Every currently defined wire error class, in deterministic wire order.
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 26] = [
         Self::AtCapacity,
         Self::Busy,
         Self::ChallengeRequired,
@@ -156,6 +160,8 @@ impl ErrorClass {
         Self::FlashbackNotFlashbackable,
         Self::FlashbackRetentionExceeded,
         Self::ForbiddenStatement,
+        Self::ImpactDecisiveTruncated,
+        Self::ImpactDecisiveUnavailable,
         Self::InsufficientPrivilege,
         Self::Internal,
         Self::InvalidArguments,
@@ -184,6 +190,8 @@ impl ErrorClass {
             Self::RuntimeStateRequired => "operation needs unavailable live runtime state",
             Self::ChallengeRequired => "operator confirmation has not completed",
             Self::RepreviewRequired => "requested action differs from its approved preview",
+            Self::ImpactDecisiveUnavailable => "a required impact fact is unavailable",
+            Self::ImpactDecisiveTruncated => "a required impact fact is incomplete",
             Self::LeaseRequired => "operation needs an active stateful session lease",
             Self::ForbiddenStatement => "fail-closed guard refused the statement",
             Self::OperatingLevelTooLow => "session operating level is too low",
@@ -219,6 +227,12 @@ impl ErrorClass {
             Self::RuntimeStateRequired => "offline invocation or disconnected profile",
             Self::ChallengeRequired => "required step-up task is pending",
             Self::RepreviewRequired => "SQL, binds, or execution modes changed after preview",
+            Self::ImpactDecisiveUnavailable => {
+                "required bounded fact collection did not produce a complete proof"
+            }
+            Self::ImpactDecisiveTruncated => {
+                "required impact collection exceeded a completeness bound"
+            }
             Self::LeaseRequired => "stateful tool invoked outside a leased session",
             Self::ForbiddenStatement => "unprovable side effect or disallowed SQL construct",
             Self::OperatingLevelTooLow => "read-only or lower-level session cap",
@@ -260,6 +274,9 @@ impl ErrorClass {
             }
             Self::RepreviewRequired => {
                 "preview the exact SQL, binds, and modes again before confirmation"
+            }
+            Self::ImpactDecisiveUnavailable | Self::ImpactDecisiveTruncated => {
+                "resolve the named impact field's cause and obtain complete bounded facts before requesting a fresh confirmation"
             }
             Self::LeaseRequired => "start or resume a stateful session before using this operation",
             Self::ForbiddenStatement => {
@@ -742,6 +759,13 @@ impl StructuredReason {
     }
 }
 
+/// Only a machine field identifier and cause; never the field's value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImpactDecisiveDetail {
+    pub field: String,
+    pub reason: String,
+}
+
 /// The actionable, agent-facing error payload (plan §8.2).
 ///
 /// `is_error` is serialized as `isError` to match the MCP tool-result shape.
@@ -780,6 +804,9 @@ pub struct ErrorEnvelope {
     /// errors and for older readers.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub structured_reason: Option<StructuredReason>,
+    /// Why a required impact proof prevented minting or applying a grant.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub impact_decisive: Option<ImpactDecisiveDetail>,
     /// Proven fate of the statement, when the dispatch path can name it.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub statement_outcome: Option<StatementOutcome>,
@@ -804,6 +831,7 @@ impl ErrorEnvelope {
             retry_after_ms: None,
             queued_ms: None,
             structured_reason: None,
+            impact_decisive: None,
             statement_outcome: None,
             cancel_outcome: None,
         }
@@ -820,6 +848,19 @@ impl ErrorEnvelope {
     #[must_use]
     pub fn with_suggested_tool(mut self, tool: impl Into<String>) -> Self {
         self.suggested_tool = Some(tool.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_impact_decisive(
+        mut self,
+        field: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        self.impact_decisive = Some(ImpactDecisiveDetail {
+            field: field.into(),
+            reason: reason.into(),
+        });
         self
     }
 
@@ -1466,6 +1507,29 @@ mod tests {
         let json = serde_json::to_string(&env).expect("serialize");
         let back: ErrorEnvelope = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(env, back);
+    }
+
+    #[test]
+    fn impact_decisive_details_roundtrip_and_absent_details_are_omitted() {
+        for class in [
+            ErrorClass::ImpactDecisiveUnavailable,
+            ErrorClass::ImpactDecisiveTruncated,
+        ] {
+            let envelope = ErrorEnvelope::new(class, "required facts are incomplete")
+                .with_impact_decisive("dependents", "timeout");
+            let value = serde_json::to_value(&envelope).unwrap();
+            assert_eq!(
+                value["impact_decisive"],
+                serde_json::json!({"field":"dependents", "reason":"timeout"})
+            );
+            assert_eq!(
+                serde_json::from_value::<ErrorEnvelope>(value).unwrap(),
+                envelope
+            );
+        }
+        let plain =
+            serde_json::to_value(ErrorEnvelope::new(ErrorClass::Timeout, "deadline")).unwrap();
+        assert!(plain.get("impact_decisive").is_none());
     }
 
     #[test]

@@ -198,10 +198,11 @@ fn write_auth_confirm_token_as_scoped_grant_refused() {
         &ExecGrantBinding::new("process", "process", "process", 1),
         Some("dev"),
         OperatingLevel::ReadWrite,
-        &oraclemcp_guard::GrantMaterial {
-            sql_digest: [6; 32],
-            decisive_digest: [7; 32],
-        },
+        &oraclemcp_guard::GrantMaterial::new(
+            "synthetic signing fixture",
+            &oraclemcp_guard::ImpactBindingV1::default(),
+        )
+        .unwrap(),
     );
     refused(
         &dispatcher,

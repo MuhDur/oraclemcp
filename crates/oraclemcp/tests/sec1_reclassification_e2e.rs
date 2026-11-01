@@ -63,8 +63,20 @@ fn sample_rows_catalog(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>
             ("CON_UID", Some("3")),
         ])]);
     }
+    if sql == oraclemcp_db::CatalogQueryId::ClosureMemberObject.spec().sql {
+        return Some(vec![catalog_row(&[
+            ("OBJECT_ID", Some("42")),
+            ("STATUS", Some("VALID")),
+            ("LAST_DDL_TIME", Some("2026-10-30T00:00:00")),
+        ])]);
+    }
+    if sql == oraclemcp_db::CatalogQueryId::DdlSessionContext.spec().sql {
+        return Some(vec![catalog_row(&[
+            ("SESSION_USER", Some("APP")),
+            ("CURRENT_SCHEMA", Some("APP")),
+        ])]);
+    }
     if [
-        oraclemcp_db::CatalogQueryId::ClosureMemberObject,
         oraclemcp_db::CatalogQueryId::ClosureTriggers,
         oraclemcp_db::CatalogQueryId::DependentsTransitive,
         oraclemcp_db::CatalogQueryId::DependentsTransitiveVisible,
@@ -200,10 +212,10 @@ impl OracleConnection for RecordingConnection {
     async fn query_rows(
         &self,
         _cx: &Cx,
-        _sql: &str,
-        _binds: &[OracleBind],
+        sql: &str,
+        binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
-        Ok(Vec::new())
+        Ok(sample_rows_catalog(sql, binds).unwrap_or_default())
     }
 
     async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {

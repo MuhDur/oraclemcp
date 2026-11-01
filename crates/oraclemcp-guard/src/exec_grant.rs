@@ -38,6 +38,11 @@ pub struct GrantMaterial {
     pub sql_digest: [u8; 32],
     /// Canonical decisive facts of the impact shown at approval.
     pub decisive_digest: [u8; 32],
+    // At most the closed DecisiveField set: no source, binds or unbounded
+    // object vectors are retained in the approval store.
+    fields: std::collections::BTreeMap<crate::impact_binding::DecisiveField, [u8; 32]>,
+    authority: [u8; 32],
+    computed_observations: std::collections::BTreeSet<crate::impact_binding::DecisiveField>,
 }
 
 impl GrantMaterial {
@@ -49,7 +54,47 @@ impl GrantMaterial {
         Ok(Self {
             sql_digest: crate::ActionEnvelopeV1::statement_digest(statement),
             decisive_digest: impact.decisive_digest()?,
+            fields: crate::impact_binding::field_fingerprints(impact),
+            authority: crate::impact_binding::authority_fingerprint(impact),
+            computed_observations: crate::impact_binding::computed_observations(impact).collect(),
         })
+    }
+
+    /// Complete producer inputs are attached before minting; preserve the
+    /// exact original execution material while replacing that pre-mint proof.
+    pub fn with_impact(
+        &self,
+        impact: &crate::ImpactBindingV1,
+    ) -> Result<Self, crate::ImpactVersionError> {
+        Ok(Self {
+            sql_digest: self.sql_digest,
+            decisive_digest: impact.decisive_digest()?,
+            fields: crate::impact_binding::field_fingerprints(impact),
+            authority: crate::impact_binding::authority_fingerprint(impact),
+            computed_observations: crate::impact_binding::computed_observations(impact).collect(),
+        })
+    }
+
+    /// A fresh binding may differ in advisory observations. Required fields
+    /// and the original execution/policy authority must still match.
+    pub fn revalidate(
+        &self,
+        current: &crate::ImpactBindingV1,
+        required: &[crate::impact_binding::DecisiveField],
+    ) -> Result<(), crate::impact_binding::DecisiveRevalidationRefusal> {
+        use crate::impact_binding::*;
+        if self.authority != authority_fingerprint(current) {
+            return Err(DecisiveRevalidationRefusal::Changed {
+                field: DecisiveField::Envelope,
+            });
+        }
+        for &field in required.iter().chain(self.computed_observations.iter()) {
+            if self.fields.get(&field).copied() != field_fingerprint(current, field) {
+                return Err(DecisiveRevalidationRefusal::Changed { field });
+            }
+        }
+        check_decisive(current, required)?;
+        Ok(())
     }
 
     /// Domain-separated digest of both immutable approval fingerprints.
@@ -139,6 +184,27 @@ struct Entry {
     deadline: MonotonicDeadline,
 }
 
+impl Entry {
+    fn validate_identity(&self, binding: &ExecGrantBinding) -> Result<(), ExecGrantError> {
+        if self.binding.session_id != binding.session_id {
+            return Err(ExecGrantError::SessionMismatch);
+        }
+        if self.binding.lane_id != binding.lane_id {
+            return Err(ExecGrantError::LaneMismatch);
+        }
+        if self.binding.subject_id != binding.subject_id {
+            return Err(ExecGrantError::SubjectMismatch);
+        }
+        if self.binding.generation != binding.generation {
+            return Err(ExecGrantError::GenerationMismatch {
+                presented: binding.generation,
+                granted: self.binding.generation,
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Hard cap on live execution grants retained in the store. Grants are
 /// single-use and TTL-bounded, so `issue` drops expired grants on every mint;
 /// the cap additionally bounds a burst of still-live grants so no `issue` call
@@ -220,6 +286,30 @@ impl ExecGrantStore {
         id
     }
 
+    /// Read an authenticated lane's approved field commitments without
+    /// consuming the grant. Expiry and context checks match consumption.
+    pub fn material_for_revalidation(
+        &self,
+        token: &str,
+        binding: &ExecGrantBinding,
+        requested_level: OperatingLevel,
+    ) -> Result<GrantMaterial, ExecGrantError> {
+        let mut entries = self.entries.lock().expect("poisoned");
+        let entry = entries.get(token).ok_or(ExecGrantError::Unknown)?;
+        if entry.deadline.is_expired() {
+            entries.remove(token);
+            return Err(ExecGrantError::Expired);
+        }
+        entry.validate_identity(binding)?;
+        if requested_level > entry.granted_level {
+            return Err(ExecGrantError::LevelExceedsGrant {
+                requested: requested_level,
+                granted: entry.granted_level,
+            });
+        }
+        Ok(entry.material.clone())
+    }
+
     /// Consume `token` for revalidated `material` at `requested_level`.
     /// Validates single-use, expiry, both digests, lane/session/subject binding,
     /// generation, and level; on success the grant is removed (cannot be
@@ -238,21 +328,7 @@ impl ExecGrantStore {
             return Err(ExecGrantError::Expired);
         }
         // Non-consuming validation failures (a correct retry may still succeed).
-        if entry.binding.session_id != binding.session_id {
-            return Err(ExecGrantError::SessionMismatch);
-        }
-        if entry.binding.lane_id != binding.lane_id {
-            return Err(ExecGrantError::LaneMismatch);
-        }
-        if entry.binding.subject_id != binding.subject_id {
-            return Err(ExecGrantError::SubjectMismatch);
-        }
-        if entry.binding.generation != binding.generation {
-            return Err(ExecGrantError::GenerationMismatch {
-                presented: binding.generation,
-                granted: entry.binding.generation,
-            });
-        }
+        entry.validate_identity(binding)?;
         if entry.material.sql_digest != material.sql_digest {
             return Err(ExecGrantError::DigestMismatch);
         }

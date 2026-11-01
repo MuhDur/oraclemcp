@@ -485,6 +485,38 @@ pub(super) struct PreviewSqlArgs {
     pub(super) timeout_seconds: Option<u64>,
 }
 
+impl From<&ExecuteArgs> for PreviewSqlArgs {
+    fn from(args: &ExecuteArgs) -> Self {
+        Self {
+            sql: args.sql.clone(),
+            binds: args.binds.clone(),
+            commit: args.commit,
+            hold: args.hold,
+            scoped_grant: args.scoped_grant.clone(),
+            capture_dbms_output: args.capture_dbms_output,
+            dbms_output_max_lines: args.dbms_output_max_lines,
+            dbms_output_max_chars: args.dbms_output_max_chars,
+            timeout_seconds: args.timeout_seconds,
+        }
+    }
+}
+
+impl From<&PreviewDmlArgs> for PreviewSqlArgs {
+    fn from(args: &PreviewDmlArgs) -> Self {
+        Self {
+            sql: args.sql.clone(),
+            binds: args.binds.clone(),
+            commit: args.commit,
+            hold: args.hold,
+            scoped_grant: args.scoped_grant.clone(),
+            capture_dbms_output: args.capture_dbms_output,
+            dbms_output_max_lines: args.dbms_output_max_lines,
+            dbms_output_max_chars: args.dbms_output_max_chars,
+            timeout_seconds: args.timeout_seconds,
+        }
+    }
+}
+
 /// Arc I: `oracle_checkpoint` — establish a named savepoint on the pinned
 /// session, opening (or extending) the reversible workspace.
 #[derive(Deserialize)]

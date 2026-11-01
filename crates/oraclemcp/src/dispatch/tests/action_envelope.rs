@@ -140,38 +140,53 @@ fn envelope_action_kind_mismatch_refused() {
     let grants = ExecGrantStore::new();
     let binding = ExecGrantBinding::new("session", "lane", "subject", 1);
     let preview_material = ddl_action_material(sql, ActionKind::CreateOrReplace, None);
-    let preview_material = oraclemcp_guard::GrantMaterial::new(
+    let preview_binding = unit_approval_binding(
         &preview_material,
-        &local_impact(
-            &preview_material,
-            ImpactGenerations {
-                profile: binding.generation,
-                lane: binding.generation,
-            },
-        ),
+        ImpactGenerations {
+            profile: 1,
+            lane: 1,
+        },
+    );
+    let preview_material =
+        oraclemcp_guard::GrantMaterial::new(&preview_material, &preview_binding).unwrap();
+    let matrix = DecisiveMatrixContext {
+        dml_rows_supported: false,
+        has_ddl_event: true,
+        ..Default::default()
+    };
+    let preview_approval = DecisiveApproval::check(
+        &preview_material,
+        &preview_binding,
+        &ActionKind::CreateOrReplace,
+        matrix,
     )
     .unwrap();
     let token = issue_confirmation_grant(
         &grants,
         &binding,
         Some("action-envelope-test"),
-        &preview_material,
+        &preview_approval,
         OperatingLevel::Ddl,
     );
-    let apply_material = ddl_action_material(sql, ActionKind::ExecuteDdlAdmin, None);
-    let apply_material = oraclemcp_guard::GrantMaterial::new(
+    let apply_envelope = ddl_action_material(sql, ActionKind::ExecuteDdlAdmin, None);
+    let apply_binding = unit_approval_binding(
+        &apply_envelope,
+        ImpactGenerations {
+            profile: 1,
+            lane: 1,
+        },
+    );
+    let apply_material =
+        oraclemcp_guard::GrantMaterial::new(&apply_envelope, &apply_binding).unwrap();
+    let apply_approval = DecisiveApproval::check(
         &apply_material,
-        &local_impact(
-            &apply_material,
-            ImpactGenerations {
-                profile: binding.generation,
-                lane: binding.generation,
-            },
-        ),
+        &apply_binding,
+        &ActionKind::ExecuteDdlAdmin,
+        matrix,
     )
     .unwrap();
     let error = consume_execute_confirmation(
-        &apply_material,
+        &apply_approval,
         OperatingLevel::Ddl,
         Some("action-envelope-test"),
         &grants,
@@ -231,7 +246,10 @@ fn grant_generation(dispatcher: &OracleDispatcher) -> u64 {
 
 fn assert_alter_session_invalidates_confirmation(sql: &str) {
     let (dispatcher, state) = dispatcher();
-    let old_token = confirm(&dispatcher, json!({"sql": UPDATE, "commit": true}));
+    let old_token = confirm(
+        &dispatcher,
+        json!({"sql": UPDATE, "binds":["Ada",7], "commit": true}),
+    );
     let alter_token = confirm(&dispatcher, json!({"sql": sql}));
     let before = grant_generation(&dispatcher);
     let result = dispatcher
@@ -245,7 +263,7 @@ fn assert_alter_session_invalidates_confirmation(sql: &str) {
     let error = dispatcher
         .dispatch(
             "oracle_execute",
-            json!({"sql": UPDATE, "commit": true, "confirm": old_token}),
+            json!({"sql": UPDATE, "binds":["Ada",7], "commit": true, "confirm": old_token}),
         )
         .expect_err("old confirmation must be invalidated");
     // ALTER SESSION revokes the old generation and clears its grants; this is
@@ -277,6 +295,14 @@ fn bind_redaction_canary_absent_from_audit_and_logs() {
     impl AuditSink for SharedSink {
         fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
             self.0.append(record)
+        }
+
+        fn append_with_verdict_certificate(
+            &self,
+            record: &AuditRecord,
+            certificate: &oraclemcp_audit::BoundAuditVerdictCertificate,
+        ) -> Result<(), AuditError> {
+            self.0.append_with_verdict_certificate(record, certificate)
         }
 
         fn flush(&self) -> Result<(), AuditError> {
@@ -375,6 +401,14 @@ mod qa85_terminal_boundaries {
             self.0.append(record)
         }
 
+        fn append_with_verdict_certificate(
+            &self,
+            record: &AuditRecord,
+            certificate: &oraclemcp_audit::BoundAuditVerdictCertificate,
+        ) -> Result<(), AuditError> {
+            self.0.append_with_verdict_certificate(record, certificate)
+        }
+
         fn flush(&self) -> Result<(), AuditError> {
             self.0.flush()
         }
@@ -409,6 +443,15 @@ mod qa85_terminal_boundaries {
             self.inner.append(record)
         }
 
+        fn append_with_verdict_certificate(
+            &self,
+            record: &AuditRecord,
+            certificate: &oraclemcp_audit::BoundAuditVerdictCertificate,
+        ) -> Result<(), AuditError> {
+            self.inner
+                .append_with_verdict_certificate(record, certificate)
+        }
+
         fn flush(&self) -> Result<(), AuditError> {
             self.inner.flush()
         }
@@ -424,6 +467,15 @@ mod qa85_terminal_boundaries {
             self.inner.append(record)?;
             self.cx.set_cancel_requested(true);
             Ok(())
+        }
+
+        fn append_with_verdict_certificate(
+            &self,
+            record: &AuditRecord,
+            certificate: &oraclemcp_audit::BoundAuditVerdictCertificate,
+        ) -> Result<(), AuditError> {
+            self.inner
+                .append_with_verdict_certificate(record, certificate)
         }
 
         fn flush(&self) -> Result<(), AuditError> {
@@ -880,7 +932,18 @@ mod qa85_terminal_boundaries {
             intents.unresolved().expect("intent snapshot").is_empty(),
             "known commit success resolves the durable write intent"
         );
-        let records = sink.records();
+        let all_records = sink.records();
+        assert_eq!(
+            all_records
+                .iter()
+                .filter(|record| record.tool == "impact_probe")
+                .count(),
+            4
+        );
+        let records = all_records
+            .into_iter()
+            .filter(|record| record.tool != "impact_probe")
+            .collect::<Vec<_>>();
         assert_eq!(records.len(), 2, "pending plus terminal audit record");
         assert_eq!(records[0].outcome, AuditOutcome::Pending);
         assert_eq!(records[1].outcome, AuditOutcome::Succeeded);
@@ -944,7 +1007,18 @@ mod qa85_terminal_boundaries {
             assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
             assert_eq!(state.commits.load(Ordering::SeqCst), 0);
             assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
-            let records = sink.records();
+            let all_records = sink.records();
+            assert_eq!(
+                all_records
+                    .iter()
+                    .filter(|record| record.tool == "impact_probe")
+                    .count(),
+                2
+            );
+            let records = all_records
+                .into_iter()
+                .filter(|record| record.tool != "impact_probe")
+                .collect::<Vec<_>>();
             assert_eq!(records.len(), 2);
             assert_eq!(records[0].outcome, AuditOutcome::Pending);
             assert_eq!(records[1].outcome, AuditOutcome::RolledBack);
@@ -1335,7 +1409,22 @@ mod qa85_terminal_boundaries {
         assert_eq!(err.error_class, ErrorClass::ConnectionFailed);
         assert!(err.message.contains("commit_in_doubt"), "{}", err.message);
         assert_eq!(append_count.load(Ordering::SeqCst), 2);
-        assert_eq!(memory_sink.records().len(), 1, "only Pending was durable");
+        let all_records = memory_sink.records();
+        assert_eq!(
+            all_records
+                .iter()
+                .filter(|record| record.tool == "impact_probe")
+                .count(),
+            4
+        );
+        assert_eq!(
+            all_records
+                .iter()
+                .filter(|record| record.tool != "impact_probe")
+                .count(),
+            1,
+            "only mutation Pending was durable"
+        );
         assert_eq!(state.commits.load(Ordering::SeqCst), 1);
         assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
         assert_eq!(
@@ -1353,10 +1442,52 @@ mod qa85_terminal_boundaries {
     #[test]
     fn cancelled_audit_evidence_preflight_quarantines_before_execute() {
         let state = Arc::new(ExecState::default());
-        *state.describe_error.lock().expect("describe error mutex") = Some(DbError::Cancelled(
-            "injected audit-evidence cancellation".to_owned(),
+        struct CancelMutationEvidence {
+            state: Arc<ExecState>,
+            inner: Arc<MemoryAuditSink>,
+            completed_counts: AtomicUsize,
+        }
+        impl CancelMutationEvidence {
+            fn after(&self, record: &AuditRecord) {
+                if record.tool == "impact_probe"
+                    && record.outcome == AuditOutcome::Succeeded
+                    && self.completed_counts.fetch_add(1, Ordering::SeqCst) == 1
+                {
+                    *self.state.describe_error.lock().unwrap() = Some(DbError::Cancelled(
+                        "injected audit-evidence cancellation".into(),
+                    ));
+                }
+            }
+        }
+        impl AuditSink for CancelMutationEvidence {
+            fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
+                self.inner.append(record)?;
+                self.after(record);
+                Ok(())
+            }
+            fn append_with_verdict_certificate(
+                &self,
+                record: &AuditRecord,
+                certificate: &oraclemcp_audit::BoundAuditVerdictCertificate,
+            ) -> Result<(), AuditError> {
+                self.inner
+                    .append_with_verdict_certificate(record, certificate)?;
+                self.after(record);
+                Ok(())
+            }
+            fn flush(&self) -> Result<(), AuditError> {
+                self.inner.flush()
+            }
+        }
+        let sink = Arc::new(MemoryAuditSink::new());
+        let auditor = Arc::new(Auditor::new(
+            Box::new(CancelMutationEvidence {
+                state: state.clone(),
+                inner: sink.clone(),
+                completed_counts: AtomicUsize::new(0),
+            }),
+            SigningKey::new("qa85-evidence", vec![9; 32]).unwrap(),
         ));
-        let (auditor, sink) = auditor_with_sink();
         let dispatcher = OracleDispatcher::new_with_profile_level(
             Box::new(ExecRecordingMock::new(Arc::clone(&state))),
             Some("dev".to_owned()),
@@ -1377,8 +1508,10 @@ mod qa85_terminal_boundaries {
         assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
         assert_eq!(state.commits.load(Ordering::SeqCst), 0);
         assert!(
-            sink.records().is_empty(),
-            "Pending is not written preflight"
+            sink.records()
+                .iter()
+                .all(|record| record.tool == "impact_probe"),
+            "mutation Pending is not written preflight"
         );
 
         let later = dispatcher
@@ -1437,7 +1570,7 @@ mod qa85_terminal_boundaries {
 #[test]
 fn revalidate_served_final_checkpoint_prevents_execution_after_consume() {
     use oraclemcp_audit::{AuditError, AuditRecord, AuditSink, SigningKey};
-    struct DriftOnAttempt(Arc<ExecState>);
+    struct DriftOnAttempt(Arc<ExecState>, oraclemcp_audit::MemoryAuditSink);
     impl AuditSink for DriftOnAttempt {
         fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
             if record.tool == "oracle_execute" && record.outcome == AuditOutcome::Pending {
@@ -1445,8 +1578,15 @@ fn revalidate_served_final_checkpoint_prevents_execution_after_consume() {
             }
             Ok(())
         }
+        fn append_with_verdict_certificate(
+            &self,
+            record: &AuditRecord,
+            certificate: &oraclemcp_audit::BoundAuditVerdictCertificate,
+        ) -> Result<(), AuditError> {
+            self.1.append_with_verdict_certificate(record, certificate)
+        }
         fn flush(&self) -> Result<(), AuditError> {
-            Ok(())
+            self.1.flush()
         }
     }
     let (dispatcher, state) = dispatcher();
@@ -1455,7 +1595,10 @@ fn revalidate_served_final_checkpoint_prevents_execution_after_consume() {
         json!({"sql": UPDATE, "binds": ["Ada", 7], "commit": true}),
     );
     let auditor = Arc::new(Auditor::new(
-        Box::new(DriftOnAttempt(state.clone())),
+        Box::new(DriftOnAttempt(
+            state.clone(),
+            oraclemcp_audit::MemoryAuditSink::new(),
+        )),
         SigningKey::new("final-impact", vec![9; 32]).unwrap(),
     ));
     let dispatcher = dispatcher.with_auditor(auditor);
@@ -1560,4 +1703,336 @@ fn unchanged_served_impact_round_trip_audits_both_digests() {
         assert_eq!(record.decisive_digest.as_deref(), Some(decisive.as_str()));
         assert!(record.hash_is_valid());
     }
+}
+
+pub(super) fn mock_approval_count_rows(sql: &str) -> Option<Vec<OracleRow>> {
+    if sql == CatalogQueryId::CurrentScn.spec().sql {
+        return Some(vec![semantic_row(&[("OBSERVED_SCN", Some("424242"))])]);
+    }
+    if sql.to_ascii_uppercase().contains("SELECT COUNT(*)") && sql.contains("impact_probe") {
+        return Some(vec![semantic_row(&[("COUNT(*)", Some("0"))])]);
+    }
+    None
+}
+
+pub(super) fn mock_complete_dependencies(
+    sql: &str,
+    binds: &[OracleBind],
+) -> Option<Vec<OracleRow>> {
+    if [
+        CatalogQueryId::DependentsTransitive,
+        CatalogQueryId::DependentsTransitiveVisible,
+        CatalogQueryId::DependentsTransitiveAllSources,
+        CatalogQueryId::DependentsTransitiveVisibleAllSources,
+    ]
+    .iter()
+    .any(|id| sql == id.spec().sql)
+    {
+        let roots: Value = serde_json::from_str(string_bind(binds, 0)?).ok()?;
+        let mut rows = Vec::new();
+        for root in roots.as_array()? {
+            let owner = root["owner"].as_str()?;
+            let name = root["name"].as_str()?;
+            let kind = root["type"].as_str()?;
+            rows.push(semantic_row(&[
+                ("ROW_KIND", Some("object")),
+                ("OWNER", Some(owner)),
+                ("NAME", Some(name)),
+                ("TYPE", Some(kind)),
+                ("OBJECT_ID", Some("42")),
+                ("STATUS", Some("VALID")),
+                ("LAST_DDL_TIME", Some("2026-10-31T00:00:00")),
+            ]));
+            let source_binds = [
+                OracleBind::String(owner.into()),
+                OracleBind::String(name.into()),
+                OracleBind::String(kind.into()),
+            ];
+            let source = if kind == "VIEW" {
+                Some("SELECT 1 N FROM SYS.DUAL".into())
+            } else {
+                mock_plain_table_dictionary(CatalogQueryId::ClosureSource.spec().sql, &source_binds)
+                    .and_then(|source| {
+                        source
+                            .first()
+                            .and_then(|row| row.text("TEXT"))
+                            .map(str::to_owned)
+                    })
+            };
+            if let Some(source) = source {
+                rows.push(semantic_row(&[
+                    ("ROW_KIND", Some("source")),
+                    ("OWNER", Some(owner)),
+                    ("NAME", Some(name)),
+                    ("TYPE", Some(kind)),
+                    ("OBJECT_ID", Some("42")),
+                    ("LINE", Some("1")),
+                    ("TEXT", Some(&source)),
+                    ("SOURCE_LINES", Some("1")),
+                    ("SOURCE_LENGTH", Some(&source.len().to_string())),
+                ]));
+            }
+        }
+        return Some(rows);
+    }
+    None
+}
+
+pub(super) fn mock_plain_table_dictionary(
+    sql: &str,
+    binds: &[OracleBind],
+) -> Option<Vec<OracleRow>> {
+    // Explicit complete metadata for synthetic ordinary-table and clean
+    // compilation fixtures. Dedicated unit and native canaries test refusal.
+    if sql == CatalogQueryId::ClosureIdentity.spec().sql {
+        return Some(vec![semantic_row(&[
+            ("DBID", Some("1")),
+            ("CONTAINER_NAME", Some("FREEPDB1")),
+            ("EDITION_NAME", Some("ORA$BASE")),
+        ])]);
+    }
+    if sql == CatalogQueryId::DdlTriggers.spec().sql {
+        return Some(Vec::new());
+    }
+    if sql == CatalogQueryId::DdlSessionContext.spec().sql {
+        return Some(vec![semantic_row(&[
+            ("SESSION_USER", Some("APP")),
+            ("CURRENT_SCHEMA", Some("APP")),
+        ])]);
+    }
+    if [
+        CatalogQueryId::MutationTriggers,
+        CatalogQueryId::MutationTriggerColumns,
+        CatalogQueryId::MutationIndexes,
+        CatalogQueryId::MutationIndexExpressions,
+        CatalogQueryId::MutationVpdPolicies,
+        CatalogQueryId::MutationFgaPolicies,
+        CatalogQueryId::MutationForeignKeys,
+        CatalogQueryId::MutationMvLogs,
+        CatalogQueryId::HardParseAssociations,
+        CatalogQueryId::HardParseIndexes,
+    ]
+    .iter()
+    .any(|id| sql == id.spec().sql)
+    {
+        return Some(Vec::new());
+    }
+    if sql == CatalogQueryId::MutationTarget.spec().sql
+        || sql == CatalogQueryId::ClosureMemberObject.spec().sql
+    {
+        return Some(vec![semantic_row(&[
+            ("OWNER", string_bind(binds, 0)),
+            ("OBJECT_NAME", string_bind(binds, 1)),
+            ("OBJECT_ID", Some("42")),
+            ("STATUS", Some("VALID")),
+            ("EDITION_NAME", None),
+            ("LAST_DDL_TIME", Some("2026-10-31T00:00:00")),
+        ])]);
+    }
+    if sql == CatalogQueryId::MutationColumns.spec().sql {
+        return Some(
+            [
+                "ID",
+                "K",
+                "V",
+                "NAME",
+                "SCORE",
+                "ACTIVE",
+                "NOTE",
+                "X",
+                "STATE",
+                "SALARY",
+                "EMPLOYEE_ID",
+                "C",
+                "C1",
+                "C2",
+                "N",
+                "STATUS",
+                "TENANT_ID",
+                "AMOUNT",
+                "SECRET",
+            ]
+            .into_iter()
+            .map(|name| {
+                semantic_row(&[
+                    ("OWNER", string_bind(binds, 0)),
+                    ("TABLE_NAME", string_bind(binds, 1)),
+                    ("COLUMN_NAME", Some(name)),
+                    ("DATA_TYPE", Some("NUMBER")),
+                    ("DATA_TYPE_OWNER", None),
+                    ("DATA_DEFAULT", None),
+                    ("DEFAULT_LENGTH", Some("0")),
+                    ("VIRTUAL_COLUMN", Some("NO")),
+                    ("HIDDEN_COLUMN", Some("NO")),
+                    ("USER_GENERATED", Some("YES")),
+                ])
+            })
+            .collect(),
+        );
+    }
+    if sql == CatalogQueryId::ClosureCompilerSettings.spec().sql {
+        return Some(vec![semantic_row(&[
+            ("PLSQL_OPTIMIZE_LEVEL", Some("2")),
+            ("PLSQL_CODE_TYPE", Some("INTERPRETED")),
+            ("PLSQL_DEBUG", Some("FALSE")),
+            ("PLSQL_WARNINGS", Some("DISABLE:ALL")),
+            ("PLSQL_CCFLAGS", None),
+            ("NLS_LENGTH_SEMANTICS", Some("BYTE")),
+            ("PLSCOPE_SETTINGS", Some("IDENTIFIERS:NONE")),
+        ])]);
+    }
+    if sql == CatalogQueryId::ClosureSource.spec().sql {
+        let name = string_bind(binds, 1).unwrap_or("EMP_API");
+        let source = match string_bind(binds, 2).unwrap_or("PACKAGE BODY") {
+            "PACKAGE" => format!("PACKAGE {name} AS PROCEDURE p; END;\n"),
+            "PACKAGE BODY" => {
+                format!("PACKAGE BODY {name} AS PROCEDURE p IS BEGIN NULL; END; END;\n")
+            }
+            "PROCEDURE" => format!("PROCEDURE {name} AS BEGIN NULL; END;\n"),
+            "FUNCTION" => format!("FUNCTION {name} RETURN NUMBER AS BEGIN RETURN 1; END;\n"),
+            "TYPE" => format!("TYPE {name} AS OBJECT(id NUMBER);\n"),
+            "TYPE BODY" => {
+                format!("TYPE BODY {name} AS MEMBER PROCEDURE p IS BEGIN NULL; END; END;\n")
+            }
+            _ => return None,
+        };
+        return Some(vec![semantic_row(&[
+            ("LINE", Some("1")),
+            ("TEXT", Some(&source)),
+        ])]);
+    }
+    if let Some(rows) = mock_relation_security_probe_rows(sql) {
+        return Some(rows);
+    }
+    let normalized = sql.to_ascii_lowercase();
+    if normalized.contains("sys_context('userenv', 'session_user')") {
+        let mut context = semantic_row(&[
+            ("SESSION_USER", Some("APP")),
+            ("CURRENT_SCHEMA", Some("APP")),
+            ("EDITION_NAME", Some("ORA$BASE")),
+        ]);
+        if normalized.contains("session_roles") {
+            context
+                .columns
+                .push(("ROLE".to_owned(), OracleCell::new("VARCHAR2", None)));
+        }
+        if normalized.contains("row_kind") {
+            context.columns.push((
+                "ROW_KIND".to_owned(),
+                OracleCell::new("VARCHAR2", Some("CONTEXT".to_owned())),
+            ));
+        }
+        return Some(vec![context]);
+    }
+    if normalized.contains("from sys.session_roles") {
+        return Some(Vec::new());
+    }
+    if normalized.contains("data_type_owner is not null") {
+        return Some(Vec::new());
+    }
+    if normalized.contains("from sys.all_synonyms where owner = 'public'")
+        && normalized.contains("synonym_name = 'plan_table'")
+    {
+        return Some(vec![semantic_row(&[
+            ("TABLE_OWNER", Some("SYS")),
+            ("TABLE_NAME", Some("PLAN_TABLE$")),
+            ("DB_LINK", None),
+        ])]);
+    }
+    if normalized.contains("from sys.all_objects")
+        && normalized.contains("object_name = 'plan_table'")
+    {
+        return Some(Vec::new());
+    }
+    if normalized.contains("from sys.all_tab_cols")
+        && normalized.contains("where owner = :1 and table_name = :2")
+        && normalized.contains("order by column_id")
+    {
+        return Some(vec![semantic_row(&[
+            ("COLUMN_NAME", Some("ID")),
+            ("DATA_TYPE", Some("NUMBER")),
+            ("DATA_LENGTH", Some("22")),
+            ("NULLABLE", Some("N")),
+            ("DATA_DEFAULT", None),
+            ("VIRTUAL_COLUMN", Some("NO")),
+            ("HIDDEN_COLUMN", Some("NO")),
+            ("USER_GENERATED", Some("YES")),
+        ])]);
+    }
+    if normalized.contains("from sys.all_indexes") && normalized.contains("ityp_owner") {
+        return Some(Vec::new());
+    }
+    if normalized.contains("t.owner = 'sys'") && normalized.contains("t.table_name = 'plan_table$'")
+    {
+        return Some(vec![semantic_row(&[
+            ("TEMPORARY", Some("Y")),
+            ("DURATION", Some("SYS$SESSION")),
+            ("OBJECT_ID", Some("901")),
+        ])]);
+    }
+    if normalized.contains("from sys.all_objects")
+        && normalized.contains("object_id, status, edition_name")
+    {
+        let owner = string_bind(binds, 0).unwrap_or("APP");
+        let name = string_bind(binds, 1).unwrap_or("DUAL");
+        return Some(vec![semantic_row(&[
+            ("OWNER", Some(owner)),
+            ("OBJECT_NAME", Some(name)),
+            ("OBJECT_TYPE", Some("TABLE")),
+            ("OBJECT_ID", Some("42")),
+            ("STATUS", Some("VALID")),
+            ("EDITION_NAME", None),
+        ])]);
+    }
+    if normalized.contains("from sys.all_tab_columns") && normalized.contains("column_name = :1") {
+        let column = string_bind(binds, 0).unwrap_or("ID").to_ascii_uppercase();
+        return match column.as_str() {
+            "ID" | "EMBEDDING" | "LABEL" => Some(vec![semantic_row(&[
+                ("OWNER", Some("APP")),
+                ("TABLE_NAME", Some("ORDERS")),
+                ("COLUMN_NAME", Some(column.as_str())),
+                ("COLUMN_ID", Some("1")),
+            ])]),
+            _ => Some(Vec::new()),
+        };
+    }
+    if normalized.contains("from sys.all_synonyms")
+        || normalized.contains("from sys.all_arguments")
+        || (normalized.contains("from sys.all_tab_columns")
+            && !normalized.contains("table_name = :2"))
+    {
+        return Some(Vec::new());
+    }
+    if normalized.contains("from sys.all_tab_columns") && normalized.contains("table_name = :2") {
+        let column = string_bind(binds, 2).unwrap_or("VALUE");
+        return Some(vec![semantic_row(&[
+            ("COLUMN_NAME", Some(column)),
+            ("COLUMN_ID", Some("1")),
+        ])]);
+    }
+    // Only the bounded live-read-proof probes (`... AND ROWNUM <= 1`) are answered
+    // here; the bulk catalog-extraction queries (`... WHERE owner IN (...)`, no
+    // ROWNUM) must fall through to `catalog_extract_empty_rowset` so they yield an
+    // empty rowset with the extraction's own column shape, not this probe shape.
+    if normalized.contains("from sys.all_policies") && normalized.contains("rownum") {
+        if normalized.contains("object_owner = :1")
+            || normalized.contains("(object_owner, object_name) in")
+        {
+            return Some(Vec::new());
+        }
+        return Some(vec![semantic_row(&[(
+            "POLICY_NAME",
+            Some("VISIBLE_POLICY"),
+        )])]);
+    }
+    if normalized.contains("from sys.all_audit_policies") {
+        return Some(Vec::new());
+    }
+    if normalized.contains("from sys.all_tab_cols") && normalized.contains("rownum") {
+        if normalized.contains("virtual_column = 'yes'") {
+            return Some(Vec::new());
+        }
+        return Some(vec![semantic_row(&[("COLUMN_NAME", Some("ID"))])]);
+    }
+    None
 }

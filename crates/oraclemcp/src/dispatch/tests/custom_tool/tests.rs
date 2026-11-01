@@ -226,6 +226,7 @@ fn plan() -> PackageCallPlan {
     let mut bindings = signed.definition().args.clone();
     bindings.swap(0, 1);
     PackageCallPlan {
+        approval_action: oraclemcp_core::tools::ApprovalAction::CustomToolCall,
         signed,
         wrapper: PackageCallWrapper {
             sql: "DECLARE p NUMBER; BEGIN p := :x; :result := APP.PKG.INC(PX => p); END;".into(),
@@ -358,9 +359,7 @@ fn package_ddl_commitment_uses_the_collector_bytes_and_binds_every_event() {
             }
             _ => changed.ddl_closures[1][0] ^= 1,
         }
-        let fresh = package_approval(&changed, &args, generations, false)
-            .unwrap()
-            .1;
+        let (fresh_binding, fresh) = package_approval(&changed, &args, generations, false).unwrap();
         assert_ne!(many, fresh, "{change}");
         let store = ExecGrantStore::new();
         let binding = ExecGrantBinding {
@@ -369,10 +368,26 @@ fn package_ddl_commitment_uses_the_collector_bytes_and_binds_every_event() {
             subject_id: "operator".into(),
             generation: 3,
         };
-        let token =
-            issue_confirmation_grant(&store, &binding, Some("test"), &many, OperatingLevel::Ddl);
+        let matrix = DecisiveMatrixContext {
+            dml_rows_supported: false,
+            has_ddl_event: true,
+            ..Default::default()
+        };
+        let approved =
+            DecisiveApproval::check(&many, &many_binding, &ActionKind::CustomToolCall, matrix)
+                .unwrap();
+        let current =
+            DecisiveApproval::check(&fresh, &fresh_binding, &ActionKind::CustomToolCall, matrix)
+                .unwrap();
+        let token = issue_confirmation_grant(
+            &store,
+            &binding,
+            Some("test"),
+            &approved,
+            OperatingLevel::Ddl,
+        );
         let error = consume_confirmation_grant(ConfirmationGrantRequest {
-            material: &fresh,
+            approval: &current,
             required_level: OperatingLevel::Ddl,
             active_profile: Some("test"),
             grants: &store,
@@ -386,7 +401,7 @@ fn package_ddl_commitment_uses_the_collector_bytes_and_binds_every_event() {
         assert_eq!(error.error_class, ErrorClass::RepreviewRequired, "{change}");
         assert!(
             consume_confirmation_grant(ConfirmationGrantRequest {
-                material: &many,
+                approval: &approved,
                 required_level: OperatingLevel::Ddl,
                 active_profile: Some("test"),
                 grants: &store,
@@ -748,6 +763,8 @@ fn package_guard_test_context<'a>(
     subject: &'a AuditSubject,
 ) -> DbToolCtx<'a> {
     DbToolCtx {
+        dml_impact: None,
+        registered_action: Some(oraclemcp_core::tools::ApprovalAction::CustomToolCall),
         profile_classifier: &state.profile_classifier,
         cx,
         conn: state.conn.as_ref(),

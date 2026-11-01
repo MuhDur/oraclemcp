@@ -62,6 +62,8 @@ pub oraclemcp_error::ErrorClass::FlashbackDefinitionChanged
 pub oraclemcp_error::ErrorClass::FlashbackNotFlashbackable
 pub oraclemcp_error::ErrorClass::FlashbackRetentionExceeded
 pub oraclemcp_error::ErrorClass::ForbiddenStatement
+pub oraclemcp_error::ErrorClass::ImpactDecisiveTruncated
+pub oraclemcp_error::ErrorClass::ImpactDecisiveUnavailable
 pub oraclemcp_error::ErrorClass::InsufficientPrivilege
 pub oraclemcp_error::ErrorClass::Internal
 pub oraclemcp_error::ErrorClass::InvalidArguments
@@ -78,7 +80,7 @@ pub oraclemcp_error::ErrorClass::SyntaxError
 pub oraclemcp_error::ErrorClass::Timeout
 pub oraclemcp_error::ErrorClass::Transient
 impl oraclemcp_error::ErrorClass
-pub const oraclemcp_error::ErrorClass::ALL: [Self; 24]
+pub const oraclemcp_error::ErrorClass::ALL: [Self; 26]
 pub fn oraclemcp_error::ErrorClass::default_suggested_tool(self) -> core::option::Option<&'static str>
 pub fn oraclemcp_error::ErrorClass::is_retryable(self) -> bool
 pub const fn oraclemcp_error::ErrorClass::meaning(self) -> &'static str
@@ -350,6 +352,7 @@ pub struct oraclemcp_error::ErrorEnvelope
 pub oraclemcp_error::ErrorEnvelope::cancel_outcome: core::option::Option<oraclemcp_error::CancelOutcome>
 pub oraclemcp_error::ErrorEnvelope::error_class: oraclemcp_error::ErrorClass
 pub oraclemcp_error::ErrorEnvelope::fuzzy_matches: alloc::vec::Vec<alloc::string::String>
+pub oraclemcp_error::ErrorEnvelope::impact_decisive: core::option::Option<oraclemcp_error::ImpactDecisiveDetail>
 pub oraclemcp_error::ErrorEnvelope::is_error: bool
 pub oraclemcp_error::ErrorEnvelope::message: alloc::string::String
 pub oraclemcp_error::ErrorEnvelope::next_steps: alloc::vec::Vec<alloc::string::String>
@@ -364,6 +367,7 @@ pub fn oraclemcp_error::ErrorEnvelope::new(oraclemcp_error::ErrorClass, impl cor
 pub fn oraclemcp_error::ErrorEnvelope::to_json(&self) -> serde_json::value::Value
 pub fn oraclemcp_error::ErrorEnvelope::with_cancel_outcome(self, oraclemcp_error::CancelOutcome) -> Self
 pub fn oraclemcp_error::ErrorEnvelope::with_fuzzy_matches(self, alloc::vec::Vec<alloc::string::String>) -> Self
+pub fn oraclemcp_error::ErrorEnvelope::with_impact_decisive(self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oraclemcp_error::ErrorEnvelope::with_next_step(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oraclemcp_error::ErrorEnvelope::with_ora_code(self, i32) -> Self
 pub fn oraclemcp_error::ErrorEnvelope::with_queued_ms(self, u64) -> Self
@@ -413,6 +417,51 @@ pub unsafe fn oraclemcp_error::ErrorEnvelope::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for oraclemcp_error::ErrorEnvelope
 pub fn oraclemcp_error::ErrorEnvelope::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_error::ErrorEnvelope where T: for<'de> serde_core::de::Deserialize<'de>
+pub struct oraclemcp_error::ImpactDecisiveDetail
+pub oraclemcp_error::ImpactDecisiveDetail::field: alloc::string::String
+pub oraclemcp_error::ImpactDecisiveDetail::reason: alloc::string::String
+impl core::clone::Clone for oraclemcp_error::ImpactDecisiveDetail
+pub fn oraclemcp_error::ImpactDecisiveDetail::clone(&self) -> oraclemcp_error::ImpactDecisiveDetail
+impl core::cmp::Eq for oraclemcp_error::ImpactDecisiveDetail
+impl core::cmp::PartialEq for oraclemcp_error::ImpactDecisiveDetail
+pub fn oraclemcp_error::ImpactDecisiveDetail::eq(&self, &oraclemcp_error::ImpactDecisiveDetail) -> bool
+impl core::fmt::Debug for oraclemcp_error::ImpactDecisiveDetail
+pub fn oraclemcp_error::ImpactDecisiveDetail::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_error::ImpactDecisiveDetail
+impl serde_core::ser::Serialize for oraclemcp_error::ImpactDecisiveDetail
+pub fn oraclemcp_error::ImpactDecisiveDetail::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_error::ImpactDecisiveDetail
+pub fn oraclemcp_error::ImpactDecisiveDetail::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_error::ImpactDecisiveDetail
+impl core::marker::Send for oraclemcp_error::ImpactDecisiveDetail
+impl core::marker::Sync for oraclemcp_error::ImpactDecisiveDetail
+impl core::marker::Unpin for oraclemcp_error::ImpactDecisiveDetail
+impl core::marker::UnsafeUnpin for oraclemcp_error::ImpactDecisiveDetail
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_error::ImpactDecisiveDetail
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_error::ImpactDecisiveDetail
+impl<T, U> core::convert::Into<U> for oraclemcp_error::ImpactDecisiveDetail where U: core::convert::From<T>
+pub fn oraclemcp_error::ImpactDecisiveDetail::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_error::ImpactDecisiveDetail where U: core::convert::Into<T>
+pub type oraclemcp_error::ImpactDecisiveDetail::Error = core::convert::Infallible
+pub fn oraclemcp_error::ImpactDecisiveDetail::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_error::ImpactDecisiveDetail where U: core::convert::TryFrom<T>
+pub type oraclemcp_error::ImpactDecisiveDetail::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_error::ImpactDecisiveDetail::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_error::ImpactDecisiveDetail where T: core::clone::Clone
+pub type oraclemcp_error::ImpactDecisiveDetail::Owned = T
+pub fn oraclemcp_error::ImpactDecisiveDetail::clone_into(&self, &mut T)
+pub fn oraclemcp_error::ImpactDecisiveDetail::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_error::ImpactDecisiveDetail where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_error::ImpactDecisiveDetail::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_error::ImpactDecisiveDetail where T: ?core::marker::Sized
+pub fn oraclemcp_error::ImpactDecisiveDetail::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_error::ImpactDecisiveDetail where T: ?core::marker::Sized
+pub fn oraclemcp_error::ImpactDecisiveDetail::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_error::ImpactDecisiveDetail where T: core::clone::Clone
+pub unsafe fn oraclemcp_error::ImpactDecisiveDetail::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_error::ImpactDecisiveDetail
+pub fn oraclemcp_error::ImpactDecisiveDetail::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_error::ImpactDecisiveDetail where T: for<'de> serde_core::de::Deserialize<'de>
 pub struct oraclemcp_error::OptimizerPlanRow
 pub oraclemcp_error::OptimizerPlanRow::access_predicates: core::option::Option<alloc::string::String>
 pub oraclemcp_error::OptimizerPlanRow::bytes: core::option::Option<i64>

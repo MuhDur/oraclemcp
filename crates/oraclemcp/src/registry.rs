@@ -9,10 +9,26 @@
 //! server, never dispatched), so it is NOT registered here.
 
 use oraclemcp_core::capabilities::{CapabilitiesReport, FeatureTiers};
-use oraclemcp_core::tools::{ToolDescriptor, ToolRegistry, ToolTier};
+use oraclemcp_core::tools::{ApprovalAction, ToolDescriptor, ToolRegistry, ToolTier};
 use oraclemcp_guard::OperatingLevel;
 use serde_json::{Value, json};
 use std::sync::OnceLock;
+
+/// Internal action policy from the same descriptors used by tools/list.
+/// The cache contains no independent tool-name policy table.
+pub(crate) fn approval_action(name: &str) -> Option<ApprovalAction> {
+    static ACTIONS: OnceLock<std::collections::BTreeMap<String, ApprovalAction>> = OnceLock::new();
+    ACTIONS
+        .get_or_init(|| {
+            tool_registry()
+                .tools
+                .into_iter()
+                .filter_map(|tool| tool.approval_action.map(|action| (tool.name, action)))
+                .collect()
+        })
+        .get(name)
+        .copied()
+}
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
@@ -735,6 +751,7 @@ pub fn tool_registry() -> ToolRegistry {
             ToolTier::FoundationStatic,
             "Preview or apply a temporary session operating-level elevation within the active profile ceiling, or drop back to READ_ONLY.",
         )
+        .with_approval_action(ApprovalAction::SetSessionLevel)
         .with_input_schema(object_schema(
             props_with(
                 json!({
@@ -911,6 +928,7 @@ pub fn tool_registry() -> ToolRegistry {
             ToolTier::FoundationStatic,
             "Classify SQL without executing the candidate and bind the exact SQL, typed binds, commit/hold mode, output caps and timeout into any confirmation. Changing one requires a new preview. Supported UPDATE/DELETE previews may run a separately audited, guarded COUNT read and return an advisory snapshot estimate with SCN bounds; unavailable rows never become zero. Admitted DDL previews include dependency closure and predicted invalidations, bounded to depth 10 and 1000 dependents; truncation and uncertainty are explicit, and unavailable observations do not change approval.",
         )
+        .with_approval_action(ApprovalAction::ExecuteStatement)
         .with_input_schema(object_schema(preview_sql_properties(), &["sql"])),
     );
 
@@ -920,6 +938,7 @@ pub fn tool_registry() -> ToolRegistry {
             ToolTier::FoundationLiveDb,
             "Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default and returns observed_rows separately from any preview estimate. Commits, held DML and non-transactional effects such as sequence NEXTVAL require a confirmation from oracle_preview_sql for the exact SQL, typed binds, commit/hold mode, output caps and timeout; a change requires re-preview. Visible at READ_ONLY only when the effective profile/OAuth ceiling permits READ_WRITE; visibility grants no authority. An explicit scoped_grant selects the scoped-grant path with no session-level fallback. Query-shaped NEXTVAL is refused because this path does not fetch rows. Engine-free caller PL/SQL is limited to NULL and literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements; explicit CALL remains refused until its runtime target can be resolved exactly.",
         )
+        .with_approval_action(ApprovalAction::ExecuteStatement)
         .with_input_schema(object_schema(
             props_with(
                 json!({
@@ -991,6 +1010,7 @@ pub fn tool_registry() -> ToolRegistry {
             ToolTier::FoundationLiveDb,
             "Dry-run supported DML only when the current level admits it and a complete mutation closure proves reversible effects. The server uses a savepoint and rolls back by default. Otherwise sandbox reports not_applicable with level_below_required or untrusted_triggers, without executing the candidate; unknown rows are never zero. Sequence advancement, autonomous work, transaction control and other unproven effects refuse the sandbox. An optional witness is separately proven read-only and shows rows before and after. Later execution re-classifies and re-gates the statement; the preview grants no authority.",
         )
+        .with_approval_action(ApprovalAction::PreviewDmlSandbox)
         .with_input_schema(object_schema(
             props_with(
                 json!({
@@ -1054,6 +1074,7 @@ pub fn tool_registry() -> ToolRegistry {
             ToolTier::FoundationLiveDb,
             "Preview or compile one PL/SQL/view object through the active DDL profile gate; preview is the default and execution requires the returned confirmation token. Preview impact includes transitive dependencies and predicted invalidations, capped at depth 10 and 1000 dependents, with explicit truncation and uncertainty.",
         )
+        .with_approval_action(ApprovalAction::CompileObject)
         .with_input_schema(object_schema(
             props_with(
                 json!({
@@ -1082,6 +1103,7 @@ pub fn tool_registry() -> ToolRegistry {
             ToolTier::FoundationLiveDb,
             "Preview or apply one CREATE OR REPLACE statement through the classifier and active DDL profile gate. Preview impact includes transitive dependencies and predicted invalidations, capped at depth 10 and 1000 dependents, with explicit truncation and uncertainty.",
         )
+        .with_approval_action(ApprovalAction::CreateOrReplace)
         .with_input_schema(object_schema(
             props_with(
                 json!({
@@ -1107,6 +1129,7 @@ pub fn tool_registry() -> ToolRegistry {
             ToolTier::FoundationLiveDb,
             "Preview or apply an exact old_text to new_text replacement against one stored source object; preview refetches the current source and execute uses the existing DDL confirmation gate. Preview impact includes transitive dependencies and predicted invalidations, capped at depth 10 and 1000 dependents, with explicit truncation and uncertainty.",
         )
+        .with_approval_action(ApprovalAction::PatchSource)
         .with_input_schema(object_schema(
             props_with(
                 json!({
@@ -1517,6 +1540,7 @@ pub fn tool_registry() -> ToolRegistry {
             ToolTier::FoundationStatic,
             "Compatibility alias for oracle_set_session_level with level=READ_WRITE; preview is still the default.",
         )
+        .with_approval_action(ApprovalAction::SetSessionLevel)
         .with_input_schema(object_schema(
             props_with(
                 json!({
@@ -1538,6 +1562,7 @@ pub fn tool_registry() -> ToolRegistry {
             ToolTier::FoundationStatic,
             "Compatibility alias for oracle_set_session_level action=drop; immediately returns the session to READ_ONLY.",
         )
+        .with_approval_action(ApprovalAction::SetSessionLevel)
         .with_input_schema(object_schema(
             json!({
                 "db": { "type": "string", "description": "Ignored compatibility argument from older clients." },
@@ -1595,6 +1620,7 @@ pub fn tool_registry() -> ToolRegistry {
             ToolTier::FoundationStatic,
             "Compatibility alias for oracle_preview_sql.",
         )
+        .with_approval_action(ApprovalAction::ExecuteStatement)
         .with_input_schema(object_schema(preview_sql_properties(), &["sql"])),
     );
 
@@ -1604,6 +1630,7 @@ pub fn tool_registry() -> ToolRegistry {
             ToolTier::FoundationLiveDb,
             "Compatibility alias for oracle_execute, including explicit scoped_grant selection. Visibility grants no authority. Token-only calls work for five minutes in the same server process and DML rolls back unless commit=true is explicit, except that non-transactional effects such as sequence NEXTVAL persist after rollback.",
         )
+        .with_approval_action(ApprovalAction::ExecuteStatement)
         .with_input_schema(object_schema(
             props_with(
                 json!({
@@ -1632,6 +1659,7 @@ pub fn tool_registry() -> ToolRegistry {
             ToolTier::FoundationLiveDb,
             "Compatibility alias for oracle_compile_object.",
         )
+        .with_approval_action(ApprovalAction::CompileObject)
         .with_input_schema(object_schema(
             props_with(
                 json!({
@@ -1660,6 +1688,7 @@ pub fn tool_registry() -> ToolRegistry {
             ToolTier::FoundationLiveDb,
             "Compatibility alias for oracle_compile_object with warnings=true. PL/SQL units only; VIEW is invalid.",
         )
+        .with_approval_action(ApprovalAction::CompileObject)
         .with_input_schema(object_schema(
             props_with(
                 json!({
@@ -1686,6 +1715,7 @@ pub fn tool_registry() -> ToolRegistry {
             ToolTier::FoundationLiveDb,
             "Compatibility alias for oracle_create_or_replace.",
         )
+        .with_approval_action(ApprovalAction::CreateOrReplace)
         .with_input_schema(object_schema(
             props_with(
                 json!({
@@ -1711,6 +1741,7 @@ pub fn tool_registry() -> ToolRegistry {
             ToolTier::FoundationLiveDb,
             "Compatibility alias for oracle_patch_source; defaults object_type to PACKAGE BODY when omitted.",
         )
+        .with_approval_action(ApprovalAction::PatchSource)
         .with_input_schema(object_schema(
             props_with(
                 json!({
@@ -1742,6 +1773,7 @@ pub fn tool_registry() -> ToolRegistry {
             ToolTier::FoundationLiveDb,
             "Compatibility alias for oracle_patch_source; defaults object_type to VIEW when omitted.",
         )
+        .with_approval_action(ApprovalAction::PatchSource)
         .with_input_schema(object_schema(
             props_with(
                 json!({
@@ -1788,6 +1820,7 @@ pub fn tool_registry() -> ToolRegistry {
             ToolTier::FoundationLiveDb,
             "Compatibility wrapper for one DDL statement. Preview is the default; execution reuses the same DDL profile gate and confirmation as oracle_execute/oracle_create_or_replace.",
         )
+        .with_approval_action(ApprovalAction::ExecuteStatement)
         .with_input_schema(object_schema(
             props_with(
                 json!({
@@ -2048,6 +2081,47 @@ pub fn capabilities(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_minting_tool_maps_to_action_kind() {
+        let registry = tool_registry();
+        let mut covered = 0;
+        for tool in &registry.tools {
+            let properties = tool
+                .input_schema
+                .as_ref()
+                .and_then(|schema| schema.get("properties"))
+                .and_then(Value::as_object);
+            let consumes_confirmation =
+                properties.is_some_and(|properties| properties.contains_key("confirm"));
+            if advertises_confirmation_preview(tool) || consumes_confirmation {
+                let action = tool
+                    .approval_action
+                    .expect("confirmation tool lacks server approval policy");
+                assert_eq!(approval_action(&tool.name), Some(action), "{}", tool.name);
+                for level in [
+                    OperatingLevel::ReadWrite,
+                    OperatingLevel::Ddl,
+                    OperatingLevel::Admin,
+                ] {
+                    let required = oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1::required(
+                        &action.resolve(level, 60),
+                        oraclemcp_guard::impact_binding::DecisiveMatrixContext {
+                            dml_rows_supported: true,
+                            has_ddl_event: true,
+                            ..Default::default()
+                        },
+                    );
+                    assert!(
+                        required
+                            .contains(&oraclemcp_guard::impact_binding::DecisiveField::Envelope)
+                    );
+                }
+                covered += 1;
+            }
+        }
+        assert!(covered > 0, "registry must contain approval tools");
+    }
 
     #[test]
     fn object_type_properties_are_enums_from_runtime_constants() {

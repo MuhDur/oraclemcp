@@ -1,13 +1,50 @@
 //! Immutable approval material and bounded decisive-fact revalidation.
 
 use super::*;
+use oraclemcp_guard::impact_binding::{
+    DecisiveField, DecisiveFieldMatrixV1, DecisiveMatrixContext, DecisiveRefusal, check_decisive,
+};
 use oraclemcp_guard::{GrantMaterial, ImpactBindingV1};
+
+/// Facts admitted by the one matrix before the token store can mint authority.
+/// The material and proof are checked together; an older material cannot be
+/// paired with an otherwise complete, different binding.
+pub(super) struct DecisiveApproval<'a> {
+    material: &'a GrantMaterial,
+    binding: &'a ImpactBindingV1,
+    required: &'static [DecisiveField],
+}
+
+impl<'a> DecisiveApproval<'a> {
+    pub(super) fn check(
+        material: &'a GrantMaterial,
+        binding: &'a ImpactBindingV1,
+        action: &ActionKind,
+        context: DecisiveMatrixContext,
+    ) -> Result<Self, ErrorEnvelope> {
+        let required = DecisiveFieldMatrixV1::required(action, context);
+        check_decisive(binding, required).map_err(DecisiveRefusal::into_envelope)?;
+        if material
+            .with_impact(binding)
+            .map_err(|_| repreview_required())?
+            != *material
+        {
+            return Err(repreview_required());
+        }
+        Ok(Self {
+            material,
+            binding,
+            required,
+        })
+    }
+}
 
 pub(super) fn execute_grant_token_fields(
     binding: &ExecGrantBinding,
     active_profile: Option<&str>,
     required_level: OperatingLevel,
-    material: &GrantMaterial,
+    sql_digest: &[u8; 32],
+    decisive_digest: &[u8; 32],
 ) -> Vec<String> {
     vec![
         active_profile.unwrap_or("").to_owned(),
@@ -16,8 +53,8 @@ pub(super) fn execute_grant_token_fields(
         binding.subject_id.clone(),
         binding.generation.to_string(),
         required_level.as_str().to_owned(),
-        hex_digest(&material.sql_digest),
-        hex_digest(&material.decisive_digest),
+        hex_digest(sql_digest),
+        hex_digest(decisive_digest),
     ]
 }
 
@@ -28,7 +65,13 @@ pub(super) fn sign_execute_grant_reference(
     required_level: OperatingLevel,
     material: &GrantMaterial,
 ) -> String {
-    let fields = execute_grant_token_fields(binding, active_profile, required_level, material);
+    let fields = execute_grant_token_fields(
+        binding,
+        active_profile,
+        required_level,
+        &material.sql_digest,
+        &material.decisive_digest,
+    );
     let refs = fields.iter().map(String::as_str).collect::<Vec<_>>();
     let payload = format!(
         "{raw_grant_id}~{}~{}",
@@ -40,7 +83,8 @@ pub(super) fn sign_execute_grant_reference(
 
 pub(super) struct VerifiedGrantReference {
     pub(super) raw_id: String,
-    pub(super) material: GrantMaterial,
+    pub(super) sql_digest: [u8; 32],
+    pub(super) decisive_digest: [u8; 32],
 }
 
 pub(super) fn verify_execute_grant_reference(
@@ -52,16 +96,21 @@ pub(super) fn verify_execute_grant_reference(
     let (payload, _) = token.rsplit_once('.')?;
     let (raw_and_sql, decisive) = payload.rsplit_once('~')?;
     let (raw, sql) = raw_and_sql.rsplit_once('~')?;
-    let material = GrantMaterial {
-        sql_digest: parse_digest(sql)?,
-        decisive_digest: parse_digest(decisive)?,
-    };
-    let fields = execute_grant_token_fields(binding, active_profile, required_level, &material);
+    let sql_digest = parse_digest(sql)?;
+    let decisive_digest = parse_digest(decisive)?;
+    let fields = execute_grant_token_fields(
+        binding,
+        active_profile,
+        required_level,
+        &sql_digest,
+        &decisive_digest,
+    );
     let refs = fields.iter().map(String::as_str).collect::<Vec<_>>();
     verify_token(EXECUTE_GRANT_TOKEN_SCOPE, token, &refs)?;
     Some(VerifiedGrantReference {
         raw_id: raw.to_owned(),
-        material,
+        sql_digest,
+        decisive_digest,
     })
 }
 
@@ -69,9 +118,10 @@ pub(super) fn issue_confirmation_grant(
     grants: &ExecGrantStore,
     binding: &ExecGrantBinding,
     active_profile: Option<&str>,
-    material: &GrantMaterial,
+    approval: &DecisiveApproval<'_>,
     required_level: OperatingLevel,
 ) -> String {
+    let material = approval.material;
     let raw = grants.issue(
         material.clone(),
         binding.clone(),
@@ -97,7 +147,7 @@ fn parse_digest(text: &str) -> Option<[u8; 32]> {
 }
 
 pub(super) struct ConfirmationGrantRequest<'a> {
-    pub(super) material: &'a GrantMaterial,
+    pub(super) approval: &'a DecisiveApproval<'a>,
     pub(super) required_level: OperatingLevel,
     pub(super) active_profile: Option<&'a str>,
     pub(super) grants: &'a ExecGrantStore,
@@ -108,9 +158,25 @@ pub(super) struct ConfirmationGrantRequest<'a> {
     pub(super) next_step: &'static str,
 }
 
+pub(super) struct ConsumedApproval {
+    pub(super) confirmation: String,
+    pub(super) material: GrantMaterial,
+}
+
+impl std::fmt::Debug for ConsumedApproval {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConsumedApproval")
+            .field("confirmation", &"<redacted>")
+            .field("material", &self.material)
+            .finish()
+    }
+}
+
 pub(super) fn consume_confirmation_grant(
     request: ConfirmationGrantRequest<'_>,
-) -> Result<String, ErrorEnvelope> {
+) -> Result<ConsumedApproval, ErrorEnvelope> {
+    let material = request.approval.material;
     let Some(confirm) = request
         .confirm
         .and_then(|value| non_empty_arg(Some(value.to_owned())))
@@ -135,13 +201,22 @@ pub(super) fn consume_confirmation_grant(
         .with_suggested_tool(request.suggested_tool)
         .with_next_step(request.next_step)
     })?;
-    // Raw counters can alias across dispatcher stores in one broker process.
-    // The authenticated material in the reference must also match this request;
-    // checking the signature and the store independently would allow a token
-    // from another store to authorize that store's different impact.
-    if reference.material != *request.material {
+    let approved = request
+        .grants
+        .material_for_revalidation(&reference.raw_id, request.binding, request.required_level)
+        .map_err(|error| {
+            confirmation_grant_error(error, request.suggested_tool, request.next_step)
+        })?;
+    // Two independent stores may share a raw counter. The authenticated full
+    // reference must match the actual store entry before any selective check.
+    if reference.sql_digest != approved.sql_digest
+        || reference.decisive_digest != approved.decisive_digest
+        || material.sql_digest != approved.sql_digest
+    {
         return Err(confirmation_grant_error(
-            if reference.material.sql_digest != request.material.sql_digest {
+            if reference.sql_digest != approved.sql_digest
+                || material.sql_digest != approved.sql_digest
+            {
                 ExecGrantError::DigestMismatch
             } else {
                 ExecGrantError::DecisiveMismatch
@@ -150,18 +225,24 @@ pub(super) fn consume_confirmation_grant(
             request.next_step,
         ));
     }
+    approved
+        .revalidate(request.approval.binding, request.approval.required)
+        .map_err(oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::into_envelope)?;
     request
         .grants
         .consume(
             &reference.raw_id,
-            request.material,
+            &approved,
             request.binding,
             request.required_level,
         )
         // Separate dispatcher stores share a broker PID and restart their
         // counters. The verified reference also binds the session/generation;
         // its stripped raw ID alone would alias in the shared durable ledger.
-        .map(|_| confirm)
+        .map(|_| ConsumedApproval {
+            confirmation: confirm,
+            material: approved,
+        })
         .map_err(|e| confirmation_grant_error(e, request.suggested_tool, request.next_step))
 }
 
@@ -266,6 +347,9 @@ pub(super) struct FactProbeContext<'a> {
     pub(super) scoped_grants: &'a ScopedGrantStore,
     pub(super) active_profile: Option<&'a str>,
     pub(super) is_preview: bool,
+    pub(super) dependency_budget: Duration,
+    pub(super) require_impact: bool,
+    pub(super) named_target: Option<&'a DependentObject>,
     pub(super) quarantine: &'a SyncMutex<Option<ConnectionQuarantine>>,
 }
 
@@ -273,6 +357,7 @@ pub(super) struct FactProbeContext<'a> {
 struct DecisiveFactProbe {
     root: Option<DependentObject>,
     ddl: bool,
+    no_schema_object: bool,
 }
 
 pub(super) struct BoundImpact {
@@ -281,6 +366,14 @@ pub(super) struct BoundImpact {
     probe: DecisiveFactProbe,
     pub(super) query_count: Option<usize>,
     scope_reference: Option<String>,
+    matrix: Option<(ActionKind, DecisiveMatrixContext)>,
+    display: Option<ImpactV1>,
+}
+
+pub(super) struct ApprovalMode {
+    pub(super) commit: bool,
+    pub(super) hold: bool,
+    pub(super) non_transactional: bool,
 }
 
 fn computed<T>(value: T) -> FieldStatus<T> {
@@ -298,8 +391,102 @@ fn digest_bytes(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
-fn digest_json(value: &impl serde::Serialize) -> [u8; 32] {
+pub(super) fn digest_json(value: &impl serde::Serialize) -> [u8; 32] {
     digest_bytes(&serde_json::to_vec(value).expect("fact serialization is infallible"))
+}
+
+fn unavailable<T>(reason: UnavailableReason) -> FieldStatus<T> {
+    FieldStatus::Unavailable { reason }
+}
+
+fn commitment<T: serde::Serialize>(status: &FieldStatus<T>) -> FieldStatus<[u8; 32]> {
+    match status {
+        FieldStatus::Computed { value } => computed(digest_json(value)),
+        FieldStatus::Unavailable { reason } => unavailable(*reason),
+        FieldStatus::Estimated { .. } => unavailable(UnavailableReason::CatalogUnavailable),
+        FieldStatus::NotApplicable { reason } => FieldStatus::NotApplicable { reason: *reason },
+    }
+}
+
+/// Only the snapshot-count producer supplies this proof. Display status remains
+/// Estimated; the committed fact is the complete bounded count/shape input, not
+/// an assertion about the row count at a later execution time.
+fn row_commitment(
+    rows: &FieldStatus<oraclemcp_guard::RowEstimate>,
+    statement: &FieldStatus<[u8; 32]>,
+    binds: &FieldStatus<[u8; 32]>,
+) -> FieldStatus<[u8; 32]> {
+    match rows {
+        FieldStatus::Computed { value } | FieldStatus::Estimated { value }
+            if value.kind == oraclemcp_guard::RowEstimateKind::SnapshotEstimate =>
+        {
+            computed(digest_json(&(
+                value.kind,
+                value.value,
+                value.profile_generation,
+                statement,
+                binds,
+            )))
+        }
+        FieldStatus::Unavailable { reason } => unavailable(*reason),
+        _ => unavailable(UnavailableReason::UnsupportedDmlShape),
+    }
+}
+
+/// Prediction is labelled Estimated in the UI even when its inputs are fully
+/// observed. Never use that label to hide a truncated or uncertain closure.
+fn dependent_commitments(
+    closure: &oraclemcp_db::DependentsClosure,
+) -> (
+    FieldStatus<[u8; 32]>,
+    FieldStatus<[u8; 32]>,
+    FieldStatus<Value>,
+) {
+    #[cfg(feature = "plsql-intelligence")]
+    {
+        let incomplete = if closure.truncated || !closure.truncation.is_empty() {
+            Some(UnavailableReason::Truncated)
+        } else if !closure.uncertainties.is_empty() {
+            Some(UnavailableReason::UnresolvedDependency)
+        } else {
+            None
+        };
+        let prediction = match crate::plsql_tools::predict_invalid_set(closure) {
+            Ok(value) => value,
+            Err(_) => {
+                return (
+                    unavailable(UnavailableReason::EngineFailed),
+                    unavailable(UnavailableReason::EngineFailed),
+                    unavailable(UnavailableReason::EngineFailed),
+                );
+            }
+        };
+        let prediction_uncertain = prediction
+            .get("uncertainties")
+            .and_then(Value::as_array)
+            .is_none_or(|values| !values.is_empty());
+        let mut display = serde_json::to_value(closure).expect("dependency proof");
+        display["prediction_mode"] = prediction["mode"].clone();
+        display["predicted_invalid_set"] = prediction["objects"].clone();
+        display["predicted_invalid_count"] = prediction["count"].clone();
+        display["uncertainties"] = prediction["uncertainties"].clone();
+        (
+            incomplete.map_or_else(|| computed(digest_json(closure)), unavailable),
+            incomplete
+                .or(prediction_uncertain.then_some(UnavailableReason::UnresolvedDependency))
+                .map_or_else(|| computed(digest_json(&prediction)), unavailable),
+            FieldStatus::Estimated { value: display },
+        )
+    }
+    #[cfg(not(feature = "plsql-intelligence"))]
+    {
+        let _ = closure;
+        (
+            unavailable(UnavailableReason::EngineNotWired),
+            unavailable(UnavailableReason::EngineNotWired),
+            unavailable(UnavailableReason::EngineNotWired),
+        )
+    }
 }
 
 /// Local facts for an action that does not inspect Oracle (session elevation).
@@ -322,6 +509,27 @@ pub(super) fn local_impact(envelope: &str, generations: ImpactGenerations) -> Im
 }
 
 impl DecisiveFactProbe {
+    fn project_named_target(&self, binding: &mut ImpactBindingV1) {
+        let Some(root) = &self.root else {
+            return;
+        };
+        if let FieldStatus::Computed { value: objects } = &mut binding.decisive.objects {
+            let is_root = |object: &ObjectFact| match &object.identity {
+                FieldStatus::Computed { value } => serde_json::from_str::<Vec<Value>>(value)
+                    .ok()
+                    .is_some_and(|parts| {
+                        parts.get(1).and_then(Value::as_str) == Some(root.name.as_str())
+                            && parts.get(2).and_then(Value::as_str)
+                                == Some(root.object_type.as_str())
+                    }),
+                _ => false,
+            };
+            if objects.iter().any(is_root) {
+                objects.retain(is_root);
+            }
+        }
+    }
+
     fn query_bound(&self) -> usize {
         match self.root.as_ref() {
             None => 2,
@@ -341,7 +549,7 @@ impl DecisiveFactProbe {
                 object_type,
             })
             .or_else(|| {
-                let raw = impact::parse_single_local_dml_target(sql).ok()?;
+                let raw = impact::mutation_target_name(sql).ok()?;
                 let names = raw
                     .parts
                     .into_iter()
@@ -360,44 +568,26 @@ impl DecisiveFactProbe {
                     name,
                     object_type: "TABLE".into(),
                 })
-            })
-            .or_else(|| {
-                use sqlparser::ast::{Statement, TableObject};
-                let statements = sqlparser::parser::Parser::parse_sql(
-                    &sqlparser::dialect::OracleDialect {},
-                    sql,
-                )
-                .ok()?;
-                let [Statement::Insert(insert)] = statements.as_slice() else {
-                    return None;
-                };
-                let TableObject::TableName(table) = &insert.table else {
-                    return None;
-                };
-                let names = table
-                    .0
-                    .iter()
-                    .map(|part| {
-                        let name = part.as_ident()?;
-                        Some(if name.quote_style.is_some() {
-                            name.value.clone()
-                        } else {
-                            name.value.to_ascii_uppercase()
-                        })
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                let (owner, name) = match names.as_slice() {
-                    [name] => (String::new(), name.clone()),
-                    [owner, name] => (owner.clone(), name.clone()),
-                    _ => return None,
-                };
-                Some(DependentObject {
-                    owner,
-                    name,
-                    object_type: "TABLE".into(),
-                })
             });
-        Self { root, ddl }
+        let statement_scoped = is_allowed_alter_session(sql)
+            || matches!(
+                sql.trim_start()
+                    .split(|c: char| !c.is_alphanumeric())
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_uppercase()
+                    .as_str(),
+                "BEGIN" | "DECLARE"
+            )
+            || matches!(
+                parse_edition_lifecycle_sql(sql),
+                EditionLifecycleParse::Parsed(_)
+            );
+        Self {
+            root,
+            ddl,
+            no_schema_object: statement_scoped,
+        }
     }
 
     async fn read(
@@ -425,6 +615,7 @@ impl DecisiveFactProbe {
         &self,
         context: FactProbeContext<'_>,
         decisive: &mut DecisiveFacts,
+        display: Option<&mut ImpactV1>,
     ) -> Result<Option<usize>, ErrorEnvelope> {
         let mut queries = 0;
         let mut exact_count = true;
@@ -454,7 +645,13 @@ impl DecisiveFactProbe {
             };
         }
         let Some(mut root) = self.root.clone() else {
-            decisive.objects = unknown();
+            decisive.objects = if self.no_schema_object {
+                FieldStatus::NotApplicable {
+                    reason: oraclemcp_guard::NotApplicableReason::NoObject,
+                }
+            } else {
+                unknown()
+            };
             return Ok(Some(queries));
         };
         if root.owner.is_empty() {
@@ -484,68 +681,163 @@ impl DecisiveFactProbe {
         // traverse: its absence/unknown identity remains in the fingerprint.
         let needs_dependencies = (self.ddl || root.object_type != "TABLE")
             && metadata.as_ref().is_none_or(|rows| !rows.is_empty());
+        let row = metadata.as_ref().and_then(|rows| match rows.as_slice() {
+            [row] => Some(row),
+            _ => None,
+        });
+        let root_fact = ObjectFact {
+            identity: row
+                .and_then(|row| row.text("object_id"))
+                .and_then(|id| id.parse::<u64>().ok())
+                .filter(|id| *id > 0)
+                .map_or_else(unknown, |id| {
+                    computed(
+                        serde_json::to_string(&(&root.owner, &root.name, &root.object_type, id))
+                            .expect("object identity serialization"),
+                    )
+                }),
+            status: row
+                .and_then(|row| row.text("status"))
+                .map_or_else(unknown, |status| computed(status.to_owned())),
+            source_hash: if root.object_type == "TABLE" && row.is_some() {
+                FieldStatus::NotApplicable {
+                    reason: oraclemcp_guard::NotApplicableReason::NoSource,
+                }
+            } else {
+                unknown()
+            },
+            dependency_hash: metadata
+                .as_ref()
+                .map_or_else(unknown, |rows| computed(digest_json(&(&root, rows)))),
+            trigger_hash: unknown(),
+        };
         let mut objects = Vec::new();
         if needs_dependencies {
-            let closure = probe_dependents_transitive(
-                context.cx,
-                context.conn,
-                std::slice::from_ref(&root),
-                DepCaps::default(),
+            use oraclemcp_guard::{FieldBudget, FieldCaps, FieldMeasure};
+            let bounded = FieldBudget::run(
+                std::time::Instant::now() + context.dependency_budget,
+                FieldCaps {
+                    max_depth: 0,
+                    max_count: 1,
+                },
+                async {
+                    FieldMeasure {
+                        value: probe_dependents_transitive(
+                            context.cx,
+                            context.conn,
+                            std::slice::from_ref(&root),
+                            DepCaps::default(),
+                        )
+                        .await,
+                        depth: 0,
+                        count: 1,
+                    }
+                },
             )
             .await;
+            let closure = match bounded {
+                FieldStatus::Computed { value } => value,
+                FieldStatus::Unavailable { reason } => {
+                    // Dropping an in-flight wire read does not prove that its
+                    // response was drained. Retire that session before reuse.
+                    let _ = mark_connection_quarantined(
+                        context.quarantine,
+                        oraclemcp_audit::AuditOutcome::UnknownDiscarded,
+                        "dependency field exceeded its bounded observation window",
+                    );
+                    decisive.objects = computed(vec![root_fact.clone()]);
+                    decisive
+                        .action_fields
+                        .insert(DecisiveField::Dependents, unavailable(reason));
+                    decisive
+                        .action_fields
+                        .insert(DecisiveField::PredictedInvalidSet, unavailable(reason));
+                    if self.ddl && context.require_impact {
+                        return Err(DecisiveRefusal { field: DecisiveField::Dependents,
+                            reason: oraclemcp_guard::impact_binding::DecisiveRefusalReason::Unavailable { reason }
+                        }.into_envelope());
+                    }
+                    return Ok(None);
+                }
+                _ => return Err(repreview_required()),
+            };
             match closure {
                 Ok(closure) => {
                     queries += closure.query_count();
                     objects = dependency_object_facts(&closure);
+                    let dependents = if closure.truncated || !closure.truncation.is_empty() {
+                        unavailable(UnavailableReason::Truncated)
+                    } else if !closure.uncertainties.is_empty() {
+                        unavailable(UnavailableReason::UnresolvedDependency)
+                    } else {
+                        computed(digest_json(&closure))
+                    };
+                    decisive
+                        .action_fields
+                        .insert(DecisiveField::Dependents, dependents);
+                    if let Some(display) = display {
+                        let (_, predicted, observation) = dependent_commitments(&closure);
+                        decisive
+                            .action_fields
+                            .insert(DecisiveField::PredictedInvalidSet, predicted);
+                        display.dependents = observation;
+                    }
                 }
                 Err(oraclemcp_db::DependentsError::Database(error))
                     if error.is_uncertain_session_state() =>
                 {
                     impact::quarantine_dependency_observation(context.quarantine, &error);
-                    return Err(error.into_envelope());
+                    if !context.is_preview {
+                        return Err(error.into_envelope());
+                    }
+                    exact_count = false;
+                    decisive
+                        .action_fields
+                        .insert(DecisiveField::Dependents, unknown());
+                    decisive
+                        .action_fields
+                        .insert(DecisiveField::PredictedInvalidSet, unknown());
+                    if let Some(display) = display {
+                        display.dependents = unknown();
+                    }
                 }
-                Err(_) => {
+                Err(error) => {
                     // The collector owns a hard max_depth + 4 bound even on an error.
                     queries += 14;
                     exact_count = false;
+                    decisive
+                        .action_fields
+                        .insert(DecisiveField::Dependents, unknown());
+                    decisive
+                        .action_fields
+                        .insert(DecisiveField::PredictedInvalidSet, unknown());
+                    if let Some(display) = display {
+                        display.dependents = unavailable(
+                            if matches!(error, oraclemcp_db::DependentsError::NoPrivilege) {
+                                UnavailableReason::NoPrivilege
+                            } else {
+                                UnavailableReason::CatalogUnavailable
+                            },
+                        );
+                    }
                 }
             }
         } else {
-            let row = metadata.as_ref().and_then(|rows| match rows.as_slice() {
-                [row] => Some(row),
-                _ => None,
-            });
-            objects.push(ObjectFact {
-                identity: row
-                    .and_then(|row| row.text("object_id"))
-                    .and_then(|id| id.parse::<u64>().ok())
-                    .filter(|id| *id > 0)
-                    .map_or_else(unknown, |id| {
-                        computed(
-                            serde_json::to_string(&(
-                                &root.owner,
-                                &root.name,
-                                &root.object_type,
-                                id,
-                            ))
-                            .expect("object identity serialization"),
-                        )
+            objects.push(root_fact.clone());
+        }
+        if objects.is_empty()
+            || !objects.iter().any(|object| match &object.identity {
+                FieldStatus::Computed { value } => serde_json::from_str::<Vec<Value>>(value)
+                    .ok()
+                    .is_some_and(|parts| {
+                        parts.get(1).and_then(Value::as_str) == Some(root.name.as_str())
+                            && parts.get(2).and_then(Value::as_str)
+                                == Some(root.object_type.as_str())
                     }),
-                status: row
-                    .and_then(|row| row.text("status"))
-                    .map_or_else(unknown, |status| computed(status.to_owned())),
-                source_hash: if root.object_type == "TABLE" && row.is_some() {
-                    FieldStatus::NotApplicable {
-                        reason: oraclemcp_guard::NotApplicableReason::NoSource,
-                    }
-                } else {
-                    unknown()
-                },
-                dependency_hash: metadata
-                    .as_ref()
-                    .map_or_else(unknown, |rows| computed(digest_json(&(&root, rows)))),
-                trigger_hash: unknown(),
-            });
+                _ => false,
+            })
+        {
+            objects.push(root_fact.clone());
         }
         let has_compiler_settings = matches!(
             root.object_type.as_str(),
@@ -701,6 +993,235 @@ pub(super) fn repreview_required() -> ErrorEnvelope {
 }
 
 impl BoundImpact {
+    pub(super) async fn prepare_action(
+        mut self,
+        context: FactProbeContext<'_>,
+        sql: &str,
+        action: ActionKind,
+        dml: Option<&impact::PreparedDmlImpact>,
+        mode: ApprovalMode,
+    ) -> Result<Self, ErrorEnvelope> {
+        let mut display = self.display.take().unwrap_or_default();
+        let dml_action = matches!(
+            action,
+            ActionKind::ExecuteDml | ActionKind::PreviewDmlSandbox
+        );
+        let rows_supported = dml_action && dml.is_some_and(|proof| proof.rows_supported);
+        let matrix_context = DecisiveMatrixContext {
+            dml_rows_supported: rows_supported,
+            has_ddl_event: false,
+            statement_scoped: self.probe.no_schema_object,
+            require_impact: context.require_impact,
+        };
+        if dml_action && !self.probe.no_schema_object {
+            let mutation = match dml {
+                Some(proof)
+                    if self.binding.decisive.statement_digest
+                        == computed(proof.statement_digest)
+                        && self.binding.decisive.bind_hmac == computed(proof.bind_hmac) =>
+                {
+                    display.rows = proof.rows.clone();
+                    match &proof.mutation {
+                        Some(closure) if closure.is_complete() => {
+                            if closure.admit().is_err() {
+                                return Err(ErrorEnvelope::new(ErrorClass::ForbiddenStatement,
+                                    "mutation effects are not admitted; statement refused before execution")
+                                    .with_statement_outcome(StatementOutcome::NotStarted));
+                            }
+                            parse_digest(&closure.fingerprint()).map_or_else(unknown, computed)
+                        }
+                        _ => unknown(),
+                    }
+                }
+                Some(_) => return Err(repreview_required()),
+                None => unavailable(UnavailableReason::NotCollected),
+            };
+            self.binding
+                .decisive
+                .action_fields
+                .insert(DecisiveField::MutationEffectClosure, mutation);
+            if rows_supported {
+                self.binding.decisive.action_fields.insert(
+                    DecisiveField::Rows,
+                    row_commitment(
+                        &display.rows,
+                        &self.binding.decisive.statement_digest,
+                        &self.binding.decisive.bind_hmac,
+                    ),
+                );
+            } else {
+                self.binding
+                    .decisive
+                    .action_fields
+                    .remove(&DecisiveField::Rows);
+            }
+        } else {
+            self.binding
+                .decisive
+                .action_fields
+                .remove(&DecisiveField::Rows);
+            if let Some(mut root) = self.probe.root.clone() {
+                if root.owner.is_empty()
+                    && let FieldStatus::Computed { value: schema } =
+                        &self.binding.decisive.current_schema
+                {
+                    root.owner.clone_from(schema);
+                }
+                if impact::is_plsql_unit_type(&root.object_type) {
+                    let stored = impact::read_stored_unit(
+                        context.cx,
+                        context.conn,
+                        &root.owner,
+                        &root.name,
+                        &root.object_type,
+                        "impact_probe",
+                    )
+                    .await;
+                    let change = impact::SourceChange {
+                        before: stored.source(),
+                        after: (!matches!(action, ActionKind::CompileObject)).then_some(sql),
+                    };
+                    display.effects = impact::compute_effects_impact(&change);
+                    display.sast = impact::compute_sast_impact(change.after);
+                    let effects = match &display.effects {
+                        FieldStatus::Computed { value }
+                            if value
+                                .get("before_status")
+                                .and_then(Value::as_str)
+                                .is_some_and(|v| v == "computed" || v == "no_stored_source") =>
+                        {
+                            let before = match change.before {
+                                impact::StoredSource::Text(source) => {
+                                    Some(digest_bytes(source.as_bytes()))
+                                }
+                                impact::StoredSource::Absent
+                                | impact::StoredSource::Unavailable => None,
+                            };
+                            computed(digest_json(&(
+                                value,
+                                before,
+                                change.after.map(|source| digest_bytes(source.as_bytes())),
+                            )))
+                        }
+                        FieldStatus::Unavailable { reason } => unavailable(*reason),
+                        _ => unavailable(UnavailableReason::EngineFailed),
+                    };
+                    self.binding
+                        .decisive
+                        .action_fields
+                        .insert(DecisiveField::SourceEffects, effects);
+                } else {
+                    // A closed dictionary kind with no PL/SQL unit source is a
+                    // positive no-source proof, not an empty effect analysis.
+                    self.binding.decisive.action_fields.insert(
+                        DecisiveField::SourceEffects,
+                        computed(digest_json(&("no_routine_source", &root.object_type))),
+                    );
+                    display.effects = FieldStatus::NotApplicable {
+                        reason: oraclemcp_guard::NotApplicableReason::NoSource,
+                    };
+                    display.sast = FieldStatus::NotApplicable {
+                        reason: oraclemcp_guard::NotApplicableReason::NoSource,
+                    };
+                }
+                use oraclemcp_guard::ddl_closure::{DdlEvent, DdlObject, ddl_event_for_statement};
+                let event = if matches!(action, ActionKind::CompileObject) {
+                    Ok(Some(DdlEvent::Alter))
+                } else if matches!(
+                    action,
+                    ActionKind::CreateOrReplace | ActionKind::PatchSource
+                ) {
+                    Ok(Some(DdlEvent::Create))
+                } else {
+                    ddl_event_for_statement(sql)
+                };
+                let ddl = match event {
+                    Ok(None) => computed(digest_json(&(
+                        "no_ddl_event",
+                        ActionEnvelopeV1::statement_digest(sql),
+                    ))),
+                    Ok(Some(event)) => {
+                        let info =
+                            oraclemcp_db::read_closure_database_identity(context.cx, context.conn)
+                                .await
+                                .ok();
+                        match info.map(|info| info.container) {
+                            Some(container) => {
+                                let closure =
+                                    Box::pin(crate::ddl_closure::collect_ddl_effect_closure(
+                                        context.cx,
+                                        context.conn,
+                                        event,
+                                        DdlObject {
+                                            owner: root.owner,
+                                            name: root.name,
+                                            object_type: root.object_type,
+                                        },
+                                        &container,
+                                    ))
+                                    .await;
+                                if !closure.is_complete() {
+                                    unknown()
+                                } else if closure.admit().is_err() {
+                                    return Err(ErrorEnvelope::new(ErrorClass::ForbiddenStatement,
+                                        "DDL trigger effects are not admitted; statement refused before execution")
+                                        .with_statement_outcome(StatementOutcome::NotStarted));
+                                } else {
+                                    parse_digest(&closure.fingerprint())
+                                        .map_or_else(unknown, computed)
+                                }
+                            }
+                            None => unknown(),
+                        }
+                    }
+                    Err(_) => unavailable(UnavailableReason::UnresolvedDependency),
+                };
+                self.binding
+                    .decisive
+                    .action_fields
+                    .insert(DecisiveField::DdlEffectClosure, ddl);
+            }
+        }
+        let required_level = if dml_action {
+            OperatingLevel::ReadWrite
+        } else {
+            OperatingLevel::Ddl
+        };
+        display.reversibility = impact::compute_reversibility(
+            Some(required_level),
+            dml_action,
+            mode.commit,
+            mode.hold,
+            mode.non_transactional,
+        );
+        self.binding.decisive.action_fields.insert(
+            DecisiveField::Reversibility,
+            commitment(&display.reversibility),
+        );
+        if !dml_action {
+            self.probe.project_named_target(&mut self.binding);
+        }
+        self.material = self
+            .material
+            .with_impact(&self.binding)
+            .map_err(|_| repreview_required())?;
+        self.matrix = Some((action, matrix_context));
+        self.display = Some(display);
+        self.approval()?;
+        Ok(self)
+    }
+
+    pub(super) fn approval(&self) -> Result<DecisiveApproval<'_>, ErrorEnvelope> {
+        let (action, context) = self.matrix.as_ref().ok_or_else(|| {
+            oraclemcp_guard::impact_binding::DecisiveRefusal {
+                field: DecisiveField::Envelope,
+                reason: oraclemcp_guard::impact_binding::DecisiveRefusalReason::Missing,
+            }
+            .into_envelope()
+        })?;
+        DecisiveApproval::check(&self.material, &self.binding, action, *context)
+    }
+
     pub(super) fn unobserved(sql: &str, envelope: &str, generations: ImpactGenerations) -> Self {
         let mut binding = local_impact(envelope, generations);
         binding.decisive.statement_digest = computed(ActionEnvelopeV1::statement_digest(sql));
@@ -714,13 +1235,37 @@ impl BoundImpact {
             probe: DecisiveFactProbe {
                 root: None,
                 ddl: false,
+                no_schema_object: false,
             },
             query_count: Some(0),
             scope_reference: None,
+            matrix: None,
+            display: None,
         }
     }
 
-    pub(super) async fn capture(
+    pub(super) fn capture<'a>(
+        context: FactProbeContext<'a>,
+        sql: &'a str,
+        envelope: &'a str,
+        binds: &'a [OracleBind],
+        admission: Option<&'a PolicyGateAdmission>,
+        scope_reference: Option<&'a str>,
+        compile_parse_digest: Option<[u8; 32]>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self, ErrorEnvelope>> + 'a>>
+    {
+        Box::pin(Self::capture_inner(
+            context,
+            sql,
+            envelope,
+            binds,
+            admission,
+            scope_reference,
+            compile_parse_digest,
+        ))
+    }
+
+    async fn capture_inner(
         context: FactProbeContext<'_>,
         sql: &str,
         envelope: &str,
@@ -737,22 +1282,38 @@ impl BoundImpact {
         let views = binds.iter().map(canonical_bind_view).collect::<Vec<_>>();
         let bind_hmac = BindEnvelope::from_binds(&ACTION_BIND_HMAC_KEY, &views).value_hmac;
         binding.decisive.bind_hmac = computed(bind_hmac);
-        let probe = DecisiveFactProbe::for_sql(sql);
-        let query_count = match probe.collect(context, &mut binding.decisive).await {
-            Ok(count) => count,
-            Err(error)
-                if context.is_preview && error.error_class != ErrorClass::RequestCancelled =>
+        let probe = context.named_target.map_or_else(
+            || DecisiveFactProbe::for_sql(sql),
+            |root| DecisiveFactProbe {
+                root: Some(root.clone()),
+                ddl: true,
+                no_schema_object: false,
+            },
+        );
+        let mut display = ImpactV1::default();
+        let query_count =
+            match Box::pin(probe.collect(context, &mut binding.decisive, Some(&mut display))).await
             {
-                let reason = UnavailableReason::from_error_class(error.error_class);
-                binding.decisive.current_schema = FieldStatus::Unavailable { reason };
-                binding.decisive.edition = FieldStatus::Unavailable { reason };
-                binding.decisive.db_identity = FieldStatus::Unavailable { reason };
-                binding.decisive.compiler_facts = FieldStatus::Unavailable { reason };
-                binding.decisive.objects = FieldStatus::Unavailable { reason };
-                None
-            }
-            Err(error) => return Err(error),
-        };
+                Ok(count) => count,
+                Err(error)
+                    if context.is_preview
+                        && !matches!(
+                            error.error_class,
+                            ErrorClass::RequestCancelled
+                                | ErrorClass::ImpactDecisiveUnavailable
+                                | ErrorClass::ImpactDecisiveTruncated
+                        ) =>
+                {
+                    let reason = UnavailableReason::from_error_class(error.error_class);
+                    binding.decisive.current_schema = FieldStatus::Unavailable { reason };
+                    binding.decisive.edition = FieldStatus::Unavailable { reason };
+                    binding.decisive.db_identity = FieldStatus::Unavailable { reason };
+                    binding.decisive.compiler_facts = FieldStatus::Unavailable { reason };
+                    binding.decisive.objects = FieldStatus::Unavailable { reason };
+                    None
+                }
+                Err(error) => return Err(error),
+            };
         if query_count.is_some_and(|count| count > probe.query_bound()) {
             return Err(repreview_required());
         }
@@ -776,7 +1337,7 @@ impl BoundImpact {
                     .ok_or_else(repreview_required)?,
             ),
             _ if context.policy.is_none() => computed(Vec::new()),
-            _ => FieldStatus::not_wired(),
+            _ => FieldStatus::not_collected(),
         };
         binding.decisive.rewrite_algorithm_version =
             computed(oraclemcp_guard::DML_REWRITE_ALGORITHM_VERSION);
@@ -806,6 +1367,8 @@ impl BoundImpact {
             probe,
             query_count,
             scope_reference: scope_reference.map(str::to_owned),
+            matrix: None,
+            display: Some(display),
         })
     }
 
@@ -820,7 +1383,7 @@ impl BoundImpact {
         current.decisive.db_identity = unknown();
         current.decisive.compiler_facts = unknown();
         current.decisive.objects = unknown();
-        self.probe.collect(context, &mut current.decisive).await?;
+        Box::pin(self.probe.collect(context, &mut current.decisive, None)).await?;
         current.decisive.scope_digest = computed(
             self.scope_reference
                 .as_deref()
@@ -846,7 +1409,18 @@ impl BoundImpact {
         current.decisive.policy_ruleset_digest = computed(digest_json(&policy));
         current.decisive.profile_generation = computed(context.generations.profile);
         current.decisive.lane_generation = computed(context.generations.lane);
-        if current
+        if let Some((action, matrix_context)) = &self.matrix {
+            if !matches!(
+                action,
+                ActionKind::ExecuteDml | ActionKind::PreviewDmlSandbox
+            ) {
+                self.probe.project_named_target(&mut current);
+            }
+            let required = DecisiveFieldMatrixV1::required(action, *matrix_context);
+            self.material.revalidate(&current, required).map_err(
+                oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::into_envelope,
+            )?;
+        } else if current
             .decisive_digest()
             .map_err(|_| repreview_required())?
             != self.material.decisive_digest
@@ -865,6 +1439,23 @@ impl BoundImpact {
             .get("impact")
             .and_then(|value| serde_json::from_value::<ImpactV1>(value.clone()).ok())
             .unwrap_or_default();
+        if let Some(display) = &self.display {
+            fn merge<T: Clone>(to: &mut FieldStatus<T>, from: &FieldStatus<T>) {
+                if !matches!(
+                    from,
+                    FieldStatus::Unavailable {
+                        reason: UnavailableReason::NotCollected
+                    }
+                ) {
+                    *to = from.clone();
+                }
+            }
+            merge(&mut impact.rows, &display.rows);
+            merge(&mut impact.dependents, &display.dependents);
+            merge(&mut impact.effects, &display.effects);
+            merge(&mut impact.sast, &display.sast);
+            merge(&mut impact.reversibility, &display.reversibility);
+        }
         impact.binding = self.binding.clone();
         response["impact"] = serde_json::to_value(impact).expect("impact serialization");
     }
@@ -884,6 +1475,15 @@ impl<'a> DbToolCtx<'a> {
             scoped_grants: self.scoped_grants,
             active_profile: self.active_profile,
             is_preview: false,
+            require_impact: false,
+            named_target: None,
+            dependency_budget: self.request_budget.deadline().map_or(
+                DEFAULT_REQUEST_TIMEOUT,
+                |deadline| {
+                    Duration::from_nanos(deadline.duration_since(self.cx.now()))
+                        .min(DEFAULT_REQUEST_TIMEOUT)
+                },
+            ),
         }
     }
 }

@@ -1,5 +1,5 @@
-//! Impact facts that can be computed without changing the guarded statement
-//! path.  Every database observation is advisory; it never admits caller SQL.
+//! Shared impact facts for previews and approval bindings. Computing an
+//! observation never grants authority; the SQL guard remains authoritative.
 
 use asupersync::Cx;
 use oraclemcp_db::{
@@ -18,8 +18,8 @@ use serde_json::{Value, json};
 
 const MAX_IMPACT_SQL_BYTES: usize = 64 * 1024;
 
-/// All authority for an advisory count comes from the ordinary read executor.
-/// The mutation collector supplies evidence, never execution permission.
+/// Counts use the ordinary guarded read executor. The mutation collector
+/// supplies proof inputs, never execution permission.
 pub(super) struct RowsImpactContext<'a> {
     pub dispatcher: &'a super::OracleDispatcher,
     pub state: &'a mut super::DispatcherState,
@@ -69,6 +69,7 @@ async fn collect_statement_mutation(
             )
         }
         Statement::Delete(_) => (MutationStatementKind::Delete, MutationColumns::All),
+        Statement::Insert(_) => (MutationStatementKind::Insert, MutationColumns::All),
         _ => return Err(UnavailableReason::UnsupportedDmlShape),
     };
     #[cfg(feature = "plsql-intelligence")]
@@ -101,26 +102,11 @@ fn one_dml_statement(sql: &str) -> Result<sqlparser::ast::Statement, Unavailable
     Ok(statements.remove(0))
 }
 
-pub(super) async fn sandbox_mutation_is_reversible(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    cache: &OracleCatalogResolverCache,
-    sql: &str,
+pub(super) fn mutation_is_reversible(
+    closure: &oraclemcp_guard::mutation_closure::MutationEffectClosureV1,
     level: OperatingLevel,
 ) -> bool {
     use oraclemcp_guard::RoutineEffect;
-    let Ok(statement) = one_dml_statement(sql) else {
-        return false;
-    };
-    let Ok(relations) = resolve_dml_relations(cx, conn, cache, sql).await else {
-        return false;
-    };
-    let [target] = relations.as_slice() else {
-        return false;
-    };
-    let Ok(closure) = collect_statement_mutation(cx, conn, &statement, target).await else {
-        return false;
-    };
     closure.admit().is_ok_and(|required| required <= level)
         && closure.mechanisms.iter().all(|fact| {
             fact.effects.iter().all(|effect| {
@@ -165,178 +151,259 @@ async fn rows_current_scn(cx: &Cx, conn: &dyn OracleConnection) -> Result<u64, U
 
 /// An estimate is advisory and belongs to an SCN window and profile generation.
 /// Neither an unknown mechanism nor a failed read can become a zero estimate.
-pub(super) async fn compute_rows_impact(
+#[derive(Clone)]
+pub(super) struct PreparedDmlImpact {
+    pub(super) statement_digest: [u8; 32],
+    pub(super) bind_hmac: [u8; 32],
+    pub(super) rows: FieldStatus<oraclemcp_guard::RowEstimate>,
+    pub(super) rows_supported: bool,
+    pub(super) mutation: Option<oraclemcp_guard::mutation_closure::MutationEffectClosureV1>,
+}
+
+pub(super) async fn compute_dml_approval_facts(
     cx: &Cx,
     ctx: RowsImpactContext<'_>,
     args: &super::PreviewSqlArgs,
     proof: &super::served_classifier::PreparedClassifier,
     binding: &super::ExecGrantBinding,
-) -> FieldStatus<oraclemcp_guard::RowEstimate> {
-    use oraclemcp_guard::effective_dml_plan::{DmlImpactShapeV1, DmlPlanBindV1};
-    let unavailable = |reason| FieldStatus::Unavailable { reason };
-    if !is_dml_statement(&args.sql) {
-        return FieldStatus::NotApplicable {
-            reason: NotApplicableReason::NotDml,
-        };
-    }
-    // The scoped-grant runtime is still refused by execution. Never estimate
-    // its caller-only SQL while pretending to have applied a grant predicate.
-    if args.scoped_grant.is_some() {
-        return unavailable(UnavailableReason::UnsupportedDmlShape);
-    }
-    if let Err(error) = ctx.request_budget.enforce(cx) {
-        return unavailable(UnavailableReason::from_error_class(
-            error.into_envelope().error_class,
-        ));
-    }
-    let base = proof.precheck.classify(&args.sql);
-    let super::PolicyGate::Admitted(admission) = super::apply_preview_sql_policy(
-        ctx.sql_policy,
-        ctx.current_schema,
-        binding,
-        &proof.precheck,
-        &base,
-        &args.sql,
-    ) else {
-        return unavailable(UnavailableReason::PolicyDenied);
-    };
-    if admission.effective_decision.danger == super::DangerLevel::Forbidden {
-        return unavailable(UnavailableReason::ForbiddenStatement);
-    }
-    let sql = admission.effective_sql.as_deref().unwrap_or(&args.sql);
-    let Ok(statement) = one_dml_statement(sql) else {
-        return unavailable(UnavailableReason::UnsupportedDmlShape);
-    };
-    // This resolver rejects unsupported/nonlocal target shapes before a count
-    // plan exists. Keep that shape refusal distinct from executor read errors.
-    let Ok(relations) =
-        resolve_dml_relations(cx, ctx.state.conn.as_ref(), &ctx.state.catalog_cache, sql).await
-    else {
-        return unavailable(UnavailableReason::UnsupportedDmlShape);
-    };
-    let [target] = relations.as_slice() else {
-        return unavailable(UnavailableReason::UnsupportedDmlShape);
-    };
-    let Ok(plan) = DmlImpactShapeV1::prove(&statement, target) else {
-        return unavailable(UnavailableReason::UnsupportedDmlShape);
-    };
-    let count_binds = plan
-        .binds()
+) -> PreparedDmlImpact {
+    let statement_digest = oraclemcp_guard::ActionEnvelopeV1::statement_digest(&args.sql);
+    let binds = args
+        .binds
         .iter()
-        .map(|bind| match bind {
-            DmlPlanBindV1::Caller { position } => position
-                .checked_sub(1)
-                .and_then(|index| args.binds.get(index))
-                .cloned(),
-            DmlPlanBindV1::Grant { .. } => None,
-        })
-        .collect::<Option<Vec<_>>>();
-    let (Some(binds), Ok(count_sql)) = (count_binds, plan.positional_sql()) else {
-        return unavailable(UnavailableReason::UnsupportedDmlShape);
-    };
-    // A SELECT policy may differ from the effective DML policy. If the read
-    // ladder would add another predicate, that count is not an equivalent
-    // selection. Refuse the estimate rather than report an undercount.
-    let count_base = proof.precheck.classify(&count_sql);
-    let read_policy = match super::apply_sql_policy(
-        ctx.sql_policy,
-        ctx.current_schema,
-        ctx.context.principal_key(),
-        &proof.precheck,
-        &count_base,
-        &count_sql,
-    ) {
-        Ok(policy) => policy,
-        Err(error) => return unavailable(UnavailableReason::from_error_class(error.error_class)),
-    };
-    if read_policy.effective_sql.is_some() {
-        return unavailable(UnavailableReason::UnsupportedDmlShape);
-    }
-    let guarded_conn = super::read_executor::ReadUncertaintyConn {
-        inner: ctx.state.conn.as_ref(),
-        quarantine: Some(&ctx.dispatcher.quarantine),
-        provenance: oraclemcp_db::ReadQueryProvenance::ServerRead,
-    };
-    let closure = match collect_statement_mutation(cx, &guarded_conn, &statement, target).await {
-        Ok(closure) => closure,
-        Err(reason) => return unavailable(reason),
-    };
-    if !closure.is_complete() {
-        return unavailable(UnavailableReason::CatalogUnavailable);
-    }
-    if let Err(error) = ctx.request_budget.enforce(cx) {
-        return unavailable(UnavailableReason::from_error_class(
-            error.into_envelope().error_class,
-        ));
-    }
-    let scn_before = match rows_current_scn(cx, &guarded_conn).await {
-        Ok(scn) => scn,
-        Err(reason) => return unavailable(reason),
-    };
-    let profile_generation = ctx
-        .state
-        .profile_generation
+        .map(super::json_to_bind)
+        .collect::<Result<Vec<_>, _>>();
+    let bind_hmac = binds
         .as_ref()
-        .map_or(0, |lease| lease.generation());
-    let result = super::GuardedReadExecutor::new(ctx.dispatcher)
-        .run_server_read(
+        .map(|binds| {
+            let views = binds
+                .iter()
+                .map(super::canonical_bind_view)
+                .collect::<Vec<_>>();
+            oraclemcp_guard::BindEnvelope::from_binds(&super::ACTION_BIND_HMAC_KEY, &views)
+                .value_hmac
+        })
+        .unwrap_or([0; 32]);
+    let mut rows_supported = false;
+    let mut mutation = None;
+    let rows = async {
+        use oraclemcp_guard::effective_dml_plan::{DmlImpactShapeV1, DmlPlanBindV1};
+        let unavailable = |reason| FieldStatus::Unavailable { reason };
+        if !is_dml_statement(&args.sql) {
+            return FieldStatus::NotApplicable {
+                reason: NotApplicableReason::NotDml,
+            };
+        }
+        // The scoped-grant runtime is still refused by execution. Never estimate
+        // its caller-only SQL while pretending to have applied a grant predicate.
+        if args.scoped_grant.is_some() {
+            return unavailable(UnavailableReason::UnsupportedDmlShape);
+        }
+        if let Err(error) = ctx.request_budget.enforce(cx) {
+            return unavailable(UnavailableReason::from_error_class(
+                error.into_envelope().error_class,
+            ));
+        }
+        let base = proof.precheck.classify(&args.sql);
+        let super::PolicyGate::Admitted(admission) = super::apply_preview_sql_policy(
+            ctx.sql_policy,
+            ctx.current_schema,
+            binding,
+            &proof.precheck,
+            &base,
+            &args.sql,
+        ) else {
+            return unavailable(UnavailableReason::PolicyDenied);
+        };
+        if admission.effective_decision.danger == super::DangerLevel::Forbidden {
+            return unavailable(UnavailableReason::ForbiddenStatement);
+        }
+        if !matches!(
+            admission.effective_decision.gate(ctx.level),
+            super::LevelDecision::Allow
+        ) && ctx.level.effective_level() > OperatingLevel::ReadOnly
+        {
+            return unavailable(UnavailableReason::LevelBelowRequired);
+        }
+        let sql = admission.effective_sql.as_deref().unwrap_or(&args.sql);
+        let Ok(statement) = one_dml_statement(sql) else {
+            return unavailable(UnavailableReason::UnsupportedDmlShape);
+        };
+        if ctx.level.effective_level() == OperatingLevel::ReadOnly
+            && match &statement {
+                sqlparser::ast::Statement::Update(update) => update.selection.is_none(),
+                sqlparser::ast::Statement::Delete(delete) => delete.selection.is_none(),
+                _ => true,
+            }
+        {
+            return unavailable(UnavailableReason::UnsupportedDmlShape);
+        }
+        // This resolver rejects unsupported/nonlocal target shapes before a count
+        // plan exists. Keep that shape refusal distinct from executor read errors.
+        let Ok(relations) = resolve_mutation_relations(
             cx,
-            ctx.state,
-            ctx.context,
-            "impact_probe",
-            json!({"binds":binds, "max_rows":1, "as_of":{"scn":scn_before}}),
-            super::read_executor::ServerSql::new(count_sql, relations),
-            ctx.request_budget,
-            ctx.subject,
-            ctx.sql_policy.cloned(),
-            ctx.current_schema.map(str::to_owned),
-            ctx.level,
+            ctx.state.conn.as_ref(),
+            &ctx.state.catalog_cache,
+            &statement,
         )
-        .await;
-    let response = match result {
-        Ok(response) => response,
-        Err(error) => return unavailable(UnavailableReason::from_error_class(error.error_class)),
-    };
-    let guarded_conn = super::read_executor::ReadUncertaintyConn {
-        inner: ctx.state.conn.as_ref(),
-        quarantine: Some(&ctx.dispatcher.quarantine),
-        provenance: oraclemcp_db::ReadQueryProvenance::ServerRead,
-    };
-    let scn_after = match rows_current_scn(cx, &guarded_conn).await {
-        Ok(scn) => scn,
-        Err(reason) => return unavailable(reason),
-    };
-    if response.get("observed_scn").and_then(Value::as_u64) != Some(scn_before) {
-        return unavailable(UnavailableReason::CatalogUnavailable);
-    }
-    if scn_after < scn_before || response.get("truncated").and_then(Value::as_bool) != Some(false) {
-        return unavailable(UnavailableReason::CatalogUnavailable);
-    }
-    let value = response
-        .get("rows")
-        .and_then(Value::as_array)
-        .filter(|rows| rows.len() == 1)
-        .and_then(|rows| rows[0].as_object())
-        .filter(|row| row.len() == 1)
-        .and_then(|row| row.values().next())
-        .and_then(|value| {
-            value
-                .as_u64()
-                .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
-        });
-    let Some(value) = value else {
-        return unavailable(UnavailableReason::CatalogUnavailable);
-    };
-    FieldStatus::Estimated {
-        value: oraclemcp_guard::RowEstimate {
-            kind: oraclemcp_guard::RowEstimateKind::SnapshotEstimate,
-            value,
-            scn: oraclemcp_guard::ScnBounds::Window {
-                scn_before,
-                scn_after,
+        .await
+        else {
+            return unavailable(UnavailableReason::UnsupportedDmlShape);
+        };
+        let [target] = relations.as_slice() else {
+            return unavailable(UnavailableReason::UnsupportedDmlShape);
+        };
+        let guarded_conn = super::read_executor::ReadUncertaintyConn {
+            inner: ctx.state.conn.as_ref(),
+            quarantine: Some(&ctx.dispatcher.quarantine),
+            provenance: oraclemcp_db::ReadQueryProvenance::ServerRead,
+        };
+        let closure = match collect_statement_mutation(cx, &guarded_conn, &statement, target).await
+        {
+            Ok(closure) => closure,
+            Err(reason) => return unavailable(reason),
+        };
+        let complete = closure.is_complete();
+        mutation = Some(closure);
+        if !complete {
+            return unavailable(UnavailableReason::CatalogUnavailable);
+        }
+        let Ok(plan) = DmlImpactShapeV1::prove(&statement, target) else {
+            rows_supported = false;
+            return unavailable(UnavailableReason::UnsupportedDmlShape);
+        };
+        rows_supported = true;
+        let count_binds = plan
+            .binds()
+            .iter()
+            .map(|bind| match bind {
+                DmlPlanBindV1::Caller { position } => position
+                    .checked_sub(1)
+                    .and_then(|index| args.binds.get(index))
+                    .cloned(),
+                DmlPlanBindV1::Grant { .. } => None,
+            })
+            .collect::<Option<Vec<_>>>();
+        let (Some(binds), Ok(count_sql)) = (count_binds, plan.positional_sql()) else {
+            return unavailable(UnavailableReason::UnsupportedDmlShape);
+        };
+        // A SELECT policy may differ from the effective DML policy. If the read
+        // ladder would add another predicate, that count is not an equivalent
+        // selection. Refuse the estimate rather than report an undercount.
+        let count_base = proof.precheck.classify(&count_sql);
+        let read_policy = match super::apply_sql_policy(
+            ctx.sql_policy,
+            ctx.current_schema,
+            ctx.context.principal_key(),
+            &proof.precheck,
+            &count_base,
+            &count_sql,
+        ) {
+            Ok(policy) => policy,
+            Err(error) => {
+                return unavailable(UnavailableReason::from_error_class(error.error_class));
+            }
+        };
+        if read_policy.effective_sql.is_some() {
+            return unavailable(UnavailableReason::UnsupportedDmlShape);
+        }
+        let guarded_conn = super::read_executor::ReadUncertaintyConn {
+            inner: ctx.state.conn.as_ref(),
+            quarantine: Some(&ctx.dispatcher.quarantine),
+            provenance: oraclemcp_db::ReadQueryProvenance::ServerRead,
+        };
+        if let Err(error) = ctx.request_budget.enforce(cx) {
+            return unavailable(UnavailableReason::from_error_class(
+                error.into_envelope().error_class,
+            ));
+        }
+        let scn_before = match rows_current_scn(cx, &guarded_conn).await {
+            Ok(scn) => scn,
+            Err(reason) => return unavailable(reason),
+        };
+        let profile_generation = ctx
+            .state
+            .profile_generation
+            .as_ref()
+            .map_or(0, |lease| lease.generation());
+        let use_as_of = ctx.level.effective_level() == OperatingLevel::ReadOnly
+            && !ctx.state.checkpoints.is_open();
+        let mut count_args = json!({"binds":binds, "max_rows":1});
+        if use_as_of {
+            count_args["as_of"] = json!({"scn":scn_before});
+        }
+        let result = super::GuardedReadExecutor::new(ctx.dispatcher)
+            .run_server_read(
+                cx,
+                ctx.state,
+                ctx.context,
+                "impact_probe",
+                count_args,
+                super::read_executor::ServerSql::new(count_sql, relations),
+                ctx.request_budget,
+                ctx.subject,
+                ctx.sql_policy.cloned(),
+                ctx.current_schema.map(str::to_owned),
+                ctx.level,
+            )
+            .await;
+        let response = match result {
+            Ok(response) => response,
+            Err(error) => {
+                return unavailable(UnavailableReason::from_error_class(error.error_class));
+            }
+        };
+        let guarded_conn = super::read_executor::ReadUncertaintyConn {
+            inner: ctx.state.conn.as_ref(),
+            quarantine: Some(&ctx.dispatcher.quarantine),
+            provenance: oraclemcp_db::ReadQueryProvenance::ServerRead,
+        };
+        let scn_after = match rows_current_scn(cx, &guarded_conn).await {
+            Ok(scn) => scn,
+            Err(reason) => return unavailable(reason),
+        };
+        if use_as_of && response.get("observed_scn").and_then(Value::as_u64) != Some(scn_before) {
+            return unavailable(UnavailableReason::CatalogUnavailable);
+        }
+        if scn_after < scn_before
+            || response.get("truncated").and_then(Value::as_bool) != Some(false)
+        {
+            return unavailable(UnavailableReason::CatalogUnavailable);
+        }
+        let value = response
+            .get("rows")
+            .and_then(Value::as_array)
+            .filter(|rows| rows.len() == 1)
+            .and_then(|rows| rows[0].as_object())
+            .filter(|row| row.len() == 1)
+            .and_then(|row| row.values().next())
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
+            });
+        let Some(value) = value else {
+            return unavailable(UnavailableReason::CatalogUnavailable);
+        };
+        FieldStatus::Estimated {
+            value: oraclemcp_guard::RowEstimate {
+                kind: oraclemcp_guard::RowEstimateKind::SnapshotEstimate,
+                value,
+                scn: oraclemcp_guard::ScnBounds::Window {
+                    scn_before,
+                    scn_after,
+                },
+                profile_generation,
             },
-            profile_generation,
-        },
+        }
+    }
+    .await;
+    PreparedDmlImpact {
+        statement_digest,
+        bind_hmac,
+        rows,
+        rows_supported,
+        mutation,
     }
 }
 
@@ -842,6 +909,14 @@ pub(super) async fn enrich_dependents_preview(
     required_level: Option<OperatingLevel>,
     quarantine: &std::sync::Mutex<Option<super::ConnectionQuarantine>>,
 ) {
+    // A minting preview already collected and committed this exact producer's
+    // inputs. Do not replace its displayed proof with a later observation.
+    if response
+        .pointer("/impact/binding/decisive/action_fields/dependents")
+        .is_some()
+    {
+        return;
+    }
     if !is_confirmation_preview(response) {
         return;
     }
@@ -909,6 +984,84 @@ pub(super) async fn resolve_dml_relations(
     sql: &str,
 ) -> Result<Vec<ResolvedObject>, UnavailableReason> {
     let name = parse_single_local_dml_target(sql)?;
+    resolve_local_mutation_name(cx, conn, cache, name).await
+}
+
+async fn resolve_mutation_relations(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    cache: &OracleCatalogResolverCache,
+    statement: &sqlparser::ast::Statement,
+) -> Result<Vec<ResolvedObject>, UnavailableReason> {
+    resolve_local_mutation_name(cx, conn, cache, mutation_target_for_statement(statement)?).await
+}
+
+pub(super) fn mutation_target_name(sql: &str) -> Result<RawName, UnavailableReason> {
+    mutation_target_for_statement(&one_dml_statement(sql)?)
+}
+
+fn mutation_target_for_statement(
+    statement: &sqlparser::ast::Statement,
+) -> Result<RawName, UnavailableReason> {
+    use sqlparser::ast::{FromTable, Statement, TableFactor, TableObject};
+    let name = match statement {
+        Statement::Update(update) if update.table.joins.is_empty() => {
+            let TableFactor::Table { name, .. } = &update.table.relation else {
+                return Err(UnavailableReason::UnsupportedDmlShape);
+            };
+            name
+        }
+        Statement::Delete(delete) => {
+            let (FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables)) =
+                &delete.from;
+            let [table] = tables.as_slice() else {
+                return Err(UnavailableReason::UnsupportedDmlShape);
+            };
+            let TableFactor::Table { name, .. } = &table.relation else {
+                return Err(UnavailableReason::UnsupportedDmlShape);
+            };
+            if !table.joins.is_empty() {
+                return Err(UnavailableReason::UnsupportedDmlShape);
+            }
+            name
+        }
+        Statement::Insert(insert) => {
+            let TableObject::TableName(name) = &insert.table else {
+                return Err(UnavailableReason::UnsupportedDmlShape);
+            };
+            name
+        }
+        _ => return Err(UnavailableReason::UnsupportedDmlShape),
+    };
+    let parts = name
+        .0
+        .iter()
+        .map(|part| {
+            let ident = part
+                .as_ident()
+                .ok_or(UnavailableReason::UnsupportedDmlShape)?;
+            Ok(RawNamePart {
+                text: ident.value.clone(),
+                quoting: if ident.quote_style.is_some() {
+                    oraclemcp_guard::QuoteSemantics::Quoted
+                } else {
+                    oraclemcp_guard::QuoteSemantics::Unquoted
+                },
+            })
+        })
+        .collect::<Result<Vec<_>, UnavailableReason>>()?;
+    if !(1..=2).contains(&parts.len()) {
+        return Err(UnavailableReason::UnsupportedDmlShape);
+    }
+    Ok(RawName::new(parts, SyntacticRole::FromFactor))
+}
+
+async fn resolve_local_mutation_name(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    cache: &OracleCatalogResolverCache,
+    name: RawName,
+) -> Result<Vec<ResolvedObject>, UnavailableReason> {
     let context = cache
         .preload(
             cx,

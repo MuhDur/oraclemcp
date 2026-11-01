@@ -27,6 +27,57 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+// Synthetic producer commitments for token protocol unit tests only. Dispatch
+// tests obtain their facts from the production producers.
+pub(super) fn unit_approval_binding(
+    envelope: &str,
+    generations: ImpactGenerations,
+) -> oraclemcp_guard::ImpactBindingV1 {
+    use oraclemcp_guard::impact_binding::{DecisiveField::*, ObjectFact};
+    let mut binding = local_impact(envelope, generations);
+    binding.decisive.edition = FieldStatus::Computed {
+        value: "ORA$BASE".into(),
+    };
+    binding.decisive.current_schema = FieldStatus::Computed {
+        value: "UNIT_FIXTURE".into(),
+    };
+    binding.decisive.objects = FieldStatus::Computed {
+        value: vec![ObjectFact {
+            identity: FieldStatus::Computed {
+                value: "UNIT_FIXTURE.T.TABLE.42".into(),
+            },
+            status: FieldStatus::Computed {
+                value: "VALID".into(),
+            },
+            source_hash: FieldStatus::not_collected(),
+            dependency_hash: FieldStatus::not_collected(),
+            trigger_hash: FieldStatus::not_collected(),
+        }],
+    };
+    for field in [
+        MutationEffectClosure,
+        Rows,
+        Dependents,
+        PredictedInvalidSet,
+        DdlEffectClosure,
+        SourceEffects,
+        Reversibility,
+        ProfileCeiling,
+        OAuthCeiling,
+        ClosureFactKey,
+        RoutineEffects,
+        MaskingProfileOutput,
+    ] {
+        binding.decisive.action_fields.insert(
+            field,
+            FieldStatus::Computed {
+                value: ActionEnvelopeV1::statement_digest(&format!("unit producer {field:?}")),
+            },
+        );
+    }
+    binding
+}
+
 #[cfg(not(feature = "plsql-intelligence"))]
 fn assert_engine_free_compile_error(error: &ErrorEnvelope) {
     assert!(
@@ -405,6 +456,28 @@ fn impact_attached_to_every_minting_preview() {
             "locks",
             "reversibility",
         ] {
+            if field == "rows" && canonical_tool_name(&tool.name) == "oracle_preview_sql" {
+                assert_eq!(result["impact"][field]["status"], "estimated");
+                assert_eq!(
+                    result["impact"][field]["value"]["kind"],
+                    "snapshot_estimate"
+                );
+                assert_eq!(
+                    result["impact"]["binding"]["decisive"]["action_fields"]["rows"]["status"],
+                    "computed"
+                );
+                continue;
+            }
+            if field == "reversibility"
+                && !matches!(canonical_tool_name(&tool.name), "oracle_set_session_level")
+            {
+                assert_eq!(
+                    result["impact"][field]["status"], "computed",
+                    "{}",
+                    tool.name
+                );
+                continue;
+            }
             if field == "dependents"
                 && matches!(
                     canonical_tool_name(&tool.name),
@@ -412,6 +485,7 @@ fn impact_attached_to_every_minting_preview() {
                         | "oracle_compile_object"
                         | "oracle_create_or_replace"
                         | "oracle_patch_source"
+                        | "deploy_ddl"
                 )
             {
                 if result["required_level"].as_str() == Some("READ_WRITE") {
@@ -427,18 +501,27 @@ fn impact_attached_to_every_minting_preview() {
                         "{}",
                         tool.name
                     );
-                    assert!(
-                        result["impact"][field]["value"]["predicted_invalid_count"].is_null(),
-                        "mock has no resolved dictionary root"
-                    );
-                    assert!(
-                        !result["impact"][field]["value"]["uncertainties"]
-                            .as_array()
-                            .unwrap()
-                            .is_empty(),
-                        "{} must expose the missing mock catalog",
-                        tool.name
-                    );
+                    if result["impact"]["binding"]["decisive"]["action_fields"]["predicted_invalid_set"]
+                        ["status"]
+                        == "computed"
+                    {
+                        assert_eq!(
+                            result["impact"][field]["value"]["predicted_invalid_count"], 0,
+                            "the complete fixture has no dependent edges"
+                        );
+                    } else {
+                        assert!(
+                            result["impact"][field]["value"]["predicted_invalid_count"].is_null()
+                        );
+                        assert!(
+                            !result["impact"][field]["value"]["uncertainties"]
+                                .as_array()
+                                .unwrap()
+                                .is_empty(),
+                            "{} must expose incomplete prediction inputs",
+                            tool.name
+                        );
+                    }
                 } else {
                     assert_eq!(
                         result["impact"][field],
@@ -499,7 +582,7 @@ fn impact_attached_to_every_minting_preview() {
                 if field == "rows" && canonical_tool_name(&tool.name) == "oracle_preview_sql" {
                     "catalog_unavailable"
                 } else {
-                    "not_wired"
+                    "not_collected"
                 };
             assert_eq!(
                 result["impact"][field]["reason"], reason,
@@ -681,237 +764,9 @@ fn mock_relation_security_probe_rows(sql: &str) -> Option<Vec<OracleRow>> {
 /// Shared live-catalog model for dispatcher mocks whose test concern is above
 /// semantic resolution. Dedicated security tests use `SemanticGuardMock`
 /// instead, so views, policies, and callables are never cleared by this model.
-fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>> {
-    // Explicit complete metadata for synthetic ordinary-table and clean
-    // compilation fixtures. Dedicated unit and native canaries test refusal.
-    if [
-        CatalogQueryId::MutationTriggers,
-        CatalogQueryId::MutationTriggerColumns,
-        CatalogQueryId::MutationIndexes,
-        CatalogQueryId::MutationIndexExpressions,
-        CatalogQueryId::MutationVpdPolicies,
-        CatalogQueryId::MutationFgaPolicies,
-        CatalogQueryId::MutationForeignKeys,
-        CatalogQueryId::MutationMvLogs,
-        CatalogQueryId::HardParseAssociations,
-        CatalogQueryId::HardParseIndexes,
-    ]
-    .iter()
-    .any(|id| sql == id.spec().sql)
-    {
-        return Some(Vec::new());
-    }
-    if sql == CatalogQueryId::MutationTarget.spec().sql
-        || sql == CatalogQueryId::ClosureMemberObject.spec().sql
-    {
-        return Some(vec![semantic_row(&[
-            ("OWNER", string_bind(binds, 0)),
-            ("OBJECT_NAME", string_bind(binds, 1)),
-            ("OBJECT_ID", Some("42")),
-            ("STATUS", Some("VALID")),
-            ("EDITION_NAME", None),
-            ("LAST_DDL_TIME", Some("2026-10-31T00:00:00")),
-        ])]);
-    }
-    if sql == CatalogQueryId::MutationColumns.spec().sql {
-        return Some(
-            [
-                "ID",
-                "SALARY",
-                "EMPLOYEE_ID",
-                "C",
-                "C1",
-                "C2",
-                "N",
-                "STATUS",
-                "TENANT_ID",
-                "AMOUNT",
-                "SECRET",
-            ]
-            .into_iter()
-            .map(|name| {
-                semantic_row(&[
-                    ("OWNER", string_bind(binds, 0)),
-                    ("TABLE_NAME", string_bind(binds, 1)),
-                    ("COLUMN_NAME", Some(name)),
-                    ("DATA_TYPE", Some("NUMBER")),
-                    ("DATA_TYPE_OWNER", None),
-                    ("DATA_DEFAULT", None),
-                    ("DEFAULT_LENGTH", Some("0")),
-                    ("VIRTUAL_COLUMN", Some("NO")),
-                    ("HIDDEN_COLUMN", Some("NO")),
-                    ("USER_GENERATED", Some("YES")),
-                ])
-            })
-            .collect(),
-        );
-    }
-    if sql == CatalogQueryId::ClosureCompilerSettings.spec().sql {
-        return Some(vec![semantic_row(&[
-            ("PLSQL_OPTIMIZE_LEVEL", Some("2")),
-            ("PLSQL_CODE_TYPE", Some("INTERPRETED")),
-            ("PLSQL_DEBUG", Some("FALSE")),
-            ("PLSQL_WARNINGS", Some("DISABLE:ALL")),
-            ("PLSQL_CCFLAGS", None),
-            ("NLS_LENGTH_SEMANTICS", Some("BYTE")),
-            ("PLSCOPE_SETTINGS", Some("IDENTIFIERS:NONE")),
-        ])]);
-    }
-    if sql == CatalogQueryId::ClosureSource.spec().sql {
-        let name = string_bind(binds, 1).unwrap_or("EMP_API");
-        let source = match string_bind(binds, 2).unwrap_or("PACKAGE BODY") {
-            "PACKAGE" => format!("PACKAGE {name} AS PROCEDURE p; END;\n"),
-            "PACKAGE BODY" => {
-                format!("PACKAGE BODY {name} AS PROCEDURE p IS BEGIN NULL; END; END;\n")
-            }
-            "PROCEDURE" => format!("PROCEDURE {name} AS BEGIN NULL; END;\n"),
-            "FUNCTION" => format!("FUNCTION {name} RETURN NUMBER AS BEGIN RETURN 1; END;\n"),
-            "TYPE" => format!("TYPE {name} AS OBJECT(id NUMBER);\n"),
-            "TYPE BODY" => {
-                format!("TYPE BODY {name} AS MEMBER PROCEDURE p IS BEGIN NULL; END; END;\n")
-            }
-            _ => return None,
-        };
-        return Some(vec![semantic_row(&[
-            ("LINE", Some("1")),
-            ("TEXT", Some(&source)),
-        ])]);
-    }
-    if let Some(rows) = mock_relation_security_probe_rows(sql) {
-        return Some(rows);
-    }
-    let normalized = sql.to_ascii_lowercase();
-    if normalized.contains("sys_context('userenv', 'session_user')") {
-        let mut context = semantic_row(&[
-            ("SESSION_USER", Some("APP")),
-            ("CURRENT_SCHEMA", Some("APP")),
-            ("EDITION_NAME", Some("ORA$BASE")),
-        ]);
-        if normalized.contains("session_roles") {
-            context
-                .columns
-                .push(("ROLE".to_owned(), OracleCell::new("VARCHAR2", None)));
-        }
-        if normalized.contains("row_kind") {
-            context.columns.push((
-                "ROW_KIND".to_owned(),
-                OracleCell::new("VARCHAR2", Some("CONTEXT".to_owned())),
-            ));
-        }
-        return Some(vec![context]);
-    }
-    if normalized.contains("from sys.session_roles") {
-        return Some(Vec::new());
-    }
-    if normalized.contains("data_type_owner is not null") {
-        return Some(Vec::new());
-    }
-    if normalized.contains("from sys.all_synonyms where owner = 'public'")
-        && normalized.contains("synonym_name = 'plan_table'")
-    {
-        return Some(vec![semantic_row(&[
-            ("TABLE_OWNER", Some("SYS")),
-            ("TABLE_NAME", Some("PLAN_TABLE$")),
-            ("DB_LINK", None),
-        ])]);
-    }
-    if normalized.contains("from sys.all_objects")
-        && normalized.contains("object_name = 'plan_table'")
-    {
-        return Some(Vec::new());
-    }
-    if normalized.contains("from sys.all_tab_cols")
-        && normalized.contains("where owner = :1 and table_name = :2")
-        && normalized.contains("order by column_id")
-    {
-        return Some(vec![semantic_row(&[
-            ("COLUMN_NAME", Some("ID")),
-            ("DATA_TYPE", Some("NUMBER")),
-            ("DATA_LENGTH", Some("22")),
-            ("NULLABLE", Some("N")),
-            ("DATA_DEFAULT", None),
-            ("VIRTUAL_COLUMN", Some("NO")),
-            ("HIDDEN_COLUMN", Some("NO")),
-            ("USER_GENERATED", Some("YES")),
-        ])]);
-    }
-    if normalized.contains("from sys.all_indexes") && normalized.contains("ityp_owner") {
-        return Some(Vec::new());
-    }
-    if normalized.contains("t.owner = 'sys'") && normalized.contains("t.table_name = 'plan_table$'")
-    {
-        return Some(vec![semantic_row(&[
-            ("TEMPORARY", Some("Y")),
-            ("DURATION", Some("SYS$SESSION")),
-            ("OBJECT_ID", Some("901")),
-        ])]);
-    }
-    if normalized.contains("from sys.all_objects")
-        && normalized.contains("object_id, status, edition_name")
-    {
-        let owner = string_bind(binds, 0).unwrap_or("APP");
-        let name = string_bind(binds, 1).unwrap_or("DUAL");
-        return Some(vec![semantic_row(&[
-            ("OWNER", Some(owner)),
-            ("OBJECT_NAME", Some(name)),
-            ("OBJECT_TYPE", Some("TABLE")),
-            ("OBJECT_ID", Some("42")),
-            ("STATUS", Some("VALID")),
-            ("EDITION_NAME", None),
-        ])]);
-    }
-    if normalized.contains("from sys.all_tab_columns") && normalized.contains("column_name = :1") {
-        let column = string_bind(binds, 0).unwrap_or("ID").to_ascii_uppercase();
-        return match column.as_str() {
-            "ID" | "EMBEDDING" | "LABEL" => Some(vec![semantic_row(&[
-                ("OWNER", Some("APP")),
-                ("TABLE_NAME", Some("ORDERS")),
-                ("COLUMN_NAME", Some(column.as_str())),
-                ("COLUMN_ID", Some("1")),
-            ])]),
-            _ => Some(Vec::new()),
-        };
-    }
-    if normalized.contains("from sys.all_synonyms")
-        || normalized.contains("from sys.all_arguments")
-        || (normalized.contains("from sys.all_tab_columns")
-            && !normalized.contains("table_name = :2"))
-    {
-        return Some(Vec::new());
-    }
-    if normalized.contains("from sys.all_tab_columns") && normalized.contains("table_name = :2") {
-        let column = string_bind(binds, 2).unwrap_or("VALUE");
-        return Some(vec![semantic_row(&[
-            ("COLUMN_NAME", Some(column)),
-            ("COLUMN_ID", Some("1")),
-        ])]);
-    }
-    // Only the bounded live-read-proof probes (`... AND ROWNUM <= 1`) are answered
-    // here; the bulk catalog-extraction queries (`... WHERE owner IN (...)`, no
-    // ROWNUM) must fall through to `catalog_extract_empty_rowset` so they yield an
-    // empty rowset with the extraction's own column shape, not this probe shape.
-    if normalized.contains("from sys.all_policies") && normalized.contains("rownum") {
-        if normalized.contains("object_owner = :1")
-            || normalized.contains("(object_owner, object_name) in")
-        {
-            return Some(Vec::new());
-        }
-        return Some(vec![semantic_row(&[(
-            "POLICY_NAME",
-            Some("VISIBLE_POLICY"),
-        )])]);
-    }
-    if normalized.contains("from sys.all_audit_policies") {
-        return Some(Vec::new());
-    }
-    if normalized.contains("from sys.all_tab_cols") && normalized.contains("rownum") {
-        if normalized.contains("virtual_column = 'yes'") {
-            return Some(Vec::new());
-        }
-        return Some(vec![semantic_row(&[("COLUMN_NAME", Some("ID"))])]);
-    }
-    None
-}
+use action_envelope::{
+    mock_approval_count_rows, mock_complete_dependencies, mock_plain_table_dictionary,
+};
 
 fn semantic_policy_rows_for(sql: &str, binds: &[OracleBind]) -> Vec<OracleRow> {
     let normalized = sql.to_ascii_lowercase();
@@ -2488,6 +2343,18 @@ impl OracleConnection for OneRowMock {
         sql: &str,
         binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
+        if sql == CatalogQueryId::GetSource.spec().sql
+            && let Some(rows) =
+                mock_plain_table_dictionary(CatalogQueryId::ClosureSource.spec().sql, binds)
+        {
+            return Ok(rows);
+        }
+        if let Some(rows) = mock_approval_count_rows(sql) {
+            return Ok(rows);
+        }
+        if let Some(rows) = mock_complete_dependencies(sql, binds) {
+            return Ok(rows);
+        }
         if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
             return Ok(rows);
         }
@@ -3048,6 +2915,25 @@ impl OracleConnection for SourceLookupMock {
         sql: &str,
         binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
+        if let Some(rows) = mock_complete_dependencies(sql, binds) {
+            return Ok(rows);
+        }
+        if sql == CatalogQueryId::GetDdl.spec().sql {
+            let name = string_bind(binds, 1).unwrap_or("EMP_V");
+            let owner = string_bind(binds, 2).unwrap_or("APP");
+            let ddl = format!("CREATE OR REPLACE VIEW {owner}.{name} AS SELECT 1 N FROM SYS.DUAL");
+            return Ok(vec![semantic_row(&[
+                ("DDL", Some(&ddl)),
+                ("DDL_LENGTH", Some(&ddl.len().to_string())),
+            ])]);
+        }
+        if sql == CatalogQueryId::GetSource.spec().sql
+            && !matches!(string_bind(binds, 2), Some("PACKAGE BODY" | "TYPE BODY"))
+            && let Some(rows) =
+                mock_plain_table_dictionary(CatalogQueryId::ClosureSource.spec().sql, binds)
+        {
+            return Ok(rows);
+        }
         if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
             return Ok(rows);
         }
@@ -3379,7 +3265,6 @@ impl OracleConnection for PingFailingMock {
     }
 }
 
-#[derive(Default)]
 struct ExecState {
     impact_schema_epoch: AtomicUsize,
     mutation_catalog_unreadable: AtomicBool,
@@ -3411,6 +3296,41 @@ struct ExecState {
     cancel_on_execute: AtomicUsize,
     commits: AtomicUsize,
     rollbacks: AtomicUsize,
+}
+
+impl Default for ExecState {
+    fn default() -> Self {
+        Self {
+            impact_schema_epoch: Default::default(),
+            mutation_catalog_unreadable: Default::default(),
+            impact_count: Mutex::new(Some(0)),
+            impact_read_error: Default::default(),
+            impact_scn_error: Default::default(),
+            executed: Default::default(),
+            queried: Default::default(),
+            execute_error: Default::default(),
+            explain_display_error: Default::default(),
+            explain_read_only_transaction_error: Default::default(),
+            diagnostics: Default::default(),
+            dbms_output: Default::default(),
+            describe_calls: Default::default(),
+            cancel_on_describe: Default::default(),
+            describe_error: Default::default(),
+            describe_pending: Default::default(),
+            dbms_output_enable_error: Default::default(),
+            dbms_output_error: Default::default(),
+            dbms_output_enabled: Default::default(),
+            dbms_output_limits: Default::default(),
+            current_call_timeout: Default::default(),
+            call_timeout_sets: Default::default(),
+            cancel_on_commit: Default::default(),
+            cancel_on_rollback: Default::default(),
+            rollback_error: Default::default(),
+            cancel_on_execute: Default::default(),
+            commits: Default::default(),
+            rollbacks: Default::default(),
+        }
+    }
 }
 
 struct ExecRecordingMock {
@@ -3483,11 +3403,13 @@ impl OracleConnection for CancelAfterExecuteMock {
 
     async fn query_rows(
         &self,
-        _cx: &Cx,
-        _sql: &str,
-        _b: &[OracleBind],
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
-        Ok(Vec::new())
+        ExecRecordingMock::new(Arc::clone(&self.state))
+            .query_rows(cx, sql, binds)
+            .await
     }
 
     async fn execute(&self, cx: &Cx, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
@@ -3655,11 +3577,13 @@ impl OracleConnection for IntentObservingExecMock {
 
     async fn query_rows(
         &self,
-        _cx: &Cx,
-        _sql: &str,
-        _b: &[OracleBind],
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
-        Ok(Vec::new())
+        ExecRecordingMock::new(Arc::clone(&self.state))
+            .query_rows(cx, sql, binds)
+            .await
     }
 
     async fn execute(&self, _cx: &Cx, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
@@ -3716,11 +3640,13 @@ impl OracleConnection for CommitInDoubtMock {
 
     async fn query_rows(
         &self,
-        _cx: &Cx,
-        _sql: &str,
-        _b: &[OracleBind],
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
-        Ok(Vec::new())
+        ExecRecordingMock::new(Arc::clone(&self.state))
+            .query_rows(cx, sql, binds)
+            .await
     }
 
     async fn execute(&self, _cx: &Cx, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
@@ -3858,6 +3784,24 @@ impl OracleConnection for ExecRecordingMock {
                     Some(&count.to_string()),
                 )])]);
             }
+        }
+        if let Some(rows) = mock_complete_dependencies(sql, binds) {
+            return Ok(rows);
+        }
+        if sql == CatalogQueryId::GetSource.spec().sql && string_bind(binds, 2) == Some("TYPE BODY")
+        {
+            return Ok(mock_plain_table_dictionary(
+                CatalogQueryId::ClosureSource.spec().sql,
+                binds,
+            )
+            .unwrap_or_default());
+        }
+        if sql == CatalogQueryId::GetSource.spec().sql
+            && !matches!(string_bind(binds, 2), Some("PACKAGE BODY" | "TYPE BODY"))
+            && let Some(rows) =
+                mock_plain_table_dictionary(CatalogQueryId::ClosureSource.spec().sql, binds)
+        {
+            return Ok(rows);
         }
         if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
             return Ok(rows);
@@ -7629,20 +7573,37 @@ fn custom_tool_write_runs_with_confirmation_on_writable_profile() {
         &queries[..preview_queries.len()],
         preview_queries.as_slice()
     );
-    let expected_fact_reads = [
-        CatalogQueryId::SessionContext.spec().sql,
-        CatalogQueryId::PdbIdentity.spec().sql,
-        CatalogQueryId::ClosureMemberObject.spec().sql,
-        CatalogQueryId::ClosureTriggers.spec().sql,
-    ]
-    .repeat(4)
-    .into_iter()
-    .map(str::to_owned)
-    .collect::<Vec<_>>();
+    let added_reads = &queries[preview_queries.len()..];
+    let counts = added_reads
+        .iter()
+        .filter(|sql| sql.contains("tool=impact_probe") && sql.contains("SELECT COUNT(*)"))
+        .collect::<Vec<_>>();
+    assert!(
+        counts.is_empty(),
+        "named-bind DML has no supported positional count shape"
+    );
+    assert!(
+        added_reads
+            .iter()
+            .any(|sql| sql == CatalogQueryId::MutationTarget.spec().sql),
+        "the shared mutation proof still refreshes on this unsupported count shape"
+    );
+    assert!(
+        added_reads.iter().all(
+            |sql| CatalogQueryId::ALL.iter().any(|id| sql == id.spec().sql)
+                || counts.contains(&sql)
+        ),
+        "only closed catalog reads and the exact generated count are admitted"
+    );
     assert_eq!(
-        &queries[preview_queries.len()..],
-        expected_fact_reads.as_slice(),
-        "confirmation refusals/apply add only their bounded closed fact reads, never a candidate read"
+        &added_reads[added_reads.len() - 4..],
+        &[
+            CatalogQueryId::SessionContext.spec().sql.to_owned(),
+            CatalogQueryId::PdbIdentity.spec().sql.to_owned(),
+            CatalogQueryId::ClosureMemberObject.spec().sql.to_owned(),
+            CatalogQueryId::ClosureTriggers.spec().sql.to_owned(),
+        ],
+        "the final fact checkpoint still runs immediately before the one candidate execution"
     );
 }
 
@@ -8550,8 +8511,22 @@ impl OracleConnection for CatalogOnlyNoExecMock {
         &self,
         _cx: &Cx,
         sql: &str,
-        _binds: &[OracleBind],
+        binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
+        if sql == CatalogQueryId::GetSource.spec().sql
+            && let Some(rows) =
+                mock_plain_table_dictionary(CatalogQueryId::ClosureSource.spec().sql, binds)
+        {
+            return Ok(rows);
+        }
+        if let Some(rows) = mock_approval_count_rows(sql) {
+            return Ok(rows);
+        }
+        if let Some(rows) = mock_complete_dependencies(sql, binds)
+            .or_else(|| mock_plain_table_dictionary(sql, binds))
+        {
+            return Ok(rows);
+        }
         assert!(
             CatalogQueryId::ALL.iter().any(|id| sql == id.spec().sql),
             "preview attempted non-catalog SQL: {sql}"
@@ -8561,13 +8536,18 @@ impl OracleConnection for CatalogOnlyNoExecMock {
         ))
     }
     async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
-        panic!("preview must never execute a statement")
+        match _sql {
+            "BEGIN SYS.DBMS_FLASHBACK.DISABLE; END;"
+            | "BEGIN SYS.DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;"
+            | SET_TRANSACTION_READ_ONLY => Ok(0),
+            _ => panic!("preview attempted candidate execution"),
+        }
     }
     async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         panic!("preview must never commit")
     }
     async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
-        panic!("unavailable catalog needs no transaction reset")
+        Ok(())
     }
 }
 
@@ -8698,10 +8678,12 @@ impl OracleConnection for LifecycleCleanupMock {
     async fn query_rows(
         &self,
         _cx: &Cx,
-        _sql: &str,
-        _b: &[OracleBind],
+        sql: &str,
+        binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
-        Ok(Vec::new())
+        Ok(mock_approval_count_rows(sql)
+            .or_else(|| mock_plain_table_dictionary(sql, binds))
+            .unwrap_or_default())
     }
 
     async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
@@ -8747,6 +8729,14 @@ fn lifecycle_close_rolls_back_and_revokes_execution_grants() {
             self.0.append(record)
         }
 
+        fn append_with_verdict_certificate(
+            &self,
+            record: &AuditRecord,
+            certificate: &oraclemcp_audit::BoundAuditVerdictCertificate,
+        ) -> Result<(), AuditError> {
+            self.0.append_with_verdict_certificate(record, certificate)
+        }
+
         fn flush(&self) -> Result<(), AuditError> {
             self.0.flush()
         }
@@ -8774,12 +8764,24 @@ fn lifecycle_close_rolls_back_and_revokes_execution_grants() {
     let sql = "UPDATE employees SET salary = salary WHERE employee_id = 1";
     let confirm = preview_confirm(&dispatcher, sql);
 
+    let before_close_rollbacks = rollbacks.load(Ordering::SeqCst);
     close_dispatcher_for_test(&dispatcher, DispatchCloseReason::SessionDelete)
         .expect("lifecycle cleanup succeeds");
 
-    assert_eq!(rollbacks.load(Ordering::SeqCst), 1);
+    assert_eq!(rollbacks.load(Ordering::SeqCst), before_close_rollbacks + 1);
     assert_eq!(closes.load(Ordering::SeqCst), 1);
-    let records = sink.records();
+    let all_records = sink.records();
+    assert_eq!(
+        all_records
+            .iter()
+            .filter(|record| record.tool == "impact_probe")
+            .count(),
+        2
+    );
+    let records = all_records
+        .into_iter()
+        .filter(|record| record.tool != "impact_probe")
+        .collect::<Vec<_>>();
     assert_eq!(records.len(), 1);
     let record = &records[0];
     assert_eq!(record.tool, "lane_lifecycle");
@@ -8932,6 +8934,14 @@ fn lifecycle_timeout_close_audits_timeout_reason() {
             self.0.append(record)
         }
 
+        fn append_with_verdict_certificate(
+            &self,
+            record: &AuditRecord,
+            certificate: &oraclemcp_audit::BoundAuditVerdictCertificate,
+        ) -> Result<(), AuditError> {
+            self.0.append_with_verdict_certificate(record, certificate)
+        }
+
         fn flush(&self) -> Result<(), AuditError> {
             self.0.flush()
         }
@@ -8992,6 +9002,14 @@ fn finalization_timeout_audits_unknown_before_best_effort_cleanup() {
     impl AuditSink for SharedSink {
         fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
             self.0.append(record)
+        }
+
+        fn append_with_verdict_certificate(
+            &self,
+            record: &AuditRecord,
+            certificate: &oraclemcp_audit::BoundAuditVerdictCertificate,
+        ) -> Result<(), AuditError> {
+            self.0.append_with_verdict_certificate(record, certificate)
         }
 
         fn flush(&self) -> Result<(), AuditError> {
@@ -12790,6 +12808,14 @@ fn execute_commit_in_doubt_audits_and_quarantines_dispatcher() {
             self.0.append(record)
         }
 
+        fn append_with_verdict_certificate(
+            &self,
+            record: &AuditRecord,
+            certificate: &oraclemcp_audit::BoundAuditVerdictCertificate,
+        ) -> Result<(), AuditError> {
+            self.0.append_with_verdict_certificate(record, certificate)
+        }
+
         fn flush(&self) -> Result<(), AuditError> {
             self.0.flush()
         }
@@ -12828,7 +12854,18 @@ fn execute_commit_in_doubt_audits_and_quarantines_dispatcher() {
         "commit-in-doubt must not pretend rollback resolved the outcome"
     );
 
-    let records = sink.records();
+    let all_records = sink.records();
+    assert_eq!(
+        all_records
+            .iter()
+            .filter(|record| record.tool == "impact_probe")
+            .count(),
+        4
+    );
+    let records = all_records
+        .into_iter()
+        .filter(|record| record.tool != "impact_probe")
+        .collect::<Vec<_>>();
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].outcome, AuditOutcome::Pending);
     assert_eq!(records[1].outcome, AuditOutcome::CommitInDoubt);
@@ -14381,6 +14418,13 @@ mod read_only_backstop_wiring {
             sql: &str,
             binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
+            if sql == CatalogQueryId::GetSource.spec().sql {
+                return Ok(mock_plain_table_dictionary(
+                    CatalogQueryId::ClosureSource.spec().sql,
+                    binds,
+                )
+                .unwrap_or_default());
+            }
             if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
                 return Ok(rows);
             }
@@ -14536,6 +14580,14 @@ mod read_only_backstop_wiring {
         impl AuditSink for SharedSink {
             fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
                 self.0.append(record)
+            }
+
+            fn append_with_verdict_certificate(
+                &self,
+                record: &AuditRecord,
+                certificate: &oraclemcp_audit::BoundAuditVerdictCertificate,
+            ) -> Result<(), AuditError> {
+                self.0.append_with_verdict_certificate(record, certificate)
             }
 
             fn flush(&self) -> Result<(), AuditError> {
@@ -15933,6 +15985,13 @@ mod dependents_preview {
             sql: &str,
             binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
+            if sql == CatalogQueryId::GetSource.spec().sql {
+                return Ok(mock_plain_table_dictionary(
+                    CatalogQueryId::ClosureSource.spec().sql,
+                    binds,
+                )
+                .unwrap_or_default());
+            }
             if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
                 return Ok(rows);
             }
@@ -16154,6 +16213,66 @@ mod dependents_preview {
             "failed wire cannot be reused"
         );
     }
+    fn unverified_approval_preview() -> Value {
+        OracleDispatcher::new_with_profile_level(
+            Box::new(DependentsConnection {
+                denied: false,
+                verification_denied: true,
+                remote: false,
+                lost: false,
+            }),
+            Some("dev".into()),
+            ddl_level(),
+        )
+        .dispatch(
+            "oracle_compile_object",
+            json!({"owner":"APP","name":"PKG","object_type":"PACKAGE"}),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn unverified_dependents_still_mints_with_observation() {
+        let preview = unverified_approval_preview();
+        assert!(preview["confirmation"]["confirm"].is_string());
+        assert_eq!(preview["impact"]["dependents"]["status"], "estimated");
+        assert!(
+            preview["impact"]["dependents"]["value"]["uncertainties"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|fact| fact["reason"] == "visibility_unverified")
+        );
+    }
+
+    #[test]
+    fn require_impact_refuses_the_same_unverified_dependency_proof() {
+        let preview = unverified_approval_preview();
+        let facts: oraclemcp_guard::ImpactBindingV1 =
+            serde_json::from_value(preview["impact"]["binding"].clone()).unwrap();
+        let material = oraclemcp_guard::GrantMaterial::new("strict unit action", &facts).unwrap();
+        let refusal = match DecisiveApproval::check(
+            &material,
+            &facts,
+            &ActionKind::CompileObject,
+            DecisiveMatrixContext {
+                require_impact: true,
+                ..Default::default()
+            },
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("strict mode admitted an unverified dependency proof"),
+        };
+        assert_eq!(refusal.error_class, ErrorClass::ImpactDecisiveUnavailable);
+        assert_eq!(
+            refusal.impact_decisive.as_ref().unwrap().field,
+            "dependents"
+        );
+        assert_eq!(
+            refusal.statement_outcome,
+            Some(StatementOutcome::NotStarted)
+        );
+    }
 }
 
 /// Source-changing previews carry the served engine's effect and SAST facts.
@@ -16167,7 +16286,10 @@ mod source_impact_preview {
         "BEGIN SELECT ID INTO n FROM APP.T WHERE ID = 1; RETURN n; END;\n",
     ];
 
-    struct SourceConnection;
+    #[derive(Default)]
+    struct SourceConnection {
+        stored: Option<Arc<Mutex<Result<String, String>>>>,
+    }
 
     #[async_trait::async_trait(?Send)]
     impl OracleConnection for SourceConnection {
@@ -16208,7 +16330,26 @@ mod source_impact_preview {
                 && sql != CatalogQueryId::ClosureSource.spec().sql)
                 || !stored
             {
-                return Ok(mock_plain_table_dictionary(sql, binds).unwrap_or_default());
+                return Ok(mock_approval_count_rows(sql)
+                    .or_else(|| mock_plain_table_dictionary(sql, binds))
+                    .unwrap_or_default());
+            }
+            if let Some(source) = &self.stored {
+                let source = source.lock().unwrap();
+                match source.as_ref() {
+                    Ok(source) => {
+                        return Ok(vec![semantic_row(&[
+                            ("LINE", Some("1")),
+                            ("TEXT", Some(source)),
+                        ])]);
+                    }
+                    // The source-impact read can fail independently of the
+                    // earlier bounded compile-closure source read.
+                    Err(error) if sql == CatalogQueryId::GetSource.spec().sql => {
+                        return Err(DbError::ServerQuery(error.clone()));
+                    }
+                    Err(_) => {}
+                }
             }
             Ok(STORED
                 .iter()
@@ -16232,7 +16373,7 @@ mod source_impact_preview {
     /// Runs on the default test stack: the engine sizes its own thread.
     fn preview(tool: &str, args: Value) -> Result<Value, ErrorEnvelope> {
         OracleDispatcher::new_with_profile_level(
-            Box::new(SourceConnection),
+            Box::new(SourceConnection::default()),
             Some("dev".into()),
             ddl_level(),
         )
@@ -16246,6 +16387,70 @@ mod source_impact_preview {
             .iter()
             .map(|effect| effect.as_str().unwrap_or_default().to_owned())
             .collect()
+    }
+
+    #[test]
+    fn complete_source_effect_unknowns_are_bound_and_source_drift_refuses_apply() {
+        let source = |value| {
+            format!(
+                "FUNCTION F RETURN NUMBER IS BEGIN EXECUTE IMMEDIATE 'BEGIN NULL; END;'; RETURN {value}; END;"
+            )
+        };
+        let stored = Arc::new(Mutex::new(Ok(source(1))));
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(SourceConnection {
+                stored: Some(Arc::clone(&stored)),
+            }),
+            Some("dev".into()),
+            ddl_level(),
+        );
+        let args = json!({"owner":"APP","name":"F","object_type":"FUNCTION"});
+        let preview = dispatcher
+            .dispatch("oracle_compile_object", args.clone())
+            .unwrap();
+        let effects = &preview["impact"]["effects"];
+        assert_eq!(effects["status"], "computed");
+        assert!(effect_names(&effects["value"]["before"]).contains(&"Unknown".into()));
+        assert_eq!(
+            preview["impact"]["binding"]["decisive"]["action_fields"]["source_effects"]["status"],
+            "computed"
+        );
+        let token = preview["confirmation"]["confirm"].as_str().unwrap();
+        *stored.lock().unwrap() = Ok(source(2));
+        let mut apply = args;
+        apply["execute"] = json!(true);
+        apply["confirmation_token"] = json!(token);
+        let error = dispatcher
+            .dispatch("oracle_compile_object", apply)
+            .unwrap_err();
+        assert_eq!(error.error_class, ErrorClass::RepreviewRequired);
+        assert_eq!(error.statement_outcome, Some(StatementOutcome::NotStarted));
+        // SourceConnection panics at every candidate execute or commit seam.
+    }
+
+    #[test]
+    fn unavailable_source_effect_producer_refuses_confirmation() {
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(SourceConnection {
+                stored: Some(Arc::new(Mutex::new(Err(
+                    "ORA-01031: stored source unavailable".into(),
+                )))),
+            }),
+            Some("dev".into()),
+            ddl_level(),
+        );
+        let error = dispatcher
+            .dispatch(
+                "oracle_compile_object",
+                json!({"owner":"APP","name":"F","object_type":"FUNCTION"}),
+            )
+            .unwrap_err();
+        assert_eq!(error.error_class, ErrorClass::ImpactDecisiveUnavailable);
+        assert_eq!(
+            error.impact_decisive.as_ref().unwrap().field,
+            "source_effects"
+        );
+        assert_eq!(error.statement_outcome, Some(StatementOutcome::NotStarted));
     }
 
     #[test]
@@ -19360,6 +19565,151 @@ fn execute_returns_observed_rows() {
 }
 
 #[test]
+fn decisive_snapshot_rows_display_estimated_but_mint_and_drift_are_checked() {
+    let state = Arc::new(ExecState::default());
+    *state.impact_count.lock().unwrap() = Some(7);
+    let dispatcher = workspace_dispatcher(&state);
+    let sql = "UPDATE APP.T SET C=1 WHERE ID=1";
+    let preview = dispatcher
+        .dispatch("oracle_preview_sql", json!({"sql":sql,"commit":true}))
+        .unwrap();
+    assert_eq!(preview["impact"]["rows"]["status"], "estimated");
+    assert_eq!(preview["impact"]["rows"]["value"]["value"], 7);
+    assert_eq!(
+        preview["impact"]["binding"]["decisive"]["action_fields"]["rows"]["status"],
+        "computed"
+    );
+    let token = preview["execute_confirmation"]["confirm"]
+        .as_str()
+        .expect("complete inputs mint a token");
+    *state.impact_count.lock().unwrap() = Some(8);
+    let error = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({"sql":sql,"commit":true,"confirm":token}),
+        )
+        .unwrap_err();
+    assert_eq!(error.error_class, ErrorClass::RepreviewRequired);
+    assert_eq!(error.statement_outcome, Some(StatementOutcome::NotStarted));
+    assert!(
+        !executed_statements(&state)
+            .iter()
+            .any(|statement| statement.contains(sql))
+    );
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+    *state.impact_count.lock().unwrap() = Some(7);
+    let applied = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({"sql":sql,"commit":true,"confirm":token}),
+        )
+        .unwrap();
+    assert_eq!(applied["observed_rows"], 3);
+    assert_eq!(state.commits.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn decisive_unavailable_count_refuses_mint_and_apply_before_candidate() {
+    let state = Arc::new(ExecState::default());
+    *state.impact_read_error.lock().unwrap() =
+        Some(DbError::Query("ORA-01031: count unavailable".into()));
+    let dispatcher = workspace_dispatcher(&state);
+    let sql = "UPDATE APP.T SET C=1 WHERE ID=1";
+    for (tool, args) in [
+        ("oracle_preview_sql", json!({"sql":sql,"commit":true})),
+        ("oracle_execute", json!({"sql":sql})),
+    ] {
+        let error = dispatcher.dispatch(tool, args).unwrap_err();
+        assert_eq!(error.error_class, ErrorClass::ImpactDecisiveUnavailable);
+        assert_eq!(error.impact_decisive.as_ref().unwrap().field, "rows");
+        assert_eq!(error.statement_outcome, Some(StatementOutcome::NotStarted));
+    }
+    assert!(
+        !executed_statements(&state)
+            .iter()
+            .any(|statement| statement.contains(sql))
+    );
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn no_preview_reports_not_wired() {
+    fn has_not_wired(value: &Value) -> bool {
+        match value {
+            Value::String(value) => value == "not_wired",
+            Value::Array(values) => values.iter().any(has_not_wired),
+            Value::Object(values) => values.values().any(has_not_wired),
+            _ => false,
+        }
+    }
+    let dispatcher = OracleDispatcher::new(Box::new(SourceLookupMock));
+    let mut covered = 0;
+    for descriptor in tool_registry().tools {
+        if !descriptor
+            .output_schema
+            .as_ref()
+            .is_some_and(|schema| schema.pointer("/properties/impact").is_some())
+        {
+            continue;
+        }
+        use oraclemcp_core::tools::ApprovalAction;
+        let args = match descriptor
+            .approval_action
+            .expect("preview has approval metadata")
+        {
+            ApprovalAction::ExecuteStatement => {
+                if descriptor
+                    .input_schema
+                    .as_ref()
+                    .is_some_and(|schema| schema.pointer("/properties/ddl").is_some())
+                {
+                    json!({"ddl":"ALTER TABLE APP.T ADD N NUMBER"})
+                } else {
+                    json!({"sql":"UPDATE APP.T SET C=1 WHERE ID=1"})
+                }
+            }
+            ApprovalAction::CompileObject => {
+                json!({"owner":"APP","name":"EMP_API","object_type":"PACKAGE BODY"})
+            }
+            ApprovalAction::CreateOrReplace => {
+                json!({"source_code":"CREATE OR REPLACE PROCEDURE APP.P AS BEGIN NULL; END;"})
+            }
+            ApprovalAction::PatchSource => {
+                json!({"owner":"APP","name":"EMP_API","object_type":"PACKAGE BODY","old_text":"NULL","new_text":"NULL"})
+            }
+            ApprovalAction::SetSessionLevel => json!({"level":"READ_WRITE","ttl_seconds":60}),
+            other => panic!("unhandled registered approval preview {other:?}"),
+        };
+        let mut args = args;
+        if descriptor.approval_action == Some(ApprovalAction::PatchSource)
+            && descriptor
+                .input_schema
+                .as_ref()
+                .is_some_and(|schema| schema.pointer("/properties/object_type").is_none())
+        {
+            args =
+                json!({"owner":"APP","name":"EMP_V","old_text":"SELECT 1","new_text":"SELECT 2"});
+        }
+        if let (Some(args), Some(properties)) = (
+            args.as_object_mut(),
+            descriptor
+                .input_schema
+                .as_ref()
+                .and_then(|schema| schema.get("properties"))
+                .and_then(Value::as_object),
+        ) {
+            args.retain(|key, _| properties.contains_key(key));
+        }
+        let preview = dispatcher
+            .dispatch(&descriptor.name, args)
+            .unwrap_or_else(|error| panic!("{}: {error:?}", descriptor.name));
+        assert!(!has_not_wired(&preview), "{}", descriptor.name);
+        covered += 1;
+    }
+    assert!(covered > 0);
+}
+
+#[test]
 fn impact_rows_unknown_mutation_catalog_is_unavailable_never_zero() {
     let state = Arc::new(ExecState::default());
     state
@@ -19470,4 +19820,53 @@ fn impact_rows_preserve_scn_probe_refusals_before_and_after_count() {
                 .all(|sql| !sql.to_ascii_uppercase().contains("UPDATE APP.T"))
         );
     }
+}
+
+#[test]
+fn anonymous_approval_binds_by_statement_digest_with_no_object_identity() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = workspace_dispatcher(&state);
+    let sql = "BEGIN SYS.DBMS_OUTPUT.PUT_LINE('first'); END;";
+    let preview = dispatcher
+        .dispatch("oracle_preview_sql", json!({"sql":sql,"commit":true}))
+        .unwrap();
+    assert_eq!(
+        preview["impact"]["binding"]["decisive"]["objects"],
+        json!({"status":"not_applicable","reason":"no_object"})
+    );
+    assert!(preview["execute_confirmation"]["confirm"].is_string());
+    let applied = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({"sql":sql,"commit":true,
+        "confirm":preview["execute_confirmation"]["confirm"]}),
+        )
+        .unwrap();
+    assert_eq!(applied["committed"], true);
+    assert!(
+        executed_statements(&state)
+            .iter()
+            .any(|statement| statement.contains(sql))
+    );
+}
+
+#[test]
+fn anonymous_statement_drift_requires_repreview_before_execution() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = workspace_dispatcher(&state);
+    let sql = "BEGIN SYS.DBMS_OUTPUT.PUT_LINE('first'); END;";
+    let preview = dispatcher
+        .dispatch("oracle_preview_sql", json!({"sql":sql,"commit":true}))
+        .unwrap();
+    let before = executed_statements(&state);
+    let error = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({"sql":"BEGIN SYS.DBMS_OUTPUT.PUT_LINE('different'); END;",
+        "commit":true,"confirm":preview["execute_confirmation"]["confirm"]}),
+        )
+        .unwrap_err();
+    assert_eq!(error.error_class, ErrorClass::RepreviewRequired);
+    assert_eq!(error.statement_outcome, Some(StatementOutcome::NotStarted));
+    assert_eq!(executed_statements(&state), before);
 }

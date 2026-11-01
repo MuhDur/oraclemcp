@@ -14,6 +14,7 @@ struct FactConnection {
     object_absent: AtomicBool,
     forbid_code_catalog: AtomicBool,
     no_triggers: AtomicBool,
+    pending_dependents: AtomicBool,
     dependent_rows: SyncMutex<Vec<OracleRow>>,
     dependency_owner: SyncMutex<Option<String>>,
 }
@@ -123,6 +124,11 @@ impl OracleConnection for FactConnection {
         if sql == CatalogQueryId::DependentsTransitive.spec().sql
             || sql == CatalogQueryId::ClosureCompilerSettings.spec().sql
         {
+            if sql == CatalogQueryId::DependentsTransitive.spec().sql
+                && self.pending_dependents.load(Ordering::Relaxed)
+            {
+                return std::future::pending().await;
+            }
             assert!(
                 !self.forbid_code_catalog.load(Ordering::Relaxed),
                 "plain table facts must not scan stored-code catalogs"
@@ -161,6 +167,214 @@ where
     runtime.block_on(async move { body(Cx::current().unwrap()).await })
 }
 
+#[test]
+fn snapshot_display_estimate_commits_complete_inputs_only() {
+    use oraclemcp_guard::{RowEstimate, RowEstimateKind, ScnBounds};
+    let statement = computed([1; 32]);
+    let binds = computed([2; 32]);
+    let rows = FieldStatus::Estimated {
+        value: RowEstimate {
+            kind: RowEstimateKind::SnapshotEstimate,
+            value: 7,
+            scn: ScnBounds::Window {
+                scn_before: 10,
+                scn_after: 11,
+            },
+            profile_generation: 1,
+        },
+    };
+    let original = row_commitment(&rows, &statement, &binds);
+    assert!(matches!(original, FieldStatus::Computed { .. }));
+    let FieldStatus::Estimated { mut value } = rows else {
+        unreachable!()
+    };
+    value.scn = ScnBounds::Window {
+        scn_before: 20,
+        scn_after: 21,
+    };
+    assert_eq!(
+        original,
+        row_commitment(
+            &FieldStatus::Estimated {
+                value: value.clone()
+            },
+            &statement,
+            &binds
+        )
+    );
+    value.value += 1;
+    assert_ne!(
+        original,
+        row_commitment(
+            &FieldStatus::Estimated {
+                value: value.clone()
+            },
+            &statement,
+            &binds
+        )
+    );
+    value.kind = RowEstimateKind::Estimated;
+    assert!(matches!(
+        row_commitment(&FieldStatus::Estimated { value }, &statement, &binds),
+        FieldStatus::Unavailable { .. }
+    ));
+    for reason in [
+        UnavailableReason::Timeout,
+        UnavailableReason::Truncated,
+        UnavailableReason::NoPrivilege,
+    ] {
+        assert_eq!(
+            row_commitment(&FieldStatus::Unavailable { reason }, &statement, &binds),
+            unavailable(reason)
+        );
+    }
+}
+
+#[cfg(feature = "plsql-intelligence")]
+struct NativeFieldObserver<'a> {
+    conn: &'a dyn OracleConnection,
+    dependency_reads: AtomicUsize,
+    executions: AtomicUsize,
+}
+
+#[cfg(feature = "plsql-intelligence")]
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for NativeFieldObserver<'_> {
+    fn backend(&self) -> OracleBackend {
+        self.conn.backend()
+    }
+    async fn close(&self, cx: &Cx) -> Result<(), DbError> {
+        self.conn.close(cx).await
+    }
+    async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
+        self.conn.ping(cx).await
+    }
+    async fn describe(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        self.conn.describe(cx).await
+    }
+    async fn query_rows(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        if sql == CatalogQueryId::DependentsTransitive.spec().sql {
+            self.dependency_reads.fetch_add(1, Ordering::Relaxed);
+        }
+        self.conn.query_rows(cx, sql, binds).await
+    }
+    async fn execute(&self, _: &Cx, _: &str, _: &[OracleBind]) -> Result<u64, DbError> {
+        self.executions.fetch_add(1, Ordering::Relaxed);
+        Err(DbError::Internal(
+            "field probe attempted candidate execution".into(),
+        ))
+    }
+    async fn commit(&self, _: &Cx) -> Result<(), DbError> {
+        panic!("field probe committed")
+    }
+    async fn rollback(&self, _: &Cx) -> Result<(), DbError> {
+        panic!("field probe rolled back")
+    }
+}
+
+#[cfg(feature = "plsql-intelligence")]
+#[test]
+#[ignore = "requires the local FREE23 lab and run-owned DDL fixtures"]
+fn ddl_padded_to_timeout_refused() {
+    run_with_cx(|cx| async move {
+        use oraclemcp_db::{OracleConnectOptions, RustOracleConnection};
+        let options = OracleConnectOptions {
+            connect_string: std::env::var("ORACLEMCP_TEST_DSN").unwrap(),
+            username: Some(std::env::var("ORACLEMCP_TEST_USER").unwrap()),
+            password: Some(std::env::var("ORACLEMCP_TEST_PASSWORD").unwrap()),
+            call_timeout: Some(Duration::from_secs(10)),
+            ..Default::default()
+        };
+        assert_eq!(options.connect_string, "localhost:1523/FREEPDB1");
+        let conn = RustOracleConnection::connect(&cx, options.clone())
+            .await
+            .unwrap();
+        let owner = conn.describe(&cx).await.unwrap().current_schema.unwrap();
+        let run = oraclemcp_db::PlanStatementId::generate().unwrap();
+        let prefix = format!("OMCPB_{}", &run.as_str()[5..13]);
+        let names = (0..9)
+            .map(|index| format!("{prefix}_{index}"))
+            .collect::<Vec<_>>();
+        let qualify = |name: &str| format!("\"{owner}\".\"{name}\"");
+        let mut created = Vec::new();
+        let result: Result<(), String> = async {
+            for (index, name) in names.iter().enumerate() {
+                let source = if index == 0 {
+                    "SYS.DUAL".into()
+                } else {
+                    qualify(&names[index - 1])
+                };
+                conn.execute(
+                    &cx,
+                    &format!("CREATE VIEW {} AS SELECT 1 N FROM {source}", qualify(name)),
+                    &[],
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                created.push(name.clone());
+            }
+            let binding = ExecGrantBinding::new("timeout-session", "timeout-lane", "fixture", 1);
+            let scoped = ScopedGrantStore::new();
+            let quarantine = SyncMutex::new(None);
+            let observer = NativeFieldObserver {
+                conn: &conn,
+                dependency_reads: AtomicUsize::new(0),
+                executions: AtomicUsize::new(0),
+            };
+            let context = FactProbeContext {
+                is_preview: true,
+                require_impact: true,
+                dependency_budget: Duration::from_millis(1),
+                current_schema: Some(&owner),
+                ..context(&cx, &observer, &binding, &scoped, &quarantine)
+            };
+            let candidate = format!("ALTER VIEW {} COMPILE", qualify(&names[0]));
+            let error = match BoundImpact::capture(
+                context,
+                &candidate,
+                "timeout-envelope",
+                &[],
+                None,
+                None,
+                None,
+            )
+            .await
+            {
+                Err(error) => error,
+                Ok(_) => return Err("over-budget DDL probe returned an approval binding".into()),
+            };
+            assert_eq!(error.error_class, ErrorClass::ImpactDecisiveUnavailable);
+            assert_eq!(error.statement_outcome, Some(StatementOutcome::NotStarted));
+            let detail = error.impact_decisive.as_ref().expect("typed field detail");
+            assert_eq!(detail.field, "dependents");
+            assert_eq!(detail.reason, "timeout");
+            assert!(observer.dependency_reads.load(Ordering::Relaxed) > 0);
+            assert_eq!(observer.executions.load(Ordering::Relaxed), 0);
+            assert!(quarantine.lock().unwrap().is_some());
+            Ok(())
+        }
+        .await;
+        // A timed-out read's wire is retired; cleanup gets its own physical
+        // connection rather than sending DDL over that uncertain session.
+        let close = conn.close(&cx).await;
+        let cleanup = RustOracleConnection::connect(&cx, options).await.unwrap();
+        for name in created.iter().rev() {
+            cleanup
+                .execute(&cx, &format!("DROP VIEW {}", qualify(name)), &[])
+                .await
+                .unwrap();
+        }
+        cleanup.close(&cx).await.unwrap();
+        close.unwrap();
+        result.unwrap();
+    });
+}
+
 fn context<'a>(
     cx: &'a Cx,
     conn: &'a dyn OracleConnection,
@@ -183,16 +397,55 @@ fn context<'a>(
         scoped_grants: grants,
         active_profile: Some("test"),
         is_preview: false,
+        dependency_budget: DEFAULT_REQUEST_TIMEOUT,
+        require_impact: false,
+        named_target: None,
     }
+}
+
+#[test]
+fn decisive_dependency_timeout_is_typed_and_does_not_mint() {
+    run_with_cx(|cx| async move {
+        let conn = FactConnection::default();
+        conn.pending_dependents.store(true, Ordering::Relaxed);
+        let identity = ExecGrantBinding::new("timeout", "lane", "subject", 1);
+        let scoped = ScopedGrantStore::new();
+        let quarantine = SyncMutex::new(None);
+        let context = FactProbeContext {
+            is_preview: true,
+            require_impact: true,
+            dependency_budget: Duration::from_millis(1),
+            ..context(&cx, &conn, &identity, &scoped, &quarantine)
+        };
+        let error = match BoundImpact::capture(
+            context,
+            "ALTER TABLE APP0.T ADD X NUMBER",
+            "timeout-envelope",
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("pending decisive field produced a binding"),
+        };
+        assert_eq!(error.error_class, ErrorClass::ImpactDecisiveUnavailable);
+        assert_eq!(error.statement_outcome, Some(StatementOutcome::NotStarted));
+        assert_eq!(error.impact_decisive.unwrap().field, "dependents");
+        assert_eq!(conn.queries.load(Ordering::Relaxed), 4);
+        assert!(quarantine.lock().unwrap().is_some());
+    });
 }
 
 #[test]
 fn token_fields_sign_decisive_digest_tamper_refused() {
     let binding = ExecGrantBinding::new("s", "l", "p", 1);
-    let material = GrantMaterial {
-        sql_digest: [6; 32],
-        decisive_digest: [7; 32],
-    };
+    let mut material =
+        GrantMaterial::new("unit signing fixture", &ImpactBindingV1::default()).unwrap();
+    material.sql_digest = [6; 32];
+    material.decisive_digest = [7; 32];
     let token = sign_execute_grant_reference(
         "grant",
         &binding,
@@ -219,26 +472,60 @@ fn token_fields_sign_decisive_digest_tamper_refused() {
             .is_none()
         );
     }
-    for changed in [
-        GrantMaterial {
-            sql_digest: [8; 32],
-            ..material.clone()
-        },
-        GrantMaterial {
-            decisive_digest: [8; 32],
-            ..material.clone()
-        },
-    ] {
+    let mut changed_sql = material.clone();
+    changed_sql.sql_digest = [8; 32];
+    let mut changed_decisive = material.clone();
+    changed_decisive.decisive_digest = [8; 32];
+    for changed in [changed_sql, changed_decisive] {
         assert_ne!(
             execute_grant_token_fields(
                 &binding,
                 Some("test"),
                 OperatingLevel::ReadWrite,
-                &material
+                &material.sql_digest,
+                &material.decisive_digest,
             ),
-            execute_grant_token_fields(&binding, Some("test"), OperatingLevel::ReadWrite, &changed),
+            execute_grant_token_fields(
+                &binding,
+                Some("test"),
+                OperatingLevel::ReadWrite,
+                &changed.sql_digest,
+                &changed.decisive_digest
+            ),
         );
     }
+}
+
+#[test]
+fn public_digest_cannot_relabel_a_different_private_fact_snapshot() {
+    let original = super::super::tests::unit_approval_binding(
+        "unit envelope",
+        ImpactGenerations {
+            profile: 1,
+            lane: 1,
+        },
+    );
+    let mut material = GrantMaterial::new("unit action", &original).unwrap();
+    let mut different = original;
+    different
+        .decisive
+        .action_fields
+        .insert(DecisiveField::MutationEffectClosure, computed([0xab; 32]));
+    material.decisive_digest = different.decisive_digest().unwrap();
+    let error = match DecisiveApproval::check(
+        &material,
+        &different,
+        &ActionKind::ExecuteDml,
+        DecisiveMatrixContext {
+            dml_rows_supported: true,
+            ..Default::default()
+        },
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("a public digest relabelled a different retained proof"),
+    };
+    assert_eq!(error.error_class, ErrorClass::RepreviewRequired);
+    assert_eq!(error.statement_outcome, Some(StatementOutcome::NotStarted));
 }
 
 #[test]
@@ -410,12 +697,18 @@ fn table_ddl_captures_dependent_facts_and_refuses_drift_without_consuming_grant(
         ));
         preview.revalidate(context).await.unwrap();
         let grants = ExecGrantStore::new();
-        let token = issue_confirmation_grant(
-            &grants,
+        let raw = grants.issue(
+            preview.material.clone(),
+            binding.clone(),
+            OperatingLevel::Ddl,
+            Duration::from_secs(60),
+        );
+        let token = sign_execute_grant_reference(
+            &raw,
             &binding,
             Some("test"),
-            &preview.material,
             OperatingLevel::Ddl,
+            &preview.material,
         );
 
         // Root identity/status/DDL time, source and edges stay unchanged.
@@ -427,18 +720,15 @@ fn table_ddl_captures_dependent_facts_and_refuses_drift_without_consuming_grant(
         let current = BoundImpact::capture(context, sql, "envelope", &[], None, None, None)
             .await
             .unwrap();
-        let consume = |material| {
-            consume_confirmation_grant(ConfirmationGrantRequest {
-                material,
-                required_level: OperatingLevel::Ddl,
-                active_profile: Some("test"),
-                grants: &grants,
-                binding: &binding,
-                confirm: Some(&token),
-                challenge_message: "preview first",
-                suggested_tool: "oracle_preview_sql",
-                next_step: "preview again",
-            })
+        let consume = |material: &GrantMaterial| {
+            let reference =
+                verify_execute_grant_reference(&token, &binding, Some("test"), OperatingLevel::Ddl)
+                    .unwrap();
+            grants
+                .consume(&reference.raw_id, material, &binding, OperatingLevel::Ddl)
+                .map_err(|error| {
+                    confirmation_grant_error(error, "oracle_preview_sql", "preview again")
+                })
         };
         assert_eq!(
             consume(&current.material).unwrap_err().error_class,
@@ -844,6 +1134,9 @@ async fn live_fixture(cx: Cx, case: u8) -> Result<(), String> {
                 scoped_grants: &scoped,
                 active_profile: Some("native-impact"),
                 is_preview: false,
+                dependency_budget: DEFAULT_REQUEST_TIMEOUT,
+                require_impact: false,
+                named_target: None,
             };
             let binds = if case != 3 {
                 Vec::new()
@@ -890,13 +1183,11 @@ async fn live_fixture(cx: Cx, case: u8) -> Result<(), String> {
                 return Err("native root facts were not computed".into());
             }
             let grants = ExecGrantStore::new();
-            let mut confirm = issue_confirmation_grant(
-                &grants,
-                &binding,
-                Some("native-impact"),
-                &preview.material,
-                level,
-            );
+            let issue = |material: &GrantMaterial| {
+                let raw = grants.issue(material.clone(), binding.clone(), level, Duration::from_secs(60));
+                sign_execute_grant_reference(&raw, &binding, Some("native-impact"), level, material)
+            };
+            let mut confirm = issue(&preview.material);
             if case == 1 {
                 sql(format!(
                     "CREATE OR REPLACE VIEW {} AS SELECT N+1 N FROM {}",
@@ -989,13 +1280,7 @@ async fn live_fixture(cx: Cx, case: u8) -> Result<(), String> {
                     preview.binding.decisive.objects = computed(objects);
                     preview.material = GrantMaterial::new(&candidate, &preview.binding)
                         .map_err(|e| e.to_string())?;
-                    confirm = issue_confirmation_grant(
-                        &grants,
-                        &binding,
-                        Some("native-impact"),
-                        &preview.material,
-                        level,
-                    );
+                    confirm = issue(&preview.material);
                     sql(format!(
                         "BEGIN EXECUTE IMMEDIATE 'CREATE OR REPLACE VIEW {} AS SELECT /* source v2 */ 1 N FROM SYS.DUAL'; END;",
                         qualify(&source_view),
@@ -1085,18 +1370,11 @@ async fn live_fixture(cx: Cx, case: u8) -> Result<(), String> {
                     return Err("native source control changed non-object decisive facts".into());
                 }
             }
-            let failure = consume_confirmation_grant(ConfirmationGrantRequest {
-                material: &current.material,
-                required_level: level,
-                active_profile: Some("native-impact"),
-                grants: &grants,
-                binding: &binding,
-                confirm: Some(&confirm),
-                challenge_message: "fixture approval required",
-                suggested_tool: "oracle_preview_sql",
-                next_step: "preview again",
-            })
-            .expect_err("native catalog drift must refuse before consuming the grant");
+            let raw = verify_execute_grant_reference(&confirm, &binding, Some("native-impact"), level)
+                .ok_or("native grant signature")?;
+            let failure = grants.consume(&raw.raw_id, &current.material, &binding, level)
+                .map_err(|error| confirmation_grant_error(error, "oracle_preview_sql", "preview again"))
+                .expect_err("native catalog drift must refuse before consuming the grant");
             if failure.error_class != ErrorClass::RepreviewRequired {
                 return Err(format!(
                     "native drift had wrong typed refusal: {:?}",
@@ -1205,34 +1483,48 @@ fn revalidate_policy_provider_changed_refused() {
 #[test]
 fn signed_impact_cannot_alias_another_store_material() {
     let binding = ExecGrantBinding::new("same-session", "same-lane", "same-subject", 1);
-    let material_a = GrantMaterial {
-        sql_digest: ActionEnvelopeV1::statement_digest("UPDATE APP.T SET N=:1"),
-        decisive_digest: [1; 32],
-    };
-    for material_b in [
-        GrantMaterial {
-            decisive_digest: [2; 32],
-            ..material_a.clone()
+    let sql = "UPDATE APP.T SET N=:1 WHERE ID=1";
+    let facts_a = super::super::tests::unit_approval_binding(
+        sql,
+        ImpactGenerations {
+            profile: 1,
+            lane: 1,
         },
-        GrantMaterial {
-            sql_digest: [3; 32],
-            ..material_a.clone()
-        },
-    ] {
+    );
+    let material_a = GrantMaterial::new(sql, &facts_a).unwrap();
+    let mut optional_drift = facts_a.clone();
+    optional_drift.decisive.db_identity = computed(oraclemcp_guard::impact_binding::DbIdentity {
+        dbid: 3,
+        con_uid: 4,
+    });
+    let different_sql = "UPDATE APP.T SET N=:2 WHERE ID=1";
+    for (facts_b, statement_b) in [(optional_drift, sql), (facts_a.clone(), different_sql)] {
+        let material_b = GrantMaterial::new(statement_b, &facts_b).unwrap();
+        let matrix = DecisiveMatrixContext {
+            dml_rows_supported: true,
+            has_ddl_event: false,
+            ..Default::default()
+        };
+        let approval_a =
+            DecisiveApproval::check(&material_a, &facts_a, &ActionKind::ExecuteDml, matrix)
+                .unwrap();
+        let approval_b =
+            DecisiveApproval::check(&material_b, &facts_b, &ActionKind::ExecuteDml, matrix)
+                .unwrap();
         let grants_a = ExecGrantStore::new();
         let grants_b = ExecGrantStore::new();
         let token_a = issue_confirmation_grant(
             &grants_a,
             &binding,
             Some("same-profile"),
-            &material_a,
+            &approval_a,
             OperatingLevel::ReadWrite,
         );
         let token_b = issue_confirmation_grant(
             &grants_b,
             &binding,
             Some("same-profile"),
-            &material_b,
+            &approval_b,
             OperatingLevel::ReadWrite,
         );
         let raw_a = verify_execute_grant_reference(
@@ -1253,9 +1545,9 @@ fn signed_impact_cannot_alias_another_store_material() {
             raw_a.raw_id, raw_b.raw_id,
             "independent stores restart their counters"
         );
-        let consume = |token, material| {
+        let consume = |token, approval: &DecisiveApproval<'_>| {
             consume_confirmation_grant(ConfirmationGrantRequest {
-                material,
+                approval,
                 required_level: OperatingLevel::ReadWrite,
                 active_profile: Some("same-profile"),
                 grants: &grants_b,
@@ -1267,10 +1559,10 @@ fn signed_impact_cannot_alias_another_store_material() {
             })
         };
         assert_eq!(
-            consume(&token_a, &material_b).unwrap_err().error_class,
+            consume(&token_a, &approval_b).unwrap_err().error_class,
             ErrorClass::RepreviewRequired
         );
-        consume(&token_b, &material_b)
+        consume(&token_b, &approval_b)
             .expect("foreign impact must not burn the legitimate store's token");
         grants_a
             .consume(

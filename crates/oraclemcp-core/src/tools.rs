@@ -8,6 +8,50 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Server-owned approval policy attached at registration, never accepted from
+/// a client or inferred from an advisory MCP annotation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApprovalAction {
+    ExecuteStatement,
+    PreviewDmlSandbox,
+    CompileObject,
+    CreateOrReplace,
+    PatchSource,
+    SetSessionLevel,
+    CustomToolCall,
+    ChangeRequestPromote,
+    GrantCreate,
+    GrantUse,
+}
+
+impl ApprovalAction {
+    /// `level` and `ttl` have already passed the served classifier/session
+    /// argument checks. They select the action; they cannot waive its fields.
+    #[must_use]
+    pub fn resolve(
+        self,
+        level: oraclemcp_guard::OperatingLevel,
+        ttl: u64,
+    ) -> oraclemcp_guard::ActionKind {
+        use oraclemcp_guard::ActionKind;
+        match self {
+            Self::ExecuteStatement if level >= oraclemcp_guard::OperatingLevel::Ddl => {
+                ActionKind::ExecuteDdlAdmin
+            }
+            Self::ExecuteStatement => ActionKind::ExecuteDml,
+            Self::PreviewDmlSandbox => ActionKind::PreviewDmlSandbox,
+            Self::CompileObject => ActionKind::CompileObject,
+            Self::CreateOrReplace => ActionKind::CreateOrReplace,
+            Self::PatchSource => ActionKind::PatchSource,
+            Self::SetSessionLevel => ActionKind::SetSessionLevel { level, ttl },
+            Self::CustomToolCall => ActionKind::CustomToolCall,
+            Self::ChangeRequestPromote => ActionKind::ChangeRequestPromote,
+            Self::GrantCreate => ActionKind::GrantCreate,
+            Self::GrantUse => ActionKind::GrantUse,
+        }
+    }
+}
+
 /// Tier of a registered tool — informs the safety / operating-level gate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -25,6 +69,9 @@ pub enum ToolTier {
 /// Stable, machine-readable descriptor for a registered tool.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolDescriptor {
+    /// Internal decisive-field policy; transports do not advertise authority.
+    #[serde(skip)]
+    pub approval_action: Option<ApprovalAction>,
     /// The tool's stable name (e.g. `oracle_query`).
     pub name: String,
     /// Human-readable title for MCP clients that render tool catalogs.
@@ -112,6 +159,7 @@ impl ToolDescriptor {
         let name = name.into();
         let title = title_from_name(&name);
         Self {
+            approval_action: None,
             name,
             title,
             tier,
@@ -122,6 +170,12 @@ impl ToolDescriptor {
             annotations: ToolAnnotations::read_only(),
             required_level: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_approval_action(mut self, action: ApprovalAction) -> Self {
+        self.approval_action = Some(action);
+        self
     }
 
     /// Attach the tool's argument JSON-Schema (advertised in `tools/list`).

@@ -462,6 +462,10 @@ impl ActiveCustomCatalog {
     fn new(generation: u64, catalog: CustomToolCatalog) -> Self {
         let mut registry = ToolRegistry::new();
         catalog.register_first_class(&mut registry);
+        for descriptor in &mut registry.tools {
+            descriptor.approval_action =
+                Some(oraclemcp_core::tools::ApprovalAction::ExecuteStatement);
+        }
         Self {
             generation,
             activation_complete: catalog.pending().is_empty(),
@@ -5154,6 +5158,8 @@ pub mod change_request {
 mod impact;
 mod impact_grants;
 use impact_grants::*;
+use oraclemcp_guard::FieldStatus;
+use oraclemcp_guard::impact_binding::{DecisiveField, DecisiveMatrixContext};
 
 mod workspace;
 use workspace::CheckpointWorkspace;
@@ -5269,19 +5275,20 @@ fn action_envelope_material(input: ActionEnvelopeInput<'_>) -> String {
     material
 }
 
-fn execute_action_kind(required_level: OperatingLevel) -> ActionKind {
-    if required_level >= OperatingLevel::Ddl {
-        ActionKind::ExecuteDdlAdmin
-    } else {
-        ActionKind::ExecuteDml
-    }
-}
-
-fn action_kind_for_tool(tool: &str, required_level: OperatingLevel) -> ActionKind {
-    match canonical_tool_name(tool) {
-        "oracle_create_or_replace" => ActionKind::CreateOrReplace,
-        _ => execute_action_kind(required_level),
-    }
+fn action_kind_for_tool(
+    tool: &str,
+    required_level: OperatingLevel,
+    ttl: u64,
+) -> Result<ActionKind, ErrorEnvelope> {
+    crate::registry::approval_action(tool)
+        .map(|action| action.resolve(required_level, ttl))
+        .ok_or_else(|| {
+            oraclemcp_guard::impact_binding::DecisiveRefusal {
+                field: DecisiveField::Envelope,
+                reason: oraclemcp_guard::impact_binding::DecisiveRefusalReason::Missing,
+            }
+            .into_envelope()
+        })
 }
 
 fn ddl_action_material(sql: &str, kind: ActionKind, timeout_seconds: Option<u64>) -> String {
@@ -6469,10 +6476,7 @@ fn session_level_grant_material(target: OperatingLevel, ttl_seconds: u64) -> Str
     let statement = format!("session-level:{}:{ttl_seconds}", target.as_str());
     ddl_action_material(
         &statement,
-        ActionKind::SetSessionLevel {
-            level: target,
-            ttl: ttl_seconds,
-        },
+        oraclemcp_core::tools::ApprovalAction::SetSessionLevel.resolve(target, ttl_seconds),
         None,
     )
 }
@@ -6752,18 +6756,41 @@ fn set_session_level(
 
     let gate = session.evaluate(Some(target));
     let grant_envelope = session_level_grant_material(target, ttl_seconds);
-    let grant_impact = local_impact(&grant_envelope, grant_ctx.generations);
+    let mut grant_impact = local_impact(&grant_envelope, grant_ctx.generations);
+    grant_impact.decisive.action_fields.insert(
+        DecisiveField::ProfileCeiling,
+        FieldStatus::Computed {
+            value: digest_json(&(session.max_level(), session.is_protected())),
+        },
+    );
+    grant_impact.decisive.action_fields.insert(
+        DecisiveField::OAuthCeiling,
+        FieldStatus::Computed {
+            value: digest_json(&session.effective_ceiling()),
+        },
+    );
     let grant_material = oraclemcp_guard::GrantMaterial::new(&grant_envelope, &grant_impact)
         .expect("current impact binding version");
-    let confirm = matches!(gate, LevelDecision::RequireStepUp { .. }).then(|| {
-        issue_confirmation_grant(
-            grant_ctx.grants,
-            grant_ctx.binding,
-            grant_ctx.active_profile,
-            &grant_material,
-            target,
-        )
-    });
+    let approval = DecisiveApproval::check(
+        &grant_material,
+        &grant_impact,
+        &action_kind_for_tool(invoked_as, target, ttl_seconds)?,
+        DecisiveMatrixContext {
+            dml_rows_supported: false,
+            has_ddl_event: false,
+            ..Default::default()
+        },
+    )?;
+    let confirm = (action == "preview" && matches!(gate, LevelDecision::RequireStepUp { .. }))
+        .then(|| {
+            issue_confirmation_grant(
+                grant_ctx.grants,
+                grant_ctx.binding,
+                grant_ctx.active_profile,
+                &approval,
+                target,
+            )
+        });
     let next_actions = match gate {
         LevelDecision::Allow => json!([
             {
@@ -6839,7 +6866,7 @@ fn set_session_level(
         LevelDecision::RequireStepUp { .. } => {
             if verification == GrantVerification::Required {
                 consume_confirmation_grant(ConfirmationGrantRequest {
-                    material: &grant_material,
+                    approval: &approval,
                     required_level: target,
                     active_profile: grant_ctx.active_profile,
                     grants: grant_ctx.grants,
@@ -7396,14 +7423,14 @@ fn resolve_scoped_grant_reference(
 }
 
 fn consume_execute_confirmation(
-    material: &oraclemcp_guard::GrantMaterial,
+    approval: &DecisiveApproval<'_>,
     required_level: OperatingLevel,
     active_profile: Option<&str>,
     grants: &ExecGrantStore,
     binding: &ExecGrantBinding,
     confirm: Option<&str>,
     non_transactional_effect: bool,
-) -> Result<String, ErrorEnvelope> {
+) -> Result<ConsumedApproval, ErrorEnvelope> {
     let (challenge_message, next_step) = if non_transactional_effect {
         (
             "the statement has a non-transactional effect that persists even when rollback is requested; execution requires the single-use grant from oracle_preview_sql",
@@ -7416,7 +7443,7 @@ fn consume_execute_confirmation(
         )
     };
     consume_confirmation_grant(ConfirmationGrantRequest {
-        material,
+        approval,
         required_level,
         active_profile,
         grants,
@@ -7718,6 +7745,8 @@ struct AuditEntryCtx<'a> {
 
 #[derive(Clone)]
 struct DbToolCtx<'a> {
+    registered_action: Option<oraclemcp_core::tools::ApprovalAction>,
+    dml_impact: Option<&'a impact::PreparedDmlImpact>,
     profile_classifier: &'a served_classifier::ProfileClassifier,
     cx: &'a Cx,
     conn: &'a dyn OracleConnection,
@@ -9390,7 +9419,7 @@ async fn preview_dml_inner(
         &base,
         &args.sql,
     )?;
-    let decision = policy.effective_decision;
+    let decision = policy.effective_decision.clone();
     if decision.danger == DangerLevel::Forbidden {
         return Err(execute_gate_error(
             &decision,
@@ -9411,18 +9440,17 @@ async fn preview_dml_inner(
             oraclemcp_guard::NotApplicableReason::LevelBelowRequired,
         ));
     }
+    let requested_sql = args.sql.clone();
     let mut args = args;
-    if let Some(sql) = policy.effective_sql {
-        args.sql = sql;
+    if let Some(sql) = policy.effective_sql.as_ref() {
+        args.sql.clone_from(sql);
     }
-    if !Box::pin(impact::sandbox_mutation_is_reversible(
-        cx,
-        conn,
-        ctx.catalog_cache,
-        &args.sql,
-        ctx.session.effective_level(),
-    ))
-    .await
+    if !ctx
+        .dml_impact
+        .and_then(|proof| proof.mutation.as_ref())
+        .is_some_and(|closure| {
+            impact::mutation_is_reversible(closure, ctx.session.effective_level())
+        })
     {
         return Ok(sandbox_not_applicable(
             &decision,
@@ -9465,7 +9493,7 @@ async fn preview_dml_inner(
         .map(json_to_bind)
         .collect::<Result<Vec<_>, _>>()?;
     let sandbox_envelope = action_envelope_material(ActionEnvelopeInput {
-        sql: &args.sql,
+        sql: &requested_sql,
         binds: &binds,
         kind: ActionKind::PreviewDmlSandbox,
         commit: args.commit,
@@ -9476,6 +9504,28 @@ async fn preview_dml_inner(
         timeout_seconds: args.timeout_seconds,
         scoped_grant: args.scoped_grant.as_deref(),
     });
+    let bound_impact = BoundImpact::capture(
+        ctx.fact_probe(),
+        &requested_sql,
+        &sandbox_envelope,
+        &binds,
+        Some(&policy),
+        args.scoped_grant.as_deref(),
+        None,
+    )
+    .await?;
+    let bound_impact = Box::pin(bound_impact.prepare_action(
+        ctx.fact_probe(),
+        &requested_sql,
+        action_kind_for_tool("oracle_preview_dml", required_level, 0)?,
+        ctx.dml_impact,
+        impact_grants::ApprovalMode {
+            commit: args.commit,
+            hold: args.hold,
+            non_transactional: false,
+        },
+    ))
+    .await?;
     let executed_sql = with_audit_marker(&args.sql, ctx.active_profile, "oracle_preview_dml");
     if proof.precheck.classify(&executed_sql) != decision {
         return Err(ErrorEnvelope::new(
@@ -9503,7 +9553,9 @@ async fn preview_dml_inner(
         auditor: ctx.audit.auditor,
         subject: ctx.audit.subject,
         db_evidence: db_evidence.as_ref(),
-        impact: None,
+        impact: Some(
+            &bound_impact.audit_binding(oraclemcp_audit::AuditRevalidationStage::BeforeExecute)?,
+        ),
     };
     // fsync-before-execute: the dry run really does run, so it is logged before
     // it can touch the database, and its rollback is logged after.
@@ -9516,6 +9568,16 @@ async fn preview_dml_inner(
         AuditOutcome::Pending,
     )?;
 
+    bound_impact
+        .before_execute(
+            &ctx,
+            audit_entry,
+            "oracle_preview_dml",
+            &executed_sql,
+            &danger_str,
+            None,
+        )
+        .await?;
     let sandbox = workspace::savepoint_statement(workspace::PREVIEW_SANDBOX);
     if let Err(error) = execute_conn(cx, conn, &sandbox, &[] as &[OracleBind]).await {
         let failure = error.clone().into_envelope();
@@ -9686,6 +9748,7 @@ async fn preview_dml_inner(
             "args": { "sql": args.sql, "witness": "SELECT … FROM <table> WHERE <the rows this DML targets>" },
         }]);
     }
+    bound_impact.attach(&mut response);
     Ok(response)
 }
 
@@ -9716,7 +9779,7 @@ async fn execute_sql(
         ctx.request_budget.clone(),
         timeout_seconds,
         completion,
-        || execute_sql_inner(ctx, audit_tool, args),
+        || Box::pin(execute_sql_inner(ctx, audit_tool, args)),
     )
     .await
 }
@@ -9962,7 +10025,16 @@ async fn execute_sql_inner(
     let action_material = proof.bind_material(action_envelope_material(ActionEnvelopeInput {
         sql: &args.sql,
         binds: &binds,
-        kind: action_kind_for_tool(audit_tool, statement_level),
+        kind: ctx
+            .registered_action
+            .ok_or_else(|| {
+                oraclemcp_guard::impact_binding::DecisiveRefusal {
+                    field: DecisiveField::Envelope,
+                    reason: oraclemcp_guard::impact_binding::DecisiveRefusalReason::Missing,
+                }
+                .into_envelope()
+            })?
+            .resolve(statement_level, 0),
         commit: args.commit,
         hold: args.hold,
         capture_dbms_output: args.capture_dbms_output,
@@ -9981,21 +10053,43 @@ async fn execute_sql_inner(
         proof.compile_parse_digest(),
     )
     .await?;
-    let action_material = bound_impact.material.clone();
+    let mut bound_impact = Box::pin(
+        bound_impact.prepare_action(
+            ctx.fact_probe(),
+            &args.sql,
+            ctx.registered_action
+                .ok_or_else(|| {
+                    oraclemcp_guard::impact_binding::DecisiveRefusal {
+                        field: DecisiveField::Envelope,
+                        reason: oraclemcp_guard::impact_binding::DecisiveRefusalReason::Missing,
+                    }
+                    .into_envelope()
+                })?
+                .resolve(statement_level, 0),
+            ctx.dml_impact,
+            impact_grants::ApprovalMode {
+                commit: args.commit,
+                hold: args.hold,
+                non_transactional: decision.non_transactional_effect,
+            },
+        ),
+    )
+    .await?;
+    let approval = bound_impact.approval()?;
     let confirmation_required = args.commit || args.hold || decision.non_transactional_effect;
     let confirmation_idempotency_key = if confirmation_required {
-        Some(
-            consume_execute_confirmation(
-                &action_material,
-                required_level,
-                active_profile,
-                ctx.execute_grants,
-                ctx.grant_binding,
-                args.confirm.as_deref(),
-                decision.non_transactional_effect && !args.commit,
-            )
-            .map_err(write_not_started)?,
+        let consumed = consume_execute_confirmation(
+            &approval,
+            required_level,
+            active_profile,
+            ctx.execute_grants,
+            ctx.grant_binding,
+            args.confirm.as_deref(),
+            decision.non_transactional_effect && !args.commit,
         )
+        .map_err(write_not_started)?;
+        bound_impact.material = consumed.material;
+        Some(consumed.confirmation)
     } else {
         None
     };
@@ -10658,7 +10752,7 @@ async fn compile_object(
         ctx.request_budget.clone(),
         timeout_seconds,
         completion,
-        || compile_object_inner(ctx, tool_name, args),
+        || Box::pin(compile_object_inner(ctx, tool_name, args)),
     )
     .await
 }
@@ -10711,13 +10805,19 @@ async fn compile_object_inner(
         })?;
     let action_material = proof.bind_material(ddl_action_material(
         &audited_sql,
-        ActionKind::CompileObject,
+        action_kind_for_tool(tool_name, OperatingLevel::Ddl, 0)?,
         args.timeout_seconds,
     ));
+    let compile_target = oraclemcp_db::DependentObject {
+        owner: owner.clone(),
+        name: object_name.clone(),
+        object_type: object_type.clone(),
+    };
     let bound_impact = if matches!(gate, LevelDecision::Allow) {
         BoundImpact::capture(
             FactProbeContext {
                 is_preview: !args.execute,
+                named_target: Some(&compile_target),
                 ..ctx.fact_probe()
             },
             &audited_sql,
@@ -10731,14 +10831,36 @@ async fn compile_object_inner(
     } else {
         BoundImpact::unobserved(&audited_sql, &action_material, ctx.impact_generations)
     };
-    let action_material = bound_impact.material.clone();
+    let mut bound_impact = if matches!(gate, LevelDecision::Allow) {
+        Box::pin(bound_impact.prepare_action(
+            ctx.fact_probe(),
+            &audited_sql,
+            action_kind_for_tool(tool_name, OperatingLevel::Ddl, 0)?,
+            None,
+            impact_grants::ApprovalMode {
+                commit: true,
+                hold: false,
+                non_transactional: false,
+            },
+        ))
+        .await?
+    } else {
+        bound_impact
+    };
+    let approval = if matches!(gate, LevelDecision::Allow) {
+        Some(bound_impact.approval()?)
+    } else {
+        None
+    };
 
     let confirm = matches!(gate, LevelDecision::Allow).then(|| {
         issue_confirmation_grant(
             ctx.execute_grants,
             ctx.grant_binding,
             active_profile,
-            &action_material,
+            approval
+                .as_ref()
+                .expect("allowed action checked its decisive facts"),
             OperatingLevel::Ddl,
         )
     });
@@ -10778,16 +10900,19 @@ async fn compile_object_inner(
         let mut preview = preview();
         // A recompile changes no source: effects describe the stored unit and
         // there is no changed source for SAST.
-        let stored =
-            impact::read_stored_unit(cx, conn, &owner, &object_name, &object_type, tool_name).await;
-        impact::attach_source_impact(
-            &mut preview,
-            &object_type,
-            &impact::SourceChange {
-                before: stored.source(),
-                after: None,
-            },
-        );
+        if !matches!(gate, LevelDecision::Allow) {
+            let stored =
+                impact::read_stored_unit(cx, conn, &owner, &object_name, &object_type, tool_name)
+                    .await;
+            impact::attach_source_impact(
+                &mut preview,
+                &object_type,
+                &impact::SourceChange {
+                    before: stored.source(),
+                    after: None,
+                },
+            );
+        }
         proof.attach_compile_parse_binding(&mut preview);
         return Ok(preview);
     }
@@ -10801,8 +10926,10 @@ async fn compile_object_inner(
         ctx.checkpoints,
         "this compile (Oracle commits DDL implicitly)",
     )?;
-    let confirmation_key = consume_confirmation_grant(ConfirmationGrantRequest {
-        material: &action_material,
+    let consumed = consume_confirmation_grant(ConfirmationGrantRequest {
+        approval: approval
+            .as_ref()
+            .expect("allowed action checked its decisive facts"),
         required_level: OperatingLevel::Ddl,
         active_profile,
         grants: ctx.execute_grants,
@@ -10812,6 +10939,9 @@ async fn compile_object_inner(
         suggested_tool: "oracle_compile_object",
         next_step: "call oracle_compile_object without execute=true, then pass confirmation.confirm with execute=true",
     })?;
+
+    bound_impact.material = consumed.material;
+    let confirmation_key = consumed.confirmation;
 
     clear_read_only_transaction_before_write(&ctx).await?;
 
@@ -11737,7 +11867,7 @@ async fn patch_source(
         ctx.request_budget.clone(),
         timeout_seconds,
         completion,
-        || patch_source_inner(ctx, tool_name, args),
+        || Box::pin(patch_source_inner(ctx, tool_name, args)),
     )
     .await
 }
@@ -11796,7 +11926,7 @@ async fn patch_source_inner(
         })?;
     let action_material = proof.bind_material(ddl_action_material(
         &patched_ddl,
-        ActionKind::PatchSource,
+        action_kind_for_tool(tool_name, OperatingLevel::Ddl, 0)?,
         args.timeout_seconds,
     ));
 
@@ -11826,13 +11956,35 @@ async fn patch_source_inner(
     } else {
         BoundImpact::unobserved(&patched_ddl, &action_material, ctx.impact_generations)
     };
-    let action_material = bound_impact.material.clone();
+    let mut bound_impact = if matches!(gate, LevelDecision::Allow) {
+        Box::pin(bound_impact.prepare_action(
+            ctx.fact_probe(),
+            &patched_ddl,
+            action_kind_for_tool(tool_name, OperatingLevel::Ddl, 0)?,
+            None,
+            impact_grants::ApprovalMode {
+                commit: true,
+                hold: false,
+                non_transactional: false,
+            },
+        ))
+        .await?
+    } else {
+        bound_impact
+    };
+    let approval = if matches!(gate, LevelDecision::Allow) {
+        Some(bound_impact.approval()?)
+    } else {
+        None
+    };
     let confirm = match (patch_required_level, &gate) {
         (Some(level), LevelDecision::Allow) => Some(issue_confirmation_grant(
             ctx.execute_grants,
             ctx.grant_binding,
             active_profile,
-            &action_material,
+            approval
+                .as_ref()
+                .expect("allowed action checked its decisive facts"),
             level,
         )),
         _ => None,
@@ -11887,25 +12039,27 @@ async fn patch_source_inner(
         bound_impact.attach(&mut preview);
         // The stored side goes through the same header normalization as the
         // candidate, so the engine compares like with like.
-        let stored_ddl = owner_qualified_patch_ddl(
-            &document.text,
-            &owner,
-            &object_name,
-            &object_type,
-            tool_name,
-        )
-        .ok();
-        impact::attach_source_impact(
-            &mut preview,
-            &object_type,
-            &impact::SourceChange {
-                before: stored_ddl.as_deref().map_or(
-                    impact::StoredSource::Unavailable,
-                    impact::StoredSource::Text,
-                ),
-                after: Some(&patched_ddl),
-            },
-        );
+        if !matches!(gate, LevelDecision::Allow) {
+            let stored_ddl = owner_qualified_patch_ddl(
+                &document.text,
+                &owner,
+                &object_name,
+                &object_type,
+                tool_name,
+            )
+            .ok();
+            impact::attach_source_impact(
+                &mut preview,
+                &object_type,
+                &impact::SourceChange {
+                    before: stored_ddl.as_deref().map_or(
+                        impact::StoredSource::Unavailable,
+                        impact::StoredSource::Text,
+                    ),
+                    after: Some(&patched_ddl),
+                },
+            );
+        }
         proof.attach_compile_parse_binding(&mut preview);
         return Ok((preview, preview_entry));
     }
@@ -11925,8 +12079,10 @@ async fn patch_source_inner(
         ctx.checkpoints,
         "this source patch (Oracle commits DDL implicitly)",
     )?;
-    let confirmation_key = consume_confirmation_grant(ConfirmationGrantRequest {
-        material: &action_material,
+    let consumed = consume_confirmation_grant(ConfirmationGrantRequest {
+        approval: approval
+            .as_ref()
+            .expect("allowed action checked its decisive facts"),
         required_level,
         active_profile,
         grants: ctx.execute_grants,
@@ -11936,6 +12092,9 @@ async fn patch_source_inner(
         suggested_tool: tool_name,
         next_step: "call the patch tool without execute=true, then pass confirmation.confirm with execute=true",
     })?;
+
+    bound_impact.material = consumed.material;
+    let confirmation_key = consumed.confirmation;
 
     clear_read_only_transaction_before_write(&ctx).await?;
 
@@ -12216,7 +12375,7 @@ async fn create_or_replace(
         ctx.request_budget.clone(),
         timeout_seconds,
         completion,
-        || create_or_replace_inner(ctx, tool_name, args),
+        || Box::pin(create_or_replace_inner(ctx, tool_name, args)),
     )
     .await
 }
@@ -12226,6 +12385,10 @@ async fn create_or_replace_inner(
     tool_name: &str,
     args: CreateOrReplaceArgs,
 ) -> Result<Value, ErrorEnvelope> {
+    let ctx = DbToolCtx {
+        registered_action: crate::registry::approval_action("oracle_create_or_replace"),
+        ..ctx
+    };
     let cx = ctx.cx;
     let conn = ctx.conn;
     let active_profile = ctx.active_profile;
@@ -12266,7 +12429,7 @@ async fn create_or_replace_inner(
         })?;
     let action_material = proof.bind_material(ddl_action_material(
         &source,
-        ActionKind::CreateOrReplace,
+        action_kind_for_tool("oracle_create_or_replace", OperatingLevel::Ddl, 0)?,
         args.timeout_seconds,
     ));
     // Apply delegates to execute_sql, which performs both fresh fact checks.
@@ -12288,7 +12451,27 @@ async fn create_or_replace_inner(
     } else {
         BoundImpact::unobserved(&source, &action_material, ctx.impact_generations)
     };
-    let action_material = bound_impact.material.clone();
+    let bound_impact = if !args.execute && matches!(gate, LevelDecision::Allow) {
+        Box::pin(bound_impact.prepare_action(
+            ctx.fact_probe(),
+            &source,
+            action_kind_for_tool("oracle_create_or_replace", OperatingLevel::Ddl, 0)?,
+            None,
+            impact_grants::ApprovalMode {
+                commit: true,
+                hold: false,
+                non_transactional: false,
+            },
+        ))
+        .await?
+    } else {
+        bound_impact
+    };
+    let approval = if !args.execute && matches!(gate, LevelDecision::Allow) {
+        Some(bound_impact.approval()?)
+    } else {
+        None
+    };
 
     let confirm = match (args.execute, decision.required_level, &gate) {
         (false, Some(level), LevelDecision::Allow) if level >= OperatingLevel::Ddl => {
@@ -12296,7 +12479,9 @@ async fn create_or_replace_inner(
                 ctx.execute_grants,
                 ctx.grant_binding,
                 active_profile,
-                &action_material,
+                approval
+                    .as_ref()
+                    .expect("allowed action checked its decisive facts"),
                 level,
             ))
         }
@@ -12331,7 +12516,9 @@ async fn create_or_replace_inner(
         });
         let mut preview = preview;
         bound_impact.attach(&mut preview);
-        if let Some(object) = detected.as_ref() {
+        if !matches!(gate, LevelDecision::Allow)
+            && let Some(object) = detected.as_ref()
+        {
             let stored = impact::read_stored_unit(
                 cx,
                 conn,
@@ -12464,7 +12651,7 @@ async fn deploy_ddl(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Value, Er
         ctx.request_budget.clone(),
         timeout_seconds,
         completion,
-        || deploy_ddl_inner(ctx, args),
+        || Box::pin(deploy_ddl_inner(ctx, args)),
     )
     .await
 }
@@ -12542,6 +12729,7 @@ async fn deploy_ddl_inner(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Val
             ctx.execute_grants,
             ctx.fact_probe(),
             &proof,
+            None,
         )
         .await?;
         if let Value::Object(map) = &mut preview {
@@ -12605,6 +12793,7 @@ async fn preview_sql(
     grants: &ExecGrantStore,
     fact_context: FactProbeContext<'_>,
     proof: &compile_parse_closure::PreparedSqlProof,
+    dml_impact: Option<&impact::PreparedDmlImpact>,
 ) -> Result<Value, ErrorEnvelope> {
     let fact_context = FactProbeContext {
         is_preview: true,
@@ -12713,7 +12902,11 @@ async fn preview_sql(
                 let material = proof.bind_material(action_envelope_material(ActionEnvelopeInput {
                     sql,
                     binds: &typed_binds,
-                    kind: execute_action_kind(decision.required_level.unwrap_or(level)),
+                    kind: action_kind_for_tool(
+                        "oracle_preview_sql",
+                        decision.required_level.unwrap_or(level),
+                        0,
+                    )?,
                     commit: args.commit,
                     hold: args.hold,
                     capture_dbms_output: args.capture_dbms_output,
@@ -12732,13 +12925,25 @@ async fn preview_sql(
                     proof.compile_parse_digest(),
                 )
                 .await?;
-                let confirm = issue_confirmation_grant(
-                    grants,
-                    binding,
-                    active_profile,
-                    &captured.material,
-                    level,
-                );
+                let captured = Box::pin(captured.prepare_action(
+                    fact_context,
+                    sql,
+                    action_kind_for_tool(
+                        "oracle_preview_sql",
+                        decision.required_level.unwrap_or(level),
+                        0,
+                    )?,
+                    dml_impact,
+                    impact_grants::ApprovalMode {
+                        commit: args.commit,
+                        hold: args.hold,
+                        non_transactional: decision.non_transactional_effect,
+                    },
+                ))
+                .await?;
+                let approval = captured.approval()?;
+                let confirm =
+                    issue_confirmation_grant(grants, binding, active_profile, &approval, level);
                 bound_impact = Some(captured);
                 Some(confirm)
             }
@@ -14235,6 +14440,23 @@ impl OracleDispatcher {
                 &a.sql,
             )
             .await;
+            let dml_impact = Box::pin(impact::compute_dml_approval_facts(
+                cx,
+                impact::RowsImpactContext {
+                    dispatcher: self,
+                    state: &mut state,
+                    context,
+                    request_budget: request_budget.clone(),
+                    subject: &request_subject,
+                    level: &scoped_level,
+                    sql_policy: sql_policy.as_ref(),
+                    current_schema: current_schema.as_deref(),
+                },
+                &a,
+                &proof,
+                &binding,
+            ))
+            .await;
             let mut preview = preview_sql(
                 &a,
                 &scoped_level,
@@ -14251,36 +14473,34 @@ impl OracleDispatcher {
                     scoped_grants: &state.scoped_grants,
                     active_profile: state.active_profile.as_deref(),
                     is_preview: true,
+                    require_impact: false,
+                    named_target: None,
+                    dependency_budget: request_budget.deadline().map_or(
+                        DEFAULT_REQUEST_TIMEOUT,
+                        |deadline| {
+                            Duration::from_nanos(deadline.duration_since(cx.now()))
+                                .min(DEFAULT_REQUEST_TIMEOUT)
+                        },
+                    ),
                 },
                 &proof,
+                Some(&dml_impact),
             )
             .await?;
-            impact::attach_ddl_source_impact(
-                &mut preview,
-                cx,
-                state.conn.as_ref(),
-                &a.sql,
-                "oracle_preview_sql",
-            )
-            .await;
-            let rows = Box::pin(impact::compute_rows_impact(
-                cx,
-                impact::RowsImpactContext {
-                    dispatcher: self,
-                    state: &mut state,
-                    context,
-                    request_budget,
-                    subject: &request_subject,
-                    level: &scoped_level,
-                    sql_policy: sql_policy.as_ref(),
-                    current_schema: current_schema.as_deref(),
-                },
-                &a,
-                &proof,
-                &binding,
-            ))
-            .await;
-            impact::attach_rows_impact(&mut preview, rows);
+            if preview
+                .pointer("/impact/binding/decisive/action_fields/source_effects")
+                .is_none()
+            {
+                impact::attach_ddl_source_impact(
+                    &mut preview,
+                    cx,
+                    state.conn.as_ref(),
+                    &a.sql,
+                    "oracle_preview_sql",
+                )
+                .await;
+            }
+            impact::attach_rows_impact(&mut preview, dml_impact.rows);
             remember_execute_approved_token(&mut state, &a.sql, &preview);
             return Ok(preview);
         }
@@ -14315,6 +14535,47 @@ impl OracleDispatcher {
                     }
                     write_not_started(error)
                 })?;
+            let count_args = PreviewSqlArgs::from(&execute_args);
+            let binding = grant_binding_for_context(&state, context);
+            let dml_impact = if count_args.scoped_grant.is_none()
+                && impact::is_dml_statement(&count_args.sql)
+                && matches!(
+                    READ_PRECHECK_CLASSIFIER
+                        .classify(&count_args.sql)
+                        .gate(&scoped_level),
+                    LevelDecision::Allow
+                ) {
+                let proof = state
+                    .profile_classifier
+                    .prepare(
+                        cx,
+                        state.conn.as_ref(),
+                        &state.catalog_cache,
+                        &count_args.sql,
+                    )
+                    .await;
+                Some(
+                    Box::pin(impact::compute_dml_approval_facts(
+                        cx,
+                        impact::RowsImpactContext {
+                            dispatcher: self,
+                            state: &mut state,
+                            context,
+                            request_budget: request_budget.clone(),
+                            subject: &request_subject,
+                            level: &scoped_level,
+                            sql_policy: sql_policy.as_ref(),
+                            current_schema: current_schema.as_deref(),
+                        },
+                        &count_args,
+                        &proof,
+                        &binding,
+                    ))
+                    .await,
+                )
+            } else {
+                None
+            };
             let changes_session_context = is_allowed_alter_session(&execute_args.sql);
             let active_profile = state.active_profile.clone();
             let subject = request_subject.clone();
@@ -14325,6 +14586,8 @@ impl OracleDispatcher {
                 subject: &subject,
             };
             let tool_ctx = DbToolCtx {
+                registered_action: crate::registry::approval_action(tool),
+                dml_impact: dml_impact.as_ref(),
                 profile_classifier: &state.profile_classifier,
                 cx,
                 conn,
@@ -14368,6 +14631,8 @@ impl OracleDispatcher {
                 subject: &subject,
             };
             let tool_ctx = DbToolCtx {
+                registered_action: crate::registry::approval_action(tool),
+                dml_impact: None,
                 profile_classifier: &state.profile_classifier,
                 cx,
                 conn,
@@ -14635,6 +14900,70 @@ impl OracleDispatcher {
             )
             .await?;
         }
+        let mut pending_execute_args = if tool == "oracle_execute" {
+            Some(parse_args::<ExecuteArgs>(name, args.clone()).map_err(write_not_started)?)
+        } else if let Some(loaded) = state.custom_catalog.catalog.get(tool)
+            && loaded.required_level > OperatingLevel::ReadOnly
+            && loaded.def.routine.is_none()
+        {
+            Some(custom_tool_execute_args(tool, loaded, &args)?)
+        } else {
+            None
+        };
+        let mut pending_sandbox_args = if tool == "oracle_preview_dml" {
+            Some(parse_args::<PreviewDmlArgs>(name, args.clone())?)
+        } else {
+            None
+        };
+        let count_args = pending_execute_args
+            .as_ref()
+            .map(PreviewSqlArgs::from)
+            .or_else(|| pending_sandbox_args.as_ref().map(PreviewSqlArgs::from));
+        let request_dml_impact = if let Some(count_args) = count_args.as_ref()
+            && count_args.scoped_grant.is_none()
+            && !pending_execute_args
+                .as_ref()
+                .and_then(|args| args.confirm.as_deref())
+                .is_some_and(|confirm| confirm.starts_with("sgr1."))
+            && impact::is_dml_statement(&count_args.sql)
+            && matches!(
+                READ_PRECHECK_CLASSIFIER
+                    .classify(&count_args.sql)
+                    .gate(&scoped_level),
+                LevelDecision::Allow
+            ) {
+            let binding = grant_binding_for_context(&state, context);
+            let proof = state
+                .profile_classifier
+                .prepare(
+                    cx,
+                    state.conn.as_ref(),
+                    &state.catalog_cache,
+                    &count_args.sql,
+                )
+                .await;
+            Some(
+                Box::pin(impact::compute_dml_approval_facts(
+                    cx,
+                    impact::RowsImpactContext {
+                        dispatcher: self,
+                        state: &mut state,
+                        context,
+                        request_budget: request_budget.clone(),
+                        subject: &request_subject,
+                        level: &scoped_level,
+                        sql_policy: sql_policy.as_ref(),
+                        current_schema: current_schema.as_deref(),
+                    },
+                    count_args,
+                    &proof,
+                    &binding,
+                ))
+                .await,
+            )
+        } else {
+            None
+        };
         let generated_read = generated_read_tool(tool);
         if generated_read
             && (generated_read_uses_primary_session(tool) || state.stateless_conn.is_none())
@@ -14769,6 +15098,18 @@ impl OracleDispatcher {
                     return Err(ErrorEnvelope::new(ErrorClass::RuntimeStateRequired,
                         "operator edition proposal profile no longer matches the active lane"));
                 }
+                // This dedicated operator route consumes the same matrix as
+                // other approvals. The W12 producer must supply its complete
+                // manifest/CAS proof before it can authorize the default flip.
+                let envelope = ddl_action_material(&sql, ActionKind::ChangeRequestPromote, None);
+                let operator_binding = local_impact(&envelope, impact_generations(&state, context));
+                oraclemcp_guard::impact_binding::check_decisive(
+                    &operator_binding,
+                    oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1::required(
+                        &ActionKind::ChangeRequestPromote,
+                        DecisiveMatrixContext { dml_rows_supported: false, has_ddl_event: false, ..Default::default() },
+                    ),
+                ).map_err(oraclemcp_guard::impact_binding::DecisiveRefusal::into_envelope)?;
                 let db_evidence = collect_effect_audit_db_evidence_bounded(
                     cx, self.auditor.as_deref(), conn, &request_budget, &self.quarantine,
                 ).await?;
@@ -14837,7 +15178,7 @@ impl OracleDispatcher {
                     .await;
             }
             "oracle_execute" => {
-                let a: ExecuteArgs = parse_args(name, args).map_err(write_not_started)?;
+                let a = pending_execute_args.take().expect("execute arguments were validated before fact reads");
                 let changes_session_context = is_allowed_alter_session(&a.sql);
                 let subject = request_subject.clone();
                 let grant_binding = grant_binding_for_context(&state, context);
@@ -14846,6 +15187,8 @@ impl OracleDispatcher {
                     subject: &subject,
                 };
                 let tool_ctx = DbToolCtx {
+                registered_action: crate::registry::approval_action(tool),
+                dml_impact: request_dml_impact.as_ref(),
                 profile_classifier: &state.profile_classifier,
                     cx,
                     conn,
@@ -14882,6 +15225,8 @@ impl OracleDispatcher {
                     subject: &subject,
                 };
                 let tool_ctx = DbToolCtx {
+                registered_action: crate::registry::approval_action(tool),
+                dml_impact: request_dml_impact.as_ref(),
                 profile_classifier: &state.profile_classifier,
                     cx,
                     conn,
@@ -14906,7 +15251,7 @@ impl OracleDispatcher {
                 return open_checkpoint(tool_ctx, a).await;
             }
             "oracle_preview_dml" => {
-                let a: PreviewDmlArgs = parse_args(name, args)?;
+                let a = pending_sandbox_args.take().expect("sandbox arguments were validated before fact reads");
                 let subject = request_subject.clone();
                 let grant_binding = grant_binding_for_context(&state, context);
                 let audit = AuditCtx {
@@ -14914,6 +15259,8 @@ impl OracleDispatcher {
                     subject: &subject,
                 };
                 let tool_ctx = DbToolCtx {
+                registered_action: crate::registry::approval_action(tool),
+                dml_impact: request_dml_impact.as_ref(),
                 profile_classifier: &state.profile_classifier,
                     cx,
                     conn,
@@ -14956,6 +15303,8 @@ impl OracleDispatcher {
                     subject: &subject,
                 };
                 let tool_ctx = DbToolCtx {
+                registered_action: crate::registry::approval_action(tool),
+                dml_impact: request_dml_impact.as_ref(),
                 profile_classifier: &state.profile_classifier,
                     cx,
                     conn,
@@ -14988,6 +15337,8 @@ impl OracleDispatcher {
                     subject: &subject,
                 };
                 let tool_ctx = DbToolCtx {
+                registered_action: crate::registry::approval_action(tool),
+                dml_impact: request_dml_impact.as_ref(),
                 profile_classifier: &state.profile_classifier,
                     cx,
                     conn,
@@ -15020,6 +15371,8 @@ impl OracleDispatcher {
                     subject: &subject,
                 };
                 let tool_ctx = DbToolCtx {
+                registered_action: crate::registry::approval_action(tool),
+                dml_impact: request_dml_impact.as_ref(),
                 profile_classifier: &state.profile_classifier,
                     cx,
                     conn,
@@ -15052,6 +15405,8 @@ impl OracleDispatcher {
                     subject: &subject,
                 };
                 let tool_ctx = DbToolCtx {
+                registered_action: crate::registry::approval_action(tool),
+                dml_impact: request_dml_impact.as_ref(),
                 profile_classifier: &state.profile_classifier,
                     cx,
                     conn,
@@ -16560,6 +16915,8 @@ impl OracleDispatcher {
                             subject: &request_subject,
                         };
                         let tool_ctx = DbToolCtx {
+                registered_action: state.custom_catalog.descriptors.iter().find(|descriptor| descriptor.name == other).and_then(|descriptor| descriptor.approval_action),
+                dml_impact: request_dml_impact.as_ref(),
                             profile_classifier: &state.profile_classifier,
                             cx,
                             conn,
@@ -16587,7 +16944,7 @@ impl OracleDispatcher {
                                 .as_ref().map_err(Clone::clone)?;
                             Box::pin(self.execute_package_call(tool_ctx, plan, &args, state.profile_generation.as_ref())).await
                         } else {
-                            let execute_args = custom_tool_execute_args(other, loaded, &args)?;
+                            let execute_args = pending_execute_args.take().expect("registered SQL arguments were prepared before count");
                             execute_sql(tool_ctx, other, execute_args).await
                         }
                     }

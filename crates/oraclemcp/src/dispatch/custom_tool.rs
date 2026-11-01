@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug)]
 pub(super) struct PackageCallPlan {
+    pub(super) approval_action: oraclemcp_core::tools::ApprovalAction,
     pub(super) signed: SignedPackageDefinition,
     pub(super) wrapper: PackageCallWrapper,
     pub(super) required_level: OperatingLevel,
@@ -137,6 +138,17 @@ impl OracleDispatcher {
         let mut registry = ToolRegistry::new();
         catalog.register_first_class(&mut registry);
         state.custom_catalog.catalog = Arc::new(catalog);
+        for descriptor in &mut registry.tools {
+            descriptor.approval_action = Some(
+                plans
+                    .get(&descriptor.name)
+                    .and_then(|plan| plan.as_ref().ok())
+                    .map_or(
+                        oraclemcp_core::tools::ApprovalAction::ExecuteStatement,
+                        |plan| plan.approval_action,
+                    ),
+            );
+        }
         state.custom_catalog.descriptors = registry.tools.into();
         state.custom_catalog.package_plans = plans;
         state.custom_catalog.activation_complete = true;
@@ -460,6 +472,10 @@ async fn collect_package_plan(
             oraclemcp_guard::admit(&effects, oraclemcp_guard::AdmissionContext::CustomToolCall)
                 .map_err(package_unknown)?,
         );
+        // Source Admin effects refuse; DML callbacks at DDL or above refuse;
+        // DDL triggers admit only ReadDb/SessionState. Implicit additions cannot
+        // currently exceed a passing source's ceiling. Retain this final check
+        // for future effect-port expansion.
         if required_level > max_level {
             return Err(package_unknown(
                 "implicit effects exceed the profile ceiling",
@@ -476,6 +492,7 @@ async fn collect_package_plan(
             &callback_digests,
         ));
         Ok(PackageCallPlan {
+            approval_action: oraclemcp_core::tools::ApprovalAction::CustomToolCall,
             signed: signed.clone(),
             wrapper,
             required_level,
@@ -678,7 +695,7 @@ fn package_approval(
     let envelope = action_envelope_material(ActionEnvelopeInput {
         sql: &plan.wrapper.sql,
         binds: &args.inputs,
-        kind: ActionKind::CustomToolCall,
+        kind: plan.approval_action.resolve(plan.required_level, 0),
         commit: args.commit,
         hold: false,
         capture_dbms_output: false,
@@ -849,14 +866,24 @@ impl OracleDispatcher {
         if fresh.facts_digest != plan.facts_digest {
             return Err(repreview_required());
         }
-        let (binding, material) =
+        let (binding, mut material) =
             package_approval(&fresh, &parsed, ctx.impact_generations, masked)?;
+        let approval = DecisiveApproval::check(
+            &material,
+            &binding,
+            &fresh.approval_action.resolve(fresh.required_level, 0),
+            DecisiveMatrixContext {
+                dml_rows_supported: false,
+                has_ddl_event: ddl,
+                ..Default::default()
+            },
+        )?;
         if write && parsed.confirm.is_none() {
             let token = issue_confirmation_grant(
                 ctx.execute_grants,
                 ctx.grant_binding,
                 ctx.active_profile,
-                &material,
+                &approval,
                 fresh.required_level,
             );
             let mut preview = json!({"status":"confirmation_required", "tool":plan.signed.definition().name,
@@ -866,12 +893,14 @@ impl OracleDispatcher {
             return Ok(preview);
         }
         let confirmation = if write {
-            Some(consume_confirmation_grant(ConfirmationGrantRequest {
-                material:&material, required_level:fresh.required_level, active_profile:ctx.active_profile,
+            let consumed=consume_confirmation_grant(ConfirmationGrantRequest {
+                approval:&approval, required_level:fresh.required_level, active_profile:ctx.active_profile,
                 grants:ctx.execute_grants, binding:ctx.grant_binding, confirm:parsed.confirm.as_deref(),
                 challenge_message:"package call needs the exact preview confirmation", suggested_tool:&plan.signed.definition().name,
                 next_step:"preview this package call again, then submit its single-use confirmation token",
-            }).map_err(write_not_started)?)
+            }).map_err(write_not_started)?;
+            material = consumed.material;
+            Some(consumed.confirmation)
         } else {
             None
         };

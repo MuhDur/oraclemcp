@@ -5,12 +5,15 @@
 
 use std::{collections::BTreeMap, future::Future, time::Instant};
 
-use oraclemcp_error::ErrorClass;
+use oraclemcp_error::{ErrorClass, ErrorEnvelope, StatementOutcome};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::effective_dml_plan::{DML_REWRITE_ALGORITHM_VERSION, EffectiveDmlPlanV1};
+use crate::{
+    action_envelope::ActionKind,
+    effective_dml_plan::{DML_REWRITE_ALGORITHM_VERSION, EffectiveDmlPlanV1},
+};
 
 const IMPACT_DOMAIN: &[u8] = b"omcp/impact-binding/decisive/v1";
 pub const IMPACT_BINDING_VERSION: u8 = 1;
@@ -54,6 +57,10 @@ pub enum UnavailableReason {
     FlashbackCapabilityUnavailable,
     SnapshotTooOld,
     Internal,
+    ImpactDecisiveUnavailable,
+    ImpactDecisiveTruncated,
+    /// This optional observation was not collected for the current action.
+    NotCollected,
 }
 
 impl UnavailableReason {
@@ -71,6 +78,8 @@ impl UnavailableReason {
             ErrorClass::RuntimeStateRequired => Self::RuntimeStateRequired,
             ErrorClass::ChallengeRequired => Self::ChallengeRequired,
             ErrorClass::RepreviewRequired => Self::RepreviewRequired,
+            ErrorClass::ImpactDecisiveUnavailable => Self::ImpactDecisiveUnavailable,
+            ErrorClass::ImpactDecisiveTruncated => Self::ImpactDecisiveTruncated,
             ErrorClass::LeaseRequired => Self::LeaseRequired,
             ErrorClass::ForbiddenStatement => Self::ForbiddenStatement,
             ErrorClass::Busy => Self::Busy,
@@ -128,6 +137,9 @@ impl UnavailableReason {
             Self::FlashbackCapabilityUnavailable => 34,
             Self::SnapshotTooOld => 35,
             Self::Internal => 36,
+            Self::ImpactDecisiveUnavailable => 37,
+            Self::ImpactDecisiveTruncated => 38,
+            Self::NotCollected => 39,
         }
     }
 }
@@ -168,6 +180,13 @@ pub enum FieldStatus<T> {
 }
 
 impl<T> FieldStatus<T> {
+    #[must_use]
+    pub const fn not_collected() -> Self {
+        Self::Unavailable {
+            reason: UnavailableReason::NotCollected,
+        }
+    }
+
     #[must_use]
     pub const fn not_wired() -> Self {
         Self::Unavailable {
@@ -227,6 +246,523 @@ pub enum DecisiveField {
     PolicyFloor,
 }
 
+/// Shape and scope come from server classification. Strict dependency impact
+/// is server policy; none of these flags is client authority.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DecisiveMatrixContext {
+    pub dml_rows_supported: bool,
+    pub has_ddl_event: bool,
+    pub statement_scoped: bool,
+    pub require_impact: bool,
+}
+
+pub struct DecisiveFieldMatrixV1;
+
+impl DecisiveFieldMatrixV1 {
+    #[must_use]
+    pub fn required(
+        action: &ActionKind,
+        context: DecisiveMatrixContext,
+    ) -> &'static [DecisiveField] {
+        use DecisiveField::*;
+        const DML: &[DecisiveField] = &[
+            Envelope,
+            ObjectIdentities,
+            ObjectStatus,
+            MutationEffectClosure,
+            Edition,
+            CurrentSchema,
+            ProfileGeneration,
+            LaneGeneration,
+        ];
+        const DML_WITH_ROWS: &[DecisiveField] = &[
+            Envelope,
+            ObjectIdentities,
+            ObjectStatus,
+            MutationEffectClosure,
+            Edition,
+            CurrentSchema,
+            ProfileGeneration,
+            LaneGeneration,
+            Rows,
+        ];
+        const DDL: &[DecisiveField] = &[
+            Envelope,
+            ObjectIdentities,
+            ObjectStatus,
+            Dependents,
+            PredictedInvalidSet,
+            DdlEffectClosure,
+            SourceEffects,
+            Reversibility,
+            Edition,
+            CurrentSchema,
+            ProfileGeneration,
+            LaneGeneration,
+        ];
+        const DDL_OBSERVATIONAL: &[DecisiveField] = &[
+            Envelope,
+            ObjectIdentities,
+            ObjectStatus,
+            DdlEffectClosure,
+            SourceEffects,
+            Reversibility,
+            Edition,
+            CurrentSchema,
+            ProfileGeneration,
+            LaneGeneration,
+        ];
+        const STATEMENT: &[DecisiveField] = &[Envelope, ProfileGeneration, LaneGeneration];
+        const ELEVATION: &[DecisiveField] = &[
+            Envelope,
+            ProfileCeiling,
+            OAuthCeiling,
+            ProfileGeneration,
+            LaneGeneration,
+        ];
+        const CUSTOM: &[DecisiveField] = &[
+            Envelope,
+            ClosureFactKey,
+            RoutineEffects,
+            MaskingProfileOutput,
+            ProfileGeneration,
+            LaneGeneration,
+        ];
+        const CUSTOM_DDL: &[DecisiveField] = &[
+            Envelope,
+            ClosureFactKey,
+            RoutineEffects,
+            MaskingProfileOutput,
+            DdlEffectClosure,
+            ProfileGeneration,
+            LaneGeneration,
+        ];
+        const PROMOTION: &[DecisiveField] = &[
+            Envelope,
+            EditionManifest,
+            ChangedEditionManifest,
+            DbIdentity,
+            DefaultEqualsBase,
+            EditionParentage,
+            EditionExposure,
+            ServiceEditions,
+            DdlEffectClosure,
+            ProfileGeneration,
+            LaneGeneration,
+        ];
+        const PROMOTION_WITHOUT_DDL_EVENT: &[DecisiveField] = &[
+            Envelope,
+            EditionManifest,
+            ChangedEditionManifest,
+            DbIdentity,
+            DefaultEqualsBase,
+            EditionParentage,
+            EditionExposure,
+            ServiceEditions,
+            ProfileGeneration,
+            LaneGeneration,
+        ];
+        const GRANT: &[DecisiveField] = &[
+            Envelope,
+            ScopeDigest,
+            MutationEffectClosure,
+            Rows,
+            PolicyFloor,
+            ProfileGeneration,
+            LaneGeneration,
+        ];
+        // No wildcard: a new ActionKind must explicitly select its policy.
+        match action {
+            ActionKind::ExecuteDml | ActionKind::ExecuteDdlAdmin if context.statement_scoped => {
+                STATEMENT
+            }
+            ActionKind::ExecuteDml | ActionKind::PreviewDmlSandbox => {
+                if context.dml_rows_supported {
+                    DML_WITH_ROWS
+                } else {
+                    DML
+                }
+            }
+            ActionKind::ExecuteDdlAdmin
+            | ActionKind::CompileObject
+            | ActionKind::CreateOrReplace
+            | ActionKind::PatchSource => {
+                if context.require_impact {
+                    DDL
+                } else {
+                    DDL_OBSERVATIONAL
+                }
+            }
+            ActionKind::SetSessionLevel { .. } => ELEVATION,
+            ActionKind::CustomToolCall => {
+                if context.has_ddl_event {
+                    CUSTOM_DDL
+                } else {
+                    CUSTOM
+                }
+            }
+            ActionKind::ChangeRequestPromote => {
+                if context.has_ddl_event {
+                    PROMOTION
+                } else {
+                    PROMOTION_WITHOUT_DDL_EVENT
+                }
+            }
+            ActionKind::GrantCreate | ActionKind::GrantUse => GRANT,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum DecisiveRefusalReason {
+    Unavailable { reason: UnavailableReason },
+    Estimated,
+    NotApplicable { reason: NotApplicableReason },
+    Missing,
+    UnsupportedVersion { found: u8 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, thiserror::Error)]
+#[error("decisive field {field:?} is not computed: {reason:?}")]
+pub struct DecisiveRefusal {
+    pub field: DecisiveField,
+    pub reason: DecisiveRefusalReason,
+}
+
+impl DecisiveRefusal {
+    /// Convert only closed identifiers and causes to the public refusal.
+    /// No field values, SQL source, or bind buffers cross this boundary.
+    #[must_use]
+    pub fn into_envelope(self) -> ErrorEnvelope {
+        fn name(value: impl Serialize) -> String {
+            serde_json::to_value(value)
+                .expect("closed impact identifier serializes")
+                .as_str()
+                .expect("closed impact identifier is a string")
+                .to_owned()
+        }
+        let (class, reason) = match self.reason {
+            DecisiveRefusalReason::Unavailable {
+                reason: UnavailableReason::Truncated | UnavailableReason::ImpactDecisiveTruncated,
+            } => (ErrorClass::ImpactDecisiveTruncated, "truncated".to_owned()),
+            DecisiveRefusalReason::Unavailable { reason } => {
+                (ErrorClass::ImpactDecisiveUnavailable, name(reason))
+            }
+            DecisiveRefusalReason::Estimated => {
+                (ErrorClass::ImpactDecisiveUnavailable, "estimated".into())
+            }
+            DecisiveRefusalReason::NotApplicable { reason } => (
+                ErrorClass::ImpactDecisiveUnavailable,
+                format!("not_applicable:{}", name(reason)),
+            ),
+            DecisiveRefusalReason::Missing => {
+                (ErrorClass::ImpactDecisiveUnavailable, "missing".into())
+            }
+            DecisiveRefusalReason::UnsupportedVersion { found } => (
+                ErrorClass::ImpactDecisiveUnavailable,
+                format!("unsupported_version:{found}"),
+            ),
+        };
+        ErrorEnvelope::new(
+            class,
+            "required impact facts are not complete; confirmation refused",
+        )
+        .with_impact_decisive(name(self.field), reason)
+        .with_statement_outcome(StatementOutcome::NotStarted)
+    }
+}
+
+fn require_computed<T>(
+    field: DecisiveField,
+    status: &FieldStatus<T>,
+) -> Result<(), DecisiveRefusal> {
+    let reason = match status {
+        FieldStatus::Computed { .. } => return Ok(()),
+        FieldStatus::Estimated { .. } => DecisiveRefusalReason::Estimated,
+        FieldStatus::Unavailable { reason } => {
+            DecisiveRefusalReason::Unavailable { reason: *reason }
+        }
+        FieldStatus::NotApplicable { reason } => {
+            DecisiveRefusalReason::NotApplicable { reason: *reason }
+        }
+    };
+    Err(DecisiveRefusal { field, reason })
+}
+
+/// Required facts cannot be waived by `require_impact` or by unavailable
+/// advisory fields. Nested object identities must themselves be computed.
+pub fn check_decisive(
+    binding: &ImpactBindingV1,
+    required: &[DecisiveField],
+) -> Result<(), DecisiveRefusal> {
+    if binding.version != IMPACT_BINDING_VERSION {
+        return Err(DecisiveRefusal {
+            field: DecisiveField::Envelope,
+            reason: DecisiveRefusalReason::UnsupportedVersion {
+                found: binding.version,
+            },
+        });
+    }
+    for &field in required {
+        let facts = &binding.decisive;
+        match field {
+            DecisiveField::Envelope => require_computed(field, &facts.envelope_digest)?,
+            DecisiveField::ObjectIdentities => {
+                require_computed(field, &facts.objects)?;
+                if let FieldStatus::Computed { value: objects } = &facts.objects {
+                    for object in objects {
+                        require_computed(field, &object.identity)?;
+                    }
+                }
+            }
+            DecisiveField::ObjectStatus => {
+                require_computed(field, &facts.objects)?;
+                if let FieldStatus::Computed { value: objects } = &facts.objects {
+                    for object in objects {
+                        require_computed(field, &object.status)?;
+                    }
+                }
+            }
+            DecisiveField::Edition => require_computed(field, &facts.edition)?,
+            DecisiveField::CurrentSchema => require_computed(field, &facts.current_schema)?,
+            DecisiveField::ProfileGeneration => require_computed(field, &facts.profile_generation)?,
+            DecisiveField::LaneGeneration => require_computed(field, &facts.lane_generation)?,
+            DecisiveField::DbIdentity => require_computed(field, &facts.db_identity)?,
+            DecisiveField::ScopeDigest => {
+                require_computed(field, &facts.scope_digest)?;
+                if matches!(facts.scope_digest, FieldStatus::Computed { value: None }) {
+                    return Err(DecisiveRefusal {
+                        field,
+                        reason: DecisiveRefusalReason::Missing,
+                    });
+                }
+            }
+            DecisiveField::MutationEffectClosure
+            | DecisiveField::Rows
+            | DecisiveField::Dependents
+            | DecisiveField::PredictedInvalidSet
+            | DecisiveField::DdlEffectClosure
+            | DecisiveField::SourceEffects
+            | DecisiveField::Reversibility
+            | DecisiveField::ProfileCeiling
+            | DecisiveField::OAuthCeiling
+            | DecisiveField::ClosureFactKey
+            | DecisiveField::RoutineEffects
+            | DecisiveField::MaskingProfileOutput
+            | DecisiveField::EditionManifest
+            | DecisiveField::ChangedEditionManifest
+            | DecisiveField::DefaultEqualsBase
+            | DecisiveField::EditionParentage
+            | DecisiveField::EditionExposure
+            | DecisiveField::ServiceEditions
+            | DecisiveField::PolicyFloor => {
+                let status = facts.action_fields.get(&field).ok_or(DecisiveRefusal {
+                    field,
+                    reason: DecisiveRefusalReason::Missing,
+                })?;
+                require_computed(field, status)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A failed current computation and a changed approved value are distinct.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum DecisiveRevalidationRefusal {
+    #[error(transparent)]
+    Unavailable(#[from] DecisiveRefusal),
+    #[error("decisive field {field:?} changed")]
+    Changed { field: DecisiveField },
+}
+
+impl DecisiveRevalidationRefusal {
+    #[must_use]
+    pub fn into_envelope(self) -> ErrorEnvelope {
+        match self {
+            Self::Unavailable(refusal) => refusal.into_envelope(),
+            Self::Changed { field } => ErrorEnvelope::new(
+                ErrorClass::RepreviewRequired,
+                "REPREVIEW_REQUIRED: a decisive impact fact changed; preview again",
+            )
+            .with_impact_decisive(
+                serde_json::to_value(field)
+                    .expect("field identifier")
+                    .as_str()
+                    .expect("field string"),
+                "changed",
+            )
+            .with_statement_outcome(StatementOutcome::NotStarted),
+        }
+    }
+}
+
+/// Compare exactly the fields selected by the matrix, including the bounded
+/// catalog inputs used to revalidate a source/effect proof without reanalysis.
+pub fn check_decisive_revalidation(
+    approved: &ImpactBindingV1,
+    current: &ImpactBindingV1,
+    required: &[DecisiveField],
+) -> Result<(), DecisiveRevalidationRefusal> {
+    check_decisive(approved, required)?;
+    for field in required
+        .iter()
+        .copied()
+        .chain(computed_observations(approved))
+    {
+        if field_fingerprint(approved, field) != field_fingerprint(current, field) {
+            return Err(DecisiveRevalidationRefusal::Changed { field });
+        }
+    }
+    check_decisive(current, required)?;
+    Ok(())
+}
+
+pub(crate) fn computed_observations(
+    binding: &ImpactBindingV1,
+) -> impl Iterator<Item = DecisiveField> + '_ {
+    [
+        DecisiveField::Dependents,
+        DecisiveField::PredictedInvalidSet,
+    ]
+    .into_iter()
+    .filter(|field| {
+        matches!(
+            binding.decisive.action_fields.get(field),
+            Some(FieldStatus::Computed { .. })
+        )
+    })
+}
+
+#[derive(Clone, Copy)]
+enum ObjectProjection {
+    Identity,
+    Status,
+    ProofInputs,
+}
+
+fn object_projection(
+    objects: &FieldStatus<Vec<ObjectFact>>,
+    projection: ObjectProjection,
+) -> Value {
+    let mut status = serde_json::to_value(objects).expect("object proof serialization");
+    if let Some(values) = status.get_mut("value").and_then(Value::as_array_mut) {
+        for value in values.iter_mut() {
+            *value = match projection {
+                ObjectProjection::Identity => value["identity"].clone(),
+                // Bind a status to its identity; a multiset of statuses alone
+                // would miss two objects exchanging VALID and INVALID.
+                ObjectProjection::Status => serde_json::json!([value["identity"], value["status"]]),
+                ObjectProjection::ProofInputs => value.clone(),
+            };
+        }
+        values.sort_by_cached_key(|value| serde_json::to_vec(value).expect("object projection"));
+    }
+    status
+}
+
+pub(crate) fn field_fingerprint(
+    binding: &ImpactBindingV1,
+    field: DecisiveField,
+) -> Option<[u8; 32]> {
+    let facts = &binding.decisive;
+    let value = match field {
+        DecisiveField::Envelope => serde_json::to_value(&facts.envelope_digest),
+        DecisiveField::ObjectIdentities => Ok(object_projection(
+            &facts.objects,
+            ObjectProjection::Identity,
+        )),
+        DecisiveField::ObjectStatus => {
+            Ok(object_projection(&facts.objects, ObjectProjection::Status))
+        }
+        DecisiveField::Edition => serde_json::to_value(&facts.edition),
+        DecisiveField::CurrentSchema => serde_json::to_value(&facts.current_schema),
+        DecisiveField::ProfileGeneration => serde_json::to_value(&facts.profile_generation),
+        DecisiveField::LaneGeneration => serde_json::to_value(&facts.lane_generation),
+        DecisiveField::DbIdentity => serde_json::to_value(&facts.db_identity),
+        DecisiveField::ScopeDigest => serde_json::to_value(&facts.scope_digest),
+        DecisiveField::MutationEffectClosure
+        | DecisiveField::DdlEffectClosure
+        | DecisiveField::Dependents => {
+            let commitment = facts.action_fields.get(&field)?;
+            Ok(serde_json::json!([
+                commitment,
+                object_projection(&facts.objects, ObjectProjection::ProofInputs)
+            ]))
+        }
+        DecisiveField::SourceEffects => {
+            let commitment = facts.action_fields.get(&field)?;
+            Ok(serde_json::json!([
+                commitment,
+                facts.compiler_facts,
+                facts.compile_parse_closure_digest,
+                facts.engine_version,
+                facts.ruleset_digest
+            ]))
+        }
+        DecisiveField::Rows
+        | DecisiveField::PredictedInvalidSet
+        | DecisiveField::Reversibility
+        | DecisiveField::ProfileCeiling
+        | DecisiveField::OAuthCeiling
+        | DecisiveField::ClosureFactKey
+        | DecisiveField::RoutineEffects
+        | DecisiveField::MaskingProfileOutput
+        | DecisiveField::EditionManifest
+        | DecisiveField::ChangedEditionManifest
+        | DecisiveField::DefaultEqualsBase
+        | DecisiveField::EditionParentage
+        | DecisiveField::EditionExposure
+        | DecisiveField::ServiceEditions
+        | DecisiveField::PolicyFloor => serde_json::to_value(facts.action_fields.get(&field)?),
+    }
+    .expect("closed decisive fact serialization");
+    let mut hash = Sha256::new();
+    hash.update(b"omcp/impact-field/v1\0");
+    hash.update(serde_json::to_vec(&(field, value)).expect("field commitment"));
+    Some(hash.finalize().into())
+}
+
+pub(crate) fn field_fingerprints(binding: &ImpactBindingV1) -> BTreeMap<DecisiveField, [u8; 32]> {
+    use DecisiveField::*;
+    [
+        Envelope,
+        ObjectIdentities,
+        ObjectStatus,
+        Edition,
+        CurrentSchema,
+        ProfileGeneration,
+        LaneGeneration,
+        DbIdentity,
+        ScopeDigest,
+    ]
+    .into_iter()
+    .chain(binding.decisive.action_fields.keys().copied())
+    .filter_map(|field| field_fingerprint(binding, field).map(|digest| (field, digest)))
+    .collect()
+}
+
+pub(crate) fn authority_fingerprint(binding: &ImpactBindingV1) -> [u8; 32] {
+    let facts = &binding.decisive;
+    let data = serde_json::to_vec(&(
+        &facts.envelope_digest,
+        &facts.statement_digest,
+        &facts.bind_hmac,
+        &facts.policy_schema_digest,
+        &facts.policy_ruleset_digest,
+        &facts.matched_policy_rule_ids,
+        &facts.rewrite_algorithm_version,
+        &facts.effective_plan_digest,
+        &facts.scope_digest,
+    ))
+    .expect("approval authority inputs");
+    let mut hash = Sha256::new();
+    hash.update(b"omcp/impact-authority/v1\0");
+    hash.update(data);
+    hash.finalize().into()
+}
+
 /// Facts that must be rechecked against the same identity before execution.
 /// The envelope digest already includes the keyed bind HMAC; `bind_hmac`
 /// remains explicit so a preview can show its status without exposing values.
@@ -263,25 +799,25 @@ pub struct DecisiveFacts {
 impl Default for DecisiveFacts {
     fn default() -> Self {
         Self {
-            envelope_digest: FieldStatus::not_wired(),
-            statement_digest: FieldStatus::not_wired(),
-            bind_hmac: FieldStatus::not_wired(),
-            objects: FieldStatus::not_wired(),
-            edition: FieldStatus::not_wired(),
-            compiler_facts: FieldStatus::not_wired(),
-            compile_parse_closure_digest: FieldStatus::not_wired(),
-            engine_version: FieldStatus::not_wired(),
-            ruleset_digest: FieldStatus::not_wired(),
-            effective_plan_digest: FieldStatus::not_wired(),
-            policy_schema_digest: FieldStatus::not_wired(),
-            policy_ruleset_digest: FieldStatus::not_wired(),
-            matched_policy_rule_ids: FieldStatus::not_wired(),
-            rewrite_algorithm_version: FieldStatus::not_wired(),
-            db_identity: FieldStatus::not_wired(),
-            current_schema: FieldStatus::not_wired(),
-            profile_generation: FieldStatus::not_wired(),
-            lane_generation: FieldStatus::not_wired(),
-            scope_digest: FieldStatus::not_wired(),
+            envelope_digest: FieldStatus::not_collected(),
+            statement_digest: FieldStatus::not_collected(),
+            bind_hmac: FieldStatus::not_collected(),
+            objects: FieldStatus::not_collected(),
+            edition: FieldStatus::not_collected(),
+            compiler_facts: FieldStatus::not_collected(),
+            compile_parse_closure_digest: FieldStatus::not_collected(),
+            engine_version: FieldStatus::not_collected(),
+            ruleset_digest: FieldStatus::not_collected(),
+            effective_plan_digest: FieldStatus::not_collected(),
+            policy_schema_digest: FieldStatus::not_collected(),
+            policy_ruleset_digest: FieldStatus::not_collected(),
+            matched_policy_rule_ids: FieldStatus::not_collected(),
+            rewrite_algorithm_version: FieldStatus::not_collected(),
+            db_identity: FieldStatus::not_collected(),
+            current_schema: FieldStatus::not_collected(),
+            profile_generation: FieldStatus::not_collected(),
+            lane_generation: FieldStatus::not_collected(),
+            scope_digest: FieldStatus::not_collected(),
             action_fields: BTreeMap::new(),
         }
     }
@@ -379,13 +915,13 @@ impl Default for ImpactV1 {
     fn default() -> Self {
         Self {
             binding: ImpactBindingV1::default(),
-            rows: FieldStatus::not_wired(),
-            dependents: FieldStatus::not_wired(),
-            effects: FieldStatus::not_wired(),
-            sast: FieldStatus::not_wired(),
-            cost: FieldStatus::not_wired(),
-            locks: FieldStatus::not_wired(),
-            reversibility: FieldStatus::not_wired(),
+            rows: FieldStatus::not_collected(),
+            dependents: FieldStatus::not_collected(),
+            effects: FieldStatus::not_collected(),
+            sast: FieldStatus::not_collected(),
+            cost: FieldStatus::not_collected(),
+            locks: FieldStatus::not_collected(),
+            reversibility: FieldStatus::not_collected(),
         }
     }
 }

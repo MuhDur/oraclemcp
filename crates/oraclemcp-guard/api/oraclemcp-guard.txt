@@ -2454,6 +2454,7 @@ impl oraclemcp_guard::exec_grant::ExecGrantStore
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::clear(&self)
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::consume(&self, &str, &oraclemcp_guard::exec_grant::GrantMaterial, &oraclemcp_guard::exec_grant::ExecGrantBinding, oraclemcp_guard::levels::OperatingLevel) -> core::result::Result<oraclemcp_guard::levels::OperatingLevel, oraclemcp_guard::exec_grant::ExecGrantError>
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::issue(&self, oraclemcp_guard::exec_grant::GrantMaterial, oraclemcp_guard::exec_grant::ExecGrantBinding, oraclemcp_guard::levels::OperatingLevel, core::time::Duration) -> alloc::string::String
+pub fn oraclemcp_guard::exec_grant::ExecGrantStore::material_for_revalidation(&self, &str, &oraclemcp_guard::exec_grant::ExecGrantBinding, oraclemcp_guard::levels::OperatingLevel) -> core::result::Result<oraclemcp_guard::exec_grant::GrantMaterial, oraclemcp_guard::exec_grant::ExecGrantError>
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::new() -> Self
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::purge_expired(&self) -> usize
 impl core::default::Default for oraclemcp_guard::exec_grant::ExecGrantStore
@@ -2500,6 +2501,8 @@ pub oraclemcp_guard::exec_grant::GrantMaterial::sql_digest: [u8; 32]
 impl oraclemcp_guard::exec_grant::GrantMaterial
 pub fn oraclemcp_guard::exec_grant::GrantMaterial::digest(&self) -> [u8; 32]
 pub fn oraclemcp_guard::exec_grant::GrantMaterial::new(&str, &oraclemcp_guard::impact_binding::ImpactBindingV1) -> core::result::Result<Self, oraclemcp_guard::impact_binding::ImpactVersionError>
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::revalidate(&self, &oraclemcp_guard::impact_binding::ImpactBindingV1, &[oraclemcp_guard::impact_binding::DecisiveField]) -> core::result::Result<(), oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal>
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::with_impact(&self, &oraclemcp_guard::impact_binding::ImpactBindingV1) -> core::result::Result<Self, oraclemcp_guard::impact_binding::ImpactVersionError>
 impl core::clone::Clone for oraclemcp_guard::exec_grant::GrantMaterial
 pub fn oraclemcp_guard::exec_grant::GrantMaterial::clone(&self) -> oraclemcp_guard::exec_grant::GrantMaterial
 impl core::cmp::Eq for oraclemcp_guard::exec_grant::GrantMaterial
@@ -2643,6 +2646,136 @@ pub type oraclemcp_guard::impact_binding::DecisiveField::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::impact_binding::DecisiveField where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::impact_binding::DecisiveField where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::impact_binding::DecisiveField::vzip(self) -> V
+pub enum oraclemcp_guard::impact_binding::DecisiveRefusalReason
+pub oraclemcp_guard::impact_binding::DecisiveRefusalReason::Estimated
+pub oraclemcp_guard::impact_binding::DecisiveRefusalReason::Missing
+pub oraclemcp_guard::impact_binding::DecisiveRefusalReason::NotApplicable
+pub oraclemcp_guard::impact_binding::DecisiveRefusalReason::NotApplicable::reason: oraclemcp_guard::impact_binding::NotApplicableReason
+pub oraclemcp_guard::impact_binding::DecisiveRefusalReason::Unavailable
+pub oraclemcp_guard::impact_binding::DecisiveRefusalReason::Unavailable::reason: oraclemcp_guard::impact_binding::UnavailableReason
+pub oraclemcp_guard::impact_binding::DecisiveRefusalReason::UnsupportedVersion
+pub oraclemcp_guard::impact_binding::DecisiveRefusalReason::UnsupportedVersion::found: u8
+impl core::clone::Clone for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusalReason::clone(&self) -> oraclemcp_guard::impact_binding::DecisiveRefusalReason
+impl core::cmp::Eq for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+impl core::cmp::PartialEq for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusalReason::eq(&self, &oraclemcp_guard::impact_binding::DecisiveRefusalReason) -> bool
+impl core::fmt::Debug for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusalReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+impl core::marker::StructuralPartialEq for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+impl serde_core::ser::Serialize for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusalReason::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusalReason::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+impl core::marker::Send for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+impl core::marker::Sync for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+impl core::marker::Unpin for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+impl core::marker::UnsafeUnpin for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::impact_binding::DecisiveRefusalReason where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusalReason::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::impact_binding::DecisiveRefusalReason where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::impact_binding::DecisiveRefusalReason where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::impact_binding::DecisiveRefusalReason where U: core::convert::From<T>
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusalReason::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::impact_binding::DecisiveRefusalReason where U: core::convert::Into<T>
+pub type oraclemcp_guard::impact_binding::DecisiveRefusalReason::Error = core::convert::Infallible
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusalReason::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::impact_binding::DecisiveRefusalReason where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::impact_binding::DecisiveRefusalReason::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusalReason::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::impact_binding::DecisiveRefusalReason where T: core::clone::Clone
+pub type oraclemcp_guard::impact_binding::DecisiveRefusalReason::Owned = T
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusalReason::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusalReason::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+impl<T> core::any::Any for oraclemcp_guard::impact_binding::DecisiveRefusalReason where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusalReason::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::impact_binding::DecisiveRefusalReason where T: ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusalReason::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::impact_binding::DecisiveRefusalReason where T: ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusalReason::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::impact_binding::DecisiveRefusalReason where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::impact_binding::DecisiveRefusalReason::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusalReason::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::impact_binding::DecisiveRefusalReason where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+impl<T> typenum::type_operators::Same for oraclemcp_guard::impact_binding::DecisiveRefusalReason
+pub type oraclemcp_guard::impact_binding::DecisiveRefusalReason::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::impact_binding::DecisiveRefusalReason where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::impact_binding::DecisiveRefusalReason where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusalReason::vzip(self) -> V
+pub enum oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+pub oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::Changed
+pub oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::Changed::field: oraclemcp_guard::impact_binding::DecisiveField
+pub oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::Unavailable(oraclemcp_guard::impact_binding::DecisiveRefusal)
+impl oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::into_envelope(self) -> oraclemcp_error::ErrorEnvelope
+impl core::clone::Clone for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::clone(&self) -> oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+impl core::cmp::Eq for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+impl core::cmp::PartialEq for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::eq(&self, &oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal) -> bool
+impl core::convert::From<oraclemcp_guard::impact_binding::DecisiveRefusal> for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::from(oraclemcp_guard::impact_binding::DecisiveRefusal) -> Self
+impl core::error::Error for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+impl core::marker::StructuralPartialEq for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+impl core::marker::Freeze for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+impl core::marker::Send for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+impl core::marker::Sync for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+impl core::marker::Unpin for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+impl core::marker::UnsafeUnpin for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal where U: core::convert::From<T>
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal where U: core::convert::Into<T>
+pub type oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::Error = core::convert::Infallible
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal where T: core::clone::Clone
+pub type oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::Owned = T
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::to_owned(&self) -> T
+impl<T> alloc::string::ToString for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal where T: core::fmt::Display + ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::to_string(&self) -> alloc::string::String
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+impl<T> core::any::Any for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal where T: ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal where T: ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+impl<T> typenum::type_operators::Same for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+pub type oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::vzip(self) -> V
 pub enum oraclemcp_guard::impact_binding::FieldStatus<T>
 pub oraclemcp_guard::impact_binding::FieldStatus::Computed
 pub oraclemcp_guard::impact_binding::FieldStatus::Computed::value: T
@@ -2653,6 +2786,7 @@ pub oraclemcp_guard::impact_binding::FieldStatus::NotApplicable::reason: oraclem
 pub oraclemcp_guard::impact_binding::FieldStatus::Unavailable
 pub oraclemcp_guard::impact_binding::FieldStatus::Unavailable::reason: oraclemcp_guard::impact_binding::UnavailableReason
 impl<T> oraclemcp_guard::impact_binding::FieldStatus<T>
+pub const fn oraclemcp_guard::impact_binding::FieldStatus<T>::not_collected() -> Self
 pub const fn oraclemcp_guard::impact_binding::FieldStatus<T>::not_wired() -> Self
 impl<'de, T> serde_core::de::Deserialize<'de> for oraclemcp_guard::impact_binding::FieldStatus<T> where T: serde_core::de::Deserialize<'de>
 pub fn oraclemcp_guard::impact_binding::FieldStatus<T>::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
@@ -2905,11 +3039,14 @@ pub oraclemcp_guard::impact_binding::UnavailableReason::FlashbackNotFlashbackabl
 pub oraclemcp_guard::impact_binding::UnavailableReason::FlashbackRetentionExceeded
 pub oraclemcp_guard::impact_binding::UnavailableReason::ForbiddenStatement
 pub oraclemcp_guard::impact_binding::UnavailableReason::HardParseCallbacks
+pub oraclemcp_guard::impact_binding::UnavailableReason::ImpactDecisiveTruncated
+pub oraclemcp_guard::impact_binding::UnavailableReason::ImpactDecisiveUnavailable
 pub oraclemcp_guard::impact_binding::UnavailableReason::Internal
 pub oraclemcp_guard::impact_binding::UnavailableReason::InvalidArguments
 pub oraclemcp_guard::impact_binding::UnavailableReason::LeaseRequired
 pub oraclemcp_guard::impact_binding::UnavailableReason::LevelBelowRequired
 pub oraclemcp_guard::impact_binding::UnavailableReason::NoPrivilege
+pub oraclemcp_guard::impact_binding::UnavailableReason::NotCollected
 pub oraclemcp_guard::impact_binding::UnavailableReason::NotWired
 pub oraclemcp_guard::impact_binding::UnavailableReason::ObjectNotFound
 pub oraclemcp_guard::impact_binding::UnavailableReason::PlanTableUnverified
@@ -3122,6 +3259,169 @@ pub type oraclemcp_guard::impact_binding::DecisiveFacts::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::impact_binding::DecisiveFacts where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::impact_binding::DecisiveFacts where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::impact_binding::DecisiveFacts::vzip(self) -> V
+pub struct oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1
+impl oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1
+pub fn oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1::required(&oraclemcp_guard::action_envelope::ActionKind, oraclemcp_guard::impact_binding::DecisiveMatrixContext) -> &'static [oraclemcp_guard::impact_binding::DecisiveField]
+impl core::marker::Freeze for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1
+impl core::marker::Send for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1
+impl core::marker::Sync for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1
+impl core::marker::Unpin for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1
+impl core::marker::UnsafeUnpin for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1 where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1 where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1 where U: core::convert::From<T>
+pub fn oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1 where U: core::convert::Into<T>
+pub type oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1::Error = core::convert::Infallible
+pub fn oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1 where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1
+impl<T> core::any::Any for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1 where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1 where T: ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1 where T: ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1
+pub fn oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1
+impl<T> typenum::type_operators::Same for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1
+pub type oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1 where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1 where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::impact_binding::DecisiveFieldMatrixV1::vzip(self) -> V
+pub struct oraclemcp_guard::impact_binding::DecisiveMatrixContext
+pub oraclemcp_guard::impact_binding::DecisiveMatrixContext::dml_rows_supported: bool
+pub oraclemcp_guard::impact_binding::DecisiveMatrixContext::has_ddl_event: bool
+pub oraclemcp_guard::impact_binding::DecisiveMatrixContext::require_impact: bool
+pub oraclemcp_guard::impact_binding::DecisiveMatrixContext::statement_scoped: bool
+impl core::clone::Clone for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+pub fn oraclemcp_guard::impact_binding::DecisiveMatrixContext::clone(&self) -> oraclemcp_guard::impact_binding::DecisiveMatrixContext
+impl core::cmp::Eq for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+impl core::cmp::PartialEq for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+pub fn oraclemcp_guard::impact_binding::DecisiveMatrixContext::eq(&self, &oraclemcp_guard::impact_binding::DecisiveMatrixContext) -> bool
+impl core::default::Default for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+pub fn oraclemcp_guard::impact_binding::DecisiveMatrixContext::default() -> oraclemcp_guard::impact_binding::DecisiveMatrixContext
+impl core::fmt::Debug for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+pub fn oraclemcp_guard::impact_binding::DecisiveMatrixContext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+impl core::marker::StructuralPartialEq for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+impl core::marker::Freeze for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+impl core::marker::Send for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+impl core::marker::Sync for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+impl core::marker::Unpin for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+impl core::marker::UnsafeUnpin for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::impact_binding::DecisiveMatrixContext where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveMatrixContext::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::impact_binding::DecisiveMatrixContext where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::impact_binding::DecisiveMatrixContext where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::impact_binding::DecisiveMatrixContext where U: core::convert::From<T>
+pub fn oraclemcp_guard::impact_binding::DecisiveMatrixContext::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::impact_binding::DecisiveMatrixContext where U: core::convert::Into<T>
+pub type oraclemcp_guard::impact_binding::DecisiveMatrixContext::Error = core::convert::Infallible
+pub fn oraclemcp_guard::impact_binding::DecisiveMatrixContext::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::impact_binding::DecisiveMatrixContext where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::impact_binding::DecisiveMatrixContext::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::impact_binding::DecisiveMatrixContext::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::impact_binding::DecisiveMatrixContext where T: core::clone::Clone
+pub type oraclemcp_guard::impact_binding::DecisiveMatrixContext::Owned = T
+pub fn oraclemcp_guard::impact_binding::DecisiveMatrixContext::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::impact_binding::DecisiveMatrixContext::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+impl<T> core::any::Any for oraclemcp_guard::impact_binding::DecisiveMatrixContext where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveMatrixContext::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::impact_binding::DecisiveMatrixContext where T: ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveMatrixContext::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::impact_binding::DecisiveMatrixContext where T: ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveMatrixContext::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::impact_binding::DecisiveMatrixContext where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::impact_binding::DecisiveMatrixContext::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+pub fn oraclemcp_guard::impact_binding::DecisiveMatrixContext::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+impl<T> typenum::type_operators::Same for oraclemcp_guard::impact_binding::DecisiveMatrixContext
+pub type oraclemcp_guard::impact_binding::DecisiveMatrixContext::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::impact_binding::DecisiveMatrixContext where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::impact_binding::DecisiveMatrixContext where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::impact_binding::DecisiveMatrixContext::vzip(self) -> V
+pub struct oraclemcp_guard::impact_binding::DecisiveRefusal
+pub oraclemcp_guard::impact_binding::DecisiveRefusal::field: oraclemcp_guard::impact_binding::DecisiveField
+pub oraclemcp_guard::impact_binding::DecisiveRefusal::reason: oraclemcp_guard::impact_binding::DecisiveRefusalReason
+impl oraclemcp_guard::impact_binding::DecisiveRefusal
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusal::into_envelope(self) -> oraclemcp_error::ErrorEnvelope
+impl core::clone::Clone for oraclemcp_guard::impact_binding::DecisiveRefusal
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusal::clone(&self) -> oraclemcp_guard::impact_binding::DecisiveRefusal
+impl core::cmp::Eq for oraclemcp_guard::impact_binding::DecisiveRefusal
+impl core::cmp::PartialEq for oraclemcp_guard::impact_binding::DecisiveRefusal
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusal::eq(&self, &oraclemcp_guard::impact_binding::DecisiveRefusal) -> bool
+impl core::convert::From<oraclemcp_guard::impact_binding::DecisiveRefusal> for oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal
+pub fn oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal::from(oraclemcp_guard::impact_binding::DecisiveRefusal) -> Self
+impl core::error::Error for oraclemcp_guard::impact_binding::DecisiveRefusal
+impl core::fmt::Debug for oraclemcp_guard::impact_binding::DecisiveRefusal
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusal::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oraclemcp_guard::impact_binding::DecisiveRefusal
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusal::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::impact_binding::DecisiveRefusal
+impl core::marker::StructuralPartialEq for oraclemcp_guard::impact_binding::DecisiveRefusal
+impl serde_core::ser::Serialize for oraclemcp_guard::impact_binding::DecisiveRefusal
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusal::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::impact_binding::DecisiveRefusal
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusal::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::impact_binding::DecisiveRefusal
+impl core::marker::Send for oraclemcp_guard::impact_binding::DecisiveRefusal
+impl core::marker::Sync for oraclemcp_guard::impact_binding::DecisiveRefusal
+impl core::marker::Unpin for oraclemcp_guard::impact_binding::DecisiveRefusal
+impl core::marker::UnsafeUnpin for oraclemcp_guard::impact_binding::DecisiveRefusal
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::impact_binding::DecisiveRefusal
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::impact_binding::DecisiveRefusal
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::impact_binding::DecisiveRefusal where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusal::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::impact_binding::DecisiveRefusal where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::impact_binding::DecisiveRefusal where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::impact_binding::DecisiveRefusal where U: core::convert::From<T>
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusal::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::impact_binding::DecisiveRefusal where U: core::convert::Into<T>
+pub type oraclemcp_guard::impact_binding::DecisiveRefusal::Error = core::convert::Infallible
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusal::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::impact_binding::DecisiveRefusal where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::impact_binding::DecisiveRefusal::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusal::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::impact_binding::DecisiveRefusal where T: core::clone::Clone
+pub type oraclemcp_guard::impact_binding::DecisiveRefusal::Owned = T
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusal::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusal::to_owned(&self) -> T
+impl<T> alloc::string::ToString for oraclemcp_guard::impact_binding::DecisiveRefusal where T: core::fmt::Display + ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusal::to_string(&self) -> alloc::string::String
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::impact_binding::DecisiveRefusal
+impl<T> core::any::Any for oraclemcp_guard::impact_binding::DecisiveRefusal where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusal::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::impact_binding::DecisiveRefusal where T: ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusal::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::impact_binding::DecisiveRefusal where T: ?core::marker::Sized
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusal::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::impact_binding::DecisiveRefusal where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::impact_binding::DecisiveRefusal::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::impact_binding::DecisiveRefusal
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusal::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::impact_binding::DecisiveRefusal
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::impact_binding::DecisiveRefusal where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::impact_binding::DecisiveRefusal
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::impact_binding::DecisiveRefusal
+impl<T> typenum::type_operators::Same for oraclemcp_guard::impact_binding::DecisiveRefusal
+pub type oraclemcp_guard::impact_binding::DecisiveRefusal::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::impact_binding::DecisiveRefusal where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::impact_binding::DecisiveRefusal where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::impact_binding::DecisiveRefusal::vzip(self) -> V
 pub struct oraclemcp_guard::impact_binding::FieldBudget
 impl oraclemcp_guard::impact_binding::FieldBudget
 pub async fn oraclemcp_guard::impact_binding::FieldBudget::run<T, F>(std::time::Instant, oraclemcp_guard::impact_binding::FieldCaps, F) -> oraclemcp_guard::impact_binding::FieldStatus<T> where F: core::future::future::Future<Output = oraclemcp_guard::impact_binding::FieldMeasure<T>>
@@ -3611,6 +3911,8 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::impact_binding::RowEstimate where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::impact_binding::RowEstimate::vzip(self) -> V
 pub const oraclemcp_guard::impact_binding::IMPACT_BINDING_VERSION: u8
+pub fn oraclemcp_guard::impact_binding::check_decisive(&oraclemcp_guard::impact_binding::ImpactBindingV1, &[oraclemcp_guard::impact_binding::DecisiveField]) -> core::result::Result<(), oraclemcp_guard::impact_binding::DecisiveRefusal>
+pub fn oraclemcp_guard::impact_binding::check_decisive_revalidation(&oraclemcp_guard::impact_binding::ImpactBindingV1, &oraclemcp_guard::impact_binding::ImpactBindingV1, &[oraclemcp_guard::impact_binding::DecisiveField]) -> core::result::Result<(), oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal>
 pub mod oraclemcp_guard::incident
 pub use oraclemcp_guard::incident::ReasonCategory
 #[non_exhaustive] pub enum oraclemcp_guard::incident::BundleEntryKind
@@ -15964,6 +16266,7 @@ pub oraclemcp_guard::FieldStatus::NotApplicable::reason: oraclemcp_guard::impact
 pub oraclemcp_guard::FieldStatus::Unavailable
 pub oraclemcp_guard::FieldStatus::Unavailable::reason: oraclemcp_guard::impact_binding::UnavailableReason
 impl<T> oraclemcp_guard::impact_binding::FieldStatus<T>
+pub const fn oraclemcp_guard::impact_binding::FieldStatus<T>::not_collected() -> Self
 pub const fn oraclemcp_guard::impact_binding::FieldStatus<T>::not_wired() -> Self
 impl<'de, T> serde_core::de::Deserialize<'de> for oraclemcp_guard::impact_binding::FieldStatus<T> where T: serde_core::de::Deserialize<'de>
 pub fn oraclemcp_guard::impact_binding::FieldStatus<T>::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
@@ -18151,11 +18454,14 @@ pub oraclemcp_guard::UnavailableReason::FlashbackNotFlashbackable
 pub oraclemcp_guard::UnavailableReason::FlashbackRetentionExceeded
 pub oraclemcp_guard::UnavailableReason::ForbiddenStatement
 pub oraclemcp_guard::UnavailableReason::HardParseCallbacks
+pub oraclemcp_guard::UnavailableReason::ImpactDecisiveTruncated
+pub oraclemcp_guard::UnavailableReason::ImpactDecisiveUnavailable
 pub oraclemcp_guard::UnavailableReason::Internal
 pub oraclemcp_guard::UnavailableReason::InvalidArguments
 pub oraclemcp_guard::UnavailableReason::LeaseRequired
 pub oraclemcp_guard::UnavailableReason::LevelBelowRequired
 pub oraclemcp_guard::UnavailableReason::NoPrivilege
+pub oraclemcp_guard::UnavailableReason::NotCollected
 pub oraclemcp_guard::UnavailableReason::NotWired
 pub oraclemcp_guard::UnavailableReason::ObjectNotFound
 pub oraclemcp_guard::UnavailableReason::PlanTableUnverified
@@ -19552,6 +19858,7 @@ impl oraclemcp_guard::exec_grant::ExecGrantStore
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::clear(&self)
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::consume(&self, &str, &oraclemcp_guard::exec_grant::GrantMaterial, &oraclemcp_guard::exec_grant::ExecGrantBinding, oraclemcp_guard::levels::OperatingLevel) -> core::result::Result<oraclemcp_guard::levels::OperatingLevel, oraclemcp_guard::exec_grant::ExecGrantError>
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::issue(&self, oraclemcp_guard::exec_grant::GrantMaterial, oraclemcp_guard::exec_grant::ExecGrantBinding, oraclemcp_guard::levels::OperatingLevel, core::time::Duration) -> alloc::string::String
+pub fn oraclemcp_guard::exec_grant::ExecGrantStore::material_for_revalidation(&self, &str, &oraclemcp_guard::exec_grant::ExecGrantBinding, oraclemcp_guard::levels::OperatingLevel) -> core::result::Result<oraclemcp_guard::exec_grant::GrantMaterial, oraclemcp_guard::exec_grant::ExecGrantError>
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::new() -> Self
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::purge_expired(&self) -> usize
 impl core::default::Default for oraclemcp_guard::exec_grant::ExecGrantStore
@@ -19958,6 +20265,8 @@ pub oraclemcp_guard::GrantMaterial::sql_digest: [u8; 32]
 impl oraclemcp_guard::exec_grant::GrantMaterial
 pub fn oraclemcp_guard::exec_grant::GrantMaterial::digest(&self) -> [u8; 32]
 pub fn oraclemcp_guard::exec_grant::GrantMaterial::new(&str, &oraclemcp_guard::impact_binding::ImpactBindingV1) -> core::result::Result<Self, oraclemcp_guard::impact_binding::ImpactVersionError>
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::revalidate(&self, &oraclemcp_guard::impact_binding::ImpactBindingV1, &[oraclemcp_guard::impact_binding::DecisiveField]) -> core::result::Result<(), oraclemcp_guard::impact_binding::DecisiveRevalidationRefusal>
+pub fn oraclemcp_guard::exec_grant::GrantMaterial::with_impact(&self, &oraclemcp_guard::impact_binding::ImpactBindingV1) -> core::result::Result<Self, oraclemcp_guard::impact_binding::ImpactVersionError>
 impl core::clone::Clone for oraclemcp_guard::exec_grant::GrantMaterial
 pub fn oraclemcp_guard::exec_grant::GrantMaterial::clone(&self) -> oraclemcp_guard::exec_grant::GrantMaterial
 impl core::cmp::Eq for oraclemcp_guard::exec_grant::GrantMaterial
