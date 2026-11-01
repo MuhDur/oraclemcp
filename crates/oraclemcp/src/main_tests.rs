@@ -3909,6 +3909,62 @@ fn custom_def(name: &str) -> CustomToolDef {
 }
 
 #[test]
+fn custom_tool_loader_refuses_unsigned_and_tampered_package_definitions() {
+    let directory = target_tmp_file("package-loader-signature");
+    fs::create_dir_all(&directory).unwrap();
+    let secret = "package-loader-test-key-0123456789012345";
+    let key = HmacSha256Key::new(secret.as_bytes().to_vec()).unwrap();
+    let unsigned = format!(
+        r#"[[tool]]
+name = "app_signature_guard"
+description = "Package signature loader guard"
+closure_sha256 = "{}"
+routine = {{ owner = "APP", package = "PKG", member = "INC", subprogram_id = 1 }}
+args = [{{oracle_type="NUMBER", direction="RETURN", bind_name="result"}}]
+"#,
+        "a".repeat(64)
+    );
+    let definition = oraclemcp_core::parse_tools_file(&unsigned)
+        .unwrap()
+        .remove(0);
+    let signature = oraclemcp_core::sign(&definition, &key);
+    let signed = format!("{unsigned}signature = \"{signature}\"\n");
+    fs::write(directory.join("package.toml"), &signed).unwrap();
+    assert!(
+        load_custom_catalog_from_sources(
+            Some(&directory),
+            Some(secret),
+            false,
+            OperatingLevel::Admin
+        )
+        .is_ok()
+    );
+    for (label, content) in [
+        ("unsigned", unsigned),
+        (
+            "tampered",
+            signed.replace("Package signature loader guard", "Changed after signing"),
+        ),
+    ] {
+        fs::write(directory.join("package.toml"), content).unwrap();
+        let error = load_custom_catalog_from_sources(
+            Some(&directory),
+            Some(secret),
+            false,
+            OperatingLevel::Admin,
+        )
+        .err()
+        .unwrap_or_else(|| panic!("{label} package must not enter the catalogue"));
+        assert_eq!(
+            error.error_class,
+            ErrorClass::InvalidArguments,
+            "{label}: {error:?}"
+        );
+        assert!(error.message.contains("signature"), "{label}: {error:?}");
+    }
+}
+
+#[test]
 fn custom_tool_names_cannot_duplicate_or_shadow_advertised_tools() {
     let err = validate_custom_tool_names(&[custom_def("app_lookup"), custom_def("app_lookup")])
         .expect_err("duplicate custom names rejected");

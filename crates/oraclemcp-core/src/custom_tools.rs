@@ -1529,6 +1529,32 @@ mod tests {
     }
 
     #[test]
+    fn custom_tool_package_preparation_requires_verified_signature() {
+        let mut def = package_def();
+        assert!(matches!(
+            prepare_package_definition(&def, &key()),
+            Err(LoadError::SignatureRequired { .. })
+        ));
+        def.signature = Some(sign(&def, &key()));
+        assert!(prepare_package_definition(&def, &key()).is_ok());
+        def.args[1].max_bytes += 1;
+        assert!(matches!(
+            prepare_package_definition(&def, &key()),
+            Err(LoadError::SignatureInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn custom_tool_refcursor_remains_unavailable_before_bounded_executor() {
+        let mut def = package_def();
+        def.args[0].oracle_type = PackageOracleType::RefCursor;
+        let mut rows = package_argument_rows();
+        replace_argument_cell(&mut rows[0], "DATA_TYPE", "REF CURSOR");
+        assert!(matches!(package_call_wrapper(&def, &rows),
+            Err(LoadError::OutputUnavailable { channel, .. }) if channel == "REF_CURSOR"));
+    }
+
+    #[test]
     fn custom_tool_wrapper_named_notation_quoted() {
         let wrapper = package_call_wrapper(&package_def(), &package_argument_rows()).unwrap();
         assert!(wrapper.sql.contains("omcp_p0 NUMBER;"));

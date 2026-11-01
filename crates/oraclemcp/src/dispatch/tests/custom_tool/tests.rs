@@ -739,3 +739,566 @@ fn custom_package_live_activation_scalar_out_dml_and_fresh_ddl() {
             setup.close(&cx).await.unwrap(); outcome.unwrap();
         }));
 }
+
+fn package_guard_test_context<'a>(
+    dispatcher: &'a OracleDispatcher,
+    state: &'a DispatcherState,
+    cx: &'a Cx,
+    binding: &'a ExecGrantBinding,
+    subject: &'a AuditSubject,
+) -> DbToolCtx<'a> {
+    DbToolCtx {
+        profile_classifier: &state.profile_classifier,
+        cx,
+        conn: state.conn.as_ref(),
+        read_only_backstop: &state.read_only_backstop,
+        checkpoints: &state.checkpoints,
+        request_budget: RequestBudget::from_profile(cx.now(), None),
+        active_profile: state.active_profile.as_deref(),
+        session: &state.level,
+        execute_grants: &state.execute_grants,
+        scoped_grants: &state.scoped_grants,
+        grant_binding: binding,
+        impact_generations: impact_generations(state, DispatchContext::default()),
+        write_intents: None,
+        catalog_cache: &state.catalog_cache,
+        sql_policy: None,
+        sql_policy_provider: None,
+        current_schema: None,
+        audit: AuditCtx {
+            auditor: dispatcher.auditor.as_deref(),
+            subject,
+        },
+        quarantine: &dispatcher.quarantine,
+        edition_creation_reservations: &dispatcher.edition_creation_reservations,
+    }
+}
+
+fn assert_package_level_guard(preflight: bool) {
+    asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .unwrap()
+        .block_on(Box::pin(async move {
+            let cx = Cx::current().unwrap();
+            let dispatcher = OracleDispatcher::new_with_profile_level(
+                Box::new(CaptureCatalog {
+                    capture_at: None,
+                    reads: AtomicUsize::new(0),
+                }),
+                None,
+                SessionLevelState::new(OperatingLevel::ReadWrite, false),
+            );
+            let state = dispatcher.state.lock(&cx).await.unwrap();
+            assert_eq!(state.level.effective_level(), OperatingLevel::ReadOnly);
+            let binding = grant_binding_for_context(&state, DispatchContext::default());
+            let subject = process_audit_subject();
+            let plan = plan();
+            let parsed = package_call_args(&plan, &json!({"x":41})).unwrap();
+            let ctx = package_guard_test_context(&dispatcher, &state, &cx, &binding, &subject);
+            let error = if preflight {
+                // Deliberately bypass preview/dispatch to reach the final
+                // execution guard independently of the earlier level check.
+                let (_, material) =
+                    package_approval(&plan, &parsed, ctx.impact_generations, false).unwrap();
+                run_package_wire(
+                    &ctx,
+                    state.conn.as_ref(),
+                    &plan,
+                    &parsed,
+                    &material,
+                    None,
+                    false,
+                )
+                .await
+                .unwrap_err()
+            } else {
+                dispatcher
+                    .execute_package_call(ctx, &plan, &json!({"x":41}), None)
+                    .await
+                    .unwrap_err()
+            };
+            assert_eq!(
+                error.error_class,
+                ErrorClass::ChallengeRequired,
+                "preflight={preflight}: {error:?}"
+            );
+            assert_eq!(error.statement_outcome, Some(StatementOutcome::NotStarted));
+            assert_eq!(
+                error.suggested_tool.as_deref(),
+                Some("oracle_set_session_level")
+            );
+            assert!(
+                error
+                    .next_steps
+                    .iter()
+                    .any(|step| step.contains("oracle_set_session_level"))
+            );
+        }));
+}
+
+#[test]
+fn custom_tool_write_below_session_level_refuses_preview() {
+    assert_package_level_guard(false);
+}
+
+#[test]
+fn custom_tool_write_below_session_level_refuses_wire_preflight() {
+    assert_package_level_guard(true);
+}
+
+#[test]
+fn custom_tool_ddl_without_commit_refuses_before_preview_token_or_io() {
+    asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .unwrap()
+        .block_on(Box::pin(async {
+            let cx = Cx::current().unwrap();
+            let mut level = SessionLevelState::new(OperatingLevel::Ddl, false);
+            level.set_current_level(OperatingLevel::Ddl).unwrap();
+            let dispatcher = OracleDispatcher::new_with_profile_level(
+                Box::new(CaptureCatalog {
+                    capture_at: None,
+                    reads: AtomicUsize::new(0),
+                }),
+                None,
+                level,
+            );
+            let state = dispatcher.state.lock(&cx).await.unwrap();
+            let binding = grant_binding_for_context(&state, DispatchContext::default());
+            let subject = process_audit_subject();
+            let mut plan = plan();
+            plan.required_level = OperatingLevel::Ddl;
+            plan.effects =
+                oraclemcp_guard::RoutineEffectsV1::new([oraclemcp_guard::RoutineEffect::Ddl]);
+            for request in [json!({"x":41}), json!({"x":41,"commit":false})] {
+                let ctx = package_guard_test_context(&dispatcher, &state, &cx, &binding, &subject);
+                let error = dispatcher
+                    .execute_package_call(ctx, &plan, &request, None)
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.error_class, ErrorClass::InvalidArguments, "{error:?}");
+                assert!(
+                    error.message.contains("irreversible") && error.message.contains("commit=true")
+                );
+                assert_eq!(error.statement_outcome, Some(StatementOutcome::NotStarted));
+            }
+        }));
+}
+
+struct ExactPackageWire {
+    expected_sql: String,
+    calls: Arc<AtomicUsize>,
+}
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for ExactPackageWire {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        panic!("unexpected ping")
+    }
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        panic!("unexpected describe")
+    }
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        panic!("unexpected catalog query")
+    }
+    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        panic!("unexpected candidate execute")
+    }
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        panic!("unexpected commit")
+    }
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        panic!("unexpected rollback")
+    }
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn call_routine(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _args: &[oraclemcp_db::OracleRoutineArg],
+    ) -> Result<oraclemcp_db::ExecuteOutcome, DbError> {
+        assert_eq!(
+            sql, self.expected_sql,
+            "execution must use the exact signed wrapper, with values only in binds"
+        );
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(oraclemcp_db::ExecuteOutcome::new(
+            0,
+            vec![oraclemcp_db::OracleCell::new("NUMBER", Some("42".into()))],
+        ))
+    }
+}
+
+#[test]
+fn custom_tool_wire_receives_exact_plan_wrapper_sql() {
+    asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .unwrap()
+        .block_on(Box::pin(async {
+            let cx = Cx::current().unwrap();
+            let mut plan = plan();
+            plan.required_level = OperatingLevel::ReadOnly;
+            plan.effects = oraclemcp_guard::RoutineEffectsV1::default();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let dispatcher = OracleDispatcher::new(Box::new(ExactPackageWire {
+                expected_sql: plan.wrapper.sql.clone(),
+                calls: Arc::clone(&calls),
+            }));
+            let state = dispatcher.state.lock(&cx).await.unwrap();
+            let binding = grant_binding_for_context(&state, DispatchContext::default());
+            let subject = process_audit_subject();
+            let parsed = package_call_args(&plan, &json!({"x":41})).unwrap();
+            let ctx = package_guard_test_context(&dispatcher, &state, &cx, &binding, &subject);
+            let (_, material) =
+                package_approval(&plan, &parsed, ctx.impact_generations, false).unwrap();
+            let output = run_package_wire(
+                &ctx,
+                state.conn.as_ref(),
+                &plan,
+                &parsed,
+                &material,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+            assert_eq!(output["rows"][0]["result"], "42");
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }));
+}
+
+#[cfg(feature = "plsql-intelligence")]
+#[derive(Clone)]
+struct GuardNativeConnection {
+    inner: Arc<oraclemcp_db::RustOracleConnection>,
+    argument_reads: Arc<AtomicUsize>,
+    drift_from: Arc<AtomicUsize>,
+    candidates: Arc<AtomicUsize>,
+}
+#[cfg(feature = "plsql-intelligence")]
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for GuardNativeConnection {
+    fn backend(&self) -> OracleBackend {
+        self.inner.backend()
+    }
+    async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.ping(cx).await
+    }
+    async fn describe(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        self.inner.describe(cx).await
+    }
+    async fn query_rows(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        // Avoid an extra thin-adapter forwarding poll frame underneath this
+        // test observer; use the identical default serialization options.
+        let mut rows = self
+            .inner
+            .query_rows_with_serialize_options(cx, sql, binds, &SerializeOptions::default())
+            .await?;
+        if sql == CatalogQueryId::MemberArguments.spec().sql {
+            let read = self.argument_reads.fetch_add(1, Ordering::SeqCst) + 1;
+            if read >= self.drift_from.load(Ordering::SeqCst) {
+                // Simulate catalogue evidence changing after approval without
+                // changing the signed routine source or its wire signature.
+                for row in &mut rows {
+                    for (name, cell) in &mut row.columns {
+                        if name == "DEFAULTED" {
+                            *cell = oraclemcp_db::OracleCell::new("VARCHAR2", Some("Y".into()));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(rows)
+    }
+    async fn execute(&self, cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
+        self.inner.execute(cx, sql, binds).await
+    }
+    async fn commit(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.commit(cx).await
+    }
+    async fn rollback(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.rollback(cx).await
+    }
+    async fn close(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.close(cx).await
+    }
+    fn call_timeout(&self) -> Result<Option<Duration>, DbError> {
+        self.inner.call_timeout()
+    }
+    fn set_call_timeout(&self, value: Option<Duration>) -> Result<(), DbError> {
+        self.inner.set_call_timeout(value)
+    }
+    fn request_deadline(&self, cx: &Cx) -> Result<Option<Time>, DbError> {
+        self.inner.request_deadline(cx)
+    }
+    fn set_request_deadline(&self, cx: &Cx, value: Option<Time>) -> Result<(), DbError> {
+        self.inner.set_request_deadline(cx, value)
+    }
+    fn request_quota(&self, cx: &Cx) -> Result<Option<DbRequestQuota>, DbError> {
+        self.inner.request_quota(cx)
+    }
+    fn set_request_quota(&self, cx: &Cx, value: Option<DbRequestQuota>) -> Result<(), DbError> {
+        self.inner.set_request_quota(cx, value)
+    }
+    async fn call_routine(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _args: &[oraclemcp_db::OracleRoutineArg],
+    ) -> Result<oraclemcp_db::ExecuteOutcome, DbError> {
+        self.candidates.fetch_add(1, Ordering::SeqCst);
+        Err(DbError::Execute(
+            "candidate must be refused after changed proof or reused session".into(),
+        ))
+    }
+}
+
+#[cfg(feature = "plsql-intelligence")]
+async fn guard_native_signed(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: &str,
+    package: &str,
+    member: &str,
+    name: &str,
+    return_type: Option<&str>,
+) -> Result<SignedPackageDefinition, String> {
+    let mut source = oraclemcp_db::mutation_closure::read_mutation_routine_source(
+        cx,
+        conn,
+        owner,
+        package,
+        "PACKAGE BODY",
+        Some(member),
+    )
+    .await
+    .map_err(|e| format!("source {member}: {e:?}"))?;
+    source.use_context = oraclemcp_db::mutation_closure::MutationRoutineUse::CustomToolCall;
+    let args = return_type.map_or(
+        r#"[{oracle_name="PX",oracle_type="NUMBER",direction="IN",bind_name="x"}]"#.into(),
+        |ty| format!(r#"[{{oracle_type="{ty}",direction="RETURN",bind_name="result"}}]"#),
+    );
+    let params = if return_type.is_none() {
+        r#"[{name="x",type="integer",required=true}]"#
+    } else {
+        "[]"
+    };
+    let config = format!(
+        "[[tool]]\nname=\"{name}\"\ndescription=\"Native guard fixture\"\nclosure_sha256=\"{}\"\nroutine={{owner=\"{owner}\",package=\"{package}\",member=\"{member}\",subprogram_id={}}}\nargs={args}\nparams={params}\n",
+        "a".repeat(64),
+        source.subprogram_id.unwrap()
+    );
+    let mut def = oraclemcp_core::parse_tools_file(&config)
+        .map_err(|e| e.to_string())?
+        .remove(0);
+    let proof = Box::pin(
+        crate::mutation_closure::EngineMutationEffects
+            .prove_package_call(cx, conn, &source, &def.args),
+    )
+    .await
+    .map_err(|e| format!("effects {member}: {e:?}"))?;
+    def.closure_sha256 = Some(proof.proof.closure_fingerprint);
+    let key = HmacSha256Key::new(b"guard-native-test-key-01234567890123".to_vec()).unwrap();
+    def.signature = Some(oraclemcp_core::sign(&def, &key));
+    oraclemcp_core::prepare_package_definition(&def, &key).map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "plsql-intelligence")]
+async fn guard_native_activation(
+    cx: &Cx,
+    setup: &dyn OracleConnection,
+    options: oraclemcp_db::OracleConnectOptions,
+    owner: &str,
+    package: &str,
+    pure: SignedPackageDefinition,
+) -> Result<(), String> {
+    let key = HmacSha256Key::new(b"guard-native-test-key-01234567890123".to_vec()).unwrap();
+    let mut wrong = pure.definition().clone();
+    wrong.routine.as_mut().unwrap().overload = Some("999".into());
+    wrong.signature = Some(oraclemcp_core::sign(&wrong, &key));
+    let wrong = oraclemcp_core::prepare_package_definition(&wrong, &key).unwrap();
+    let error = collect_package_plan(cx, setup, &wrong, OperatingLevel::Admin, false, false)
+        .await
+        .err()
+        .ok_or("wrong overload admitted")?;
+    if !error
+        .message
+        .contains("overload or definer-rights identity differs")
+    {
+        return Err(format!("wrong overload crossed identity gate: {error:?}"));
+    }
+    let mut high = pure.definition().clone();
+    high.name = "guard_above_ceiling".into();
+    high.declared_level = Some("ADMIN".into());
+    high.signature = Some(oraclemcp_core::sign(&high, &key));
+    let high = oraclemcp_core::prepare_package_definition(&high, &key).unwrap();
+    let error = collect_package_plan(cx, setup, &high, OperatingLevel::ReadWrite, false, false)
+        .await
+        .err()
+        .ok_or("above-ceiling package admitted")?;
+    // The later implicit ceiling check stays defense in depth: DML callbacks
+    // cannot exceed READ_WRITE; DDL triggers admit only ReadDb/SessionState;
+    // source Admin already refuses. No accepted implicit effect can exceed a
+    // passing source's ceiling today. Do not fake such a proof for coverage.
+    if error.error_class != ErrorClass::PolicyDenied
+        || error.message != "custom routine exceeds the profile ceiling"
+    {
+        return Err(format!("first ceiling gate missing: {error:?}"));
+    }
+    let cursor = guard_native_signed(
+        cx,
+        setup,
+        owner,
+        package,
+        "RC",
+        "guard_deferred_cursor",
+        Some("REF_CURSOR"),
+    )
+    .await?;
+    let catalog = CustomToolCatalog::with_pending(Vec::new(), vec![pure, high, cursor]);
+    let native = oraclemcp_db::RustOracleConnection::connect(cx, options)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(native),
+        None,
+        SessionLevelState::new(OperatingLevel::ReadWrite, false),
+    );
+    dispatcher.state.get_mut().unwrap().custom_catalog = ActiveCustomCatalog::new(2, catalog);
+    let surface = dispatcher
+        .surface_state_with_cx(cx, DispatchContext::default(), McpSurfaceDetail::LevelOnly)
+        .await
+        .map_err(|e| e.message)?;
+    let names: Vec<_> = surface
+        .custom_catalog
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    if names != ["guard_pure"] {
+        return Err(format!(
+            "unproven output/ceiling definition advertised: {names:?}"
+        ));
+    }
+    let state = dispatcher.state.lock(cx).await.unwrap();
+    close_conn_cleanup(cx, state.conn.as_ref())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(feature = "plsql-intelligence")]
+fn run_native_package_guard_case(case: &str) {
+    use oraclemcp_audit::{MemoryAuditSink, SigningKey};
+    use oraclemcp_db::{OracleConnectOptions, RustOracleConnection};
+    let options = OracleConnectOptions {
+        connect_string: std::env::var("ORACLEMCP_TEST_DSN").unwrap(),
+        username: Some(std::env::var("ORACLEMCP_TEST_USER").unwrap()),
+        password: Some(std::env::var("ORACLEMCP_TEST_PASSWORD").unwrap()),
+        call_timeout: Some(Duration::from_secs(20)),
+        ..Default::default()
+    };
+    assert!(
+        options.connect_string.starts_with("localhost:")
+            || options.connect_string.starts_with("127.0.0.1:")
+    );
+    let reactor = asupersync::runtime::reactor::create_reactor().unwrap();
+    asupersync::runtime::RuntimeBuilder::current_thread().with_reactor(reactor).build().unwrap().block_on(Box::pin(async move{
+        let cx=Cx::current().unwrap();
+        let setup=RustOracleConnection::connect(&cx,options.clone()).await.unwrap();
+        let context=oraclemcp_db::read_catalog_resolve_context(&cx,&setup,Default::default(),Default::default()).await.unwrap();
+        let owner=&context.connected_schema;
+        let nonce=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+        let package=format!("OMCP_GP_{nonce:X}");let table=format!("OMCP_GT_{nonce:X}");let created=format!("OMCP_GD_{nonce:X}");
+        let outcome:Result<(),String>=Box::pin(async{
+            setup.execute(&cx,&format!("CREATE TABLE {owner}.{table}(ID NUMBER)"),&[]).await.map_err(|e|e.to_string())?;
+            setup.execute(&cx,&format!("CREATE PACKAGE {owner}.{package} AUTHID DEFINER AS FUNCTION F RETURN NUMBER; FUNCTION RC RETURN SYS_REFCURSOR; PROCEDURE W(PX NUMBER); PROCEDURE D(PX NUMBER); END;"),&[]).await.map_err(|e|e.to_string())?;
+            setup.execute(&cx,&format!("CREATE PACKAGE BODY {owner}.{package} AS FUNCTION F RETURN NUMBER IS BEGIN RETURN 42; END; FUNCTION RC RETURN SYS_REFCURSOR IS BEGIN RETURN NULL; END; PROCEDURE W(PX NUMBER) IS BEGIN INSERT INTO {owner}.{table}(ID) VALUES(PX); END; PROCEDURE D(PX NUMBER) IS BEGIN EXECUTE IMMEDIATE 'CREATE TABLE {owner}.{created}(ID NUMBER)'; END; END;"),&[]).await.map_err(|e|e.to_string())?;
+            let pure=guard_native_signed(&cx,&setup,owner,&package,"F","guard_pure",Some("NUMBER")).await?;
+            if case=="activation"{
+                return Box::pin(guard_native_activation(&cx,&setup,options.clone(),owner,&package,pure)).await;
+            }
+            let member=if case=="in_session_drift"{"W"}else{"D"};
+            let signed=guard_native_signed(&cx,&setup,owner,&package,member,"guard_revalidation",None).await?;
+            let reads=Arc::new(AtomicUsize::new(0));let drift=Arc::new(AtomicUsize::new(usize::MAX));let candidates=Arc::new(AtomicUsize::new(0));
+            let primary=Arc::new(RustOracleConnection::connect(&cx,options.clone()).await.map_err(|e|e.to_string())?);
+            let connection=GuardNativeConnection{inner:Arc::clone(&primary),argument_reads:Arc::clone(&reads),drift_from:Arc::clone(&drift),candidates:Arc::clone(&candidates)};
+            let factory_connection=connection.clone();let factory_options=options.clone();let same=case=="same_sid";
+            let connector:Arc<ProfileConnector>=Arc::new(move|cx,_profile|{
+                let mut connection=factory_connection.clone();let options=factory_options.clone();
+                Box::pin(async move{
+                    if !same{connection.inner=Arc::new(RustOracleConnection::connect(cx,options).await?);}
+                    Ok(ProfileConnectionBundle::new(Box::new(connection),None))
+                })
+            });
+            let mut level=SessionLevelState::new(OperatingLevel::Ddl,false);level.set_current_level(OperatingLevel::Ddl).unwrap();
+            let auditor=Arc::new(Auditor::new(Box::new(MemoryAuditSink::new()),SigningKey::new("guard-native",b"guard-native-audit-key-012345678901".to_vec()).unwrap()));
+            let dispatcher=OracleDispatcher::new_switchable_with_custom_tools(Box::new(connection),Some("native-guard".into()),level,connector,CustomToolCatalog::with_pending(Vec::new(),vec![signed]),None).with_auditor(auditor);
+            let state=dispatcher.state.lock(&cx).await.unwrap();
+            let signed=&state.custom_catalog.catalog.pending()[0];
+            let plan=Box::pin(collect_package_plan(&cx,state.conn.as_ref(),signed,state.level.max_level(),false,false)).await.map_err(|e|format!("initial plan: {e:?}"))?;
+            let binding=grant_binding_for_context(&state,DispatchContext::default());
+            let subject=process_audit_subject();
+            let request=json!({"x":41,"commit":member=="D"});
+            // Exercise the in-process execution guard directly. The existing
+            // native dispatch test independently covers the transport path;
+            // this observer adds no dispatch poll frames to the catalogue walk.
+            let ctx=package_guard_test_context(&dispatcher,&state,&cx,&binding,&subject);
+            let preview=Box::pin(dispatcher.execute_package_call(ctx,&plan,&request,state.profile_generation.as_ref())).await.map_err(|e|format!("preview: {e:?}"))?;
+            let token=preview["confirmation_token"].as_str().ok_or_else(||format!("preview has no token: {preview}"))?;
+            if case!="same_sid"{drift.store(reads.load(Ordering::SeqCst)+2,Ordering::SeqCst);}
+            let mut apply=request;apply["confirm"]=json!(token);
+            let ctx=package_guard_test_context(&dispatcher,&state,&cx,&binding,&subject);
+            let error=Box::pin(dispatcher.execute_package_call(ctx,&plan,&apply,state.profile_generation.as_ref())).await.err().ok_or("unsafe apply reached success")?;
+            if case=="same_sid"{
+                if !error.message.contains("fresh DDL session identity is unproven"){return Err(format!("same SID identity boundary missing: {error:?}"));}
+            }else if error.error_class!=ErrorClass::RepreviewRequired{return Err(format!("post-consume drift was not refused: {error:?}"));}
+            if candidates.load(Ordering::SeqCst)!=0{return Err("candidate reached wire after proof/identity failure".into());}
+            let _=close_conn_cleanup(&cx,state.conn.as_ref()).await;
+            Ok(())
+        }).await;
+        for sql in [format!("DROP PACKAGE {owner}.{package}"),format!("DROP TABLE {owner}.{created} PURGE"),format!("DROP TABLE {owner}.{table} PURGE")]{
+            if let Err(error)=setup.execute(&cx,&sql,&[]).await && ![Some(4043),Some(942)].contains(&error.clone().into_envelope().ora_code){panic!("guard fixture cleanup failed: {error}");}
+        }
+        setup.close(&cx).await.unwrap();outcome.unwrap();
+    }));
+}
+
+#[cfg(feature = "plsql-intelligence")]
+#[test]
+#[ignore = "requires a local Oracle lab; creates run-owned guard fixtures"]
+fn custom_tool_live_activation_rejects_overload_ceiling_and_deferred_cursor() {
+    run_native_package_guard_case("activation");
+}
+#[cfg(feature = "plsql-intelligence")]
+#[test]
+#[ignore = "requires a local Oracle lab; adversarial metadata changes after token consumption"]
+fn custom_tool_live_post_consume_facts_drift_refuses_in_session() {
+    run_native_package_guard_case("in_session_drift");
+}
+#[cfg(feature = "plsql-intelligence")]
+#[test]
+#[ignore = "requires a local Oracle lab; adversarial metadata changes after token consumption"]
+fn custom_tool_live_post_consume_facts_drift_refuses_isolated() {
+    run_native_package_guard_case("isolated_drift");
+}
+#[cfg(feature = "plsql-intelligence")]
+#[test]
+#[ignore = "requires a local Oracle lab; the connection factory deliberately returns the primary session"]
+fn custom_tool_live_isolated_session_must_differ_from_primary() {
+    run_native_package_guard_case("same_sid");
+}
