@@ -223,15 +223,20 @@ pub(super) fn run_http_proxy(
                 }
                 return Ok(ExitCode::from(code as u8));
             }
+            let mut stderr = std::io::stderr().lock();
             if robot_json {
-                eprintln!("{frame}");
+                diagnostic_line(&mut stderr, format_args!("{frame}"));
             } else if frame["kind"] == "status" {
-                eprintln!(
-                    "oraclemcp serve: {} transport listening on {}",
-                    frame["transport"].as_str().unwrap_or("http"),
-                    frame["listen"].as_str().unwrap_or(listen)
+                diagnostic_line(
+                    &mut stderr,
+                    format_args!(
+                        "oraclemcp serve: {} transport listening on {}",
+                        frame["transport"].as_str().unwrap_or("http"),
+                        frame["listen"].as_str().unwrap_or(listen)
+                    ),
                 );
             }
+            drop(stderr);
             if frame["kind"] == "status" {
                 readiness::notify_systemd_ready();
             }
@@ -240,12 +245,19 @@ pub(super) fn run_http_proxy(
     match result {
         Ok(code) => code,
         Err(error) => {
+            let mut stderr = std::io::stderr().lock();
             if robot_json {
-                eprintln!("{}", serde_json::json!({"kind":"error","error":error}));
+                diagnostic_line(
+                    &mut stderr,
+                    format_args!("{}", serde_json::json!({"kind":"error","error":error})),
+                );
             } else {
-                eprintln!(
-                    "oraclemcp HTTP proxy: {:?}: {}",
-                    error.error_class, error.message
+                diagnostic_line(
+                    &mut stderr,
+                    format_args!(
+                        "oraclemcp HTTP proxy: {:?}: {}",
+                        error.error_class, error.message
+                    ),
                 );
             }
             ExitCode::from(2)
@@ -873,8 +885,33 @@ pub(super) fn broker_exit_code(result: Result<(), ErrorEnvelope>) -> ExitCode {
     }
 }
 
+/// Write one launcher diagnostic line. Diagnostics are best-effort: the
+/// spawning client may close its stderr while the broker keeps serving, and
+/// `eprintln!` would panic on the resulting EPIPE and take the launcher, and
+/// with it the HTTP service, down (oraclemcp-w6269).
+fn diagnostic_line(out: &mut impl std::io::Write, line: std::fmt::Arguments<'_>) {
+    let _ = out.write_fmt(line);
+    let _ = out.write_all(b"\n");
+    let _ = out.flush();
+}
+
 #[cfg(test)]
 mod tests {
+    /// A closed diagnostic pipe must never panic the launcher (oraclemcp-w6269).
+    #[test]
+    fn launcher_diagnostics_survive_a_closed_stderr_pipe() {
+        struct ClosedPipe;
+        impl std::io::Write for ClosedPipe {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+        super::diagnostic_line(&mut ClosedPipe, format_args!("{}", "status"));
+    }
+
     use super::*;
 
     #[test]

@@ -1455,6 +1455,14 @@ fn http_stdio_coexistence(stdio_first: bool, kill_frontend: bool, undrained_diag
         }
     }
     let mut process = HttpProcess(process);
+    if !stdio_first && !kill_frontend && !undrained_diagnostics {
+        // Lose the spawning client's diagnostic pipe before startup finishes,
+        // so the launcher's ready/status line is always written into a closed
+        // pipe. Diagnostics are best-effort: the broker must keep serving
+        // (oraclemcp-w6269). Holding an unread pipe open instead can fill it
+        // with real connection diagnostics and block the fixture.
+        drop(process.0.stderr.take());
+    }
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
         if TcpStream::connect(address).is_ok() {
@@ -1469,12 +1477,6 @@ fn http_stdio_coexistence(stdio_first: bool, kill_frontend: bool, undrained_diag
         }
         assert!(std::time::Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(25));
-    }
-    if !stdio_first && !kill_frontend && !undrained_diagnostics {
-        // Exercise loss of the spawning client's diagnostic pipe while its
-        // broker is still serving. Holding an unread pipe open instead can
-        // fill it with real connection diagnostics and block the fixture.
-        drop(process.0.stderr.take());
     }
     if !stdio_first {
         for index in 0..2 {
