@@ -1028,7 +1028,7 @@ log_pass "checksum sidecars are bound to the selected archive"
 # The planned unit follows the host service manager (install.sh
 # service_unit_path): systemd user units on Linux, LaunchAgents on macOS.
 if [ "$(uname -s)" = "Darwin" ]; then
-  EXPECTED_UNIT="$HOME_DIR/Library/LaunchAgents/io.github.MuhDur.oraclemcp.plist"
+  EXPECTED_UNIT="$HOME_DIR/Library/LaunchAgents/io.github.MuhDur.oraclemcp.plist" # honesty-allow: launchd label, not an install channel
   EXPECTED_NAMED_UNIT="$HOME_DIR/Library/LaunchAgents/oraclemcp.service.plist"
 else
   EXPECTED_UNIT="$CONFIG_HOME/systemd/user/oraclemcp.service"
