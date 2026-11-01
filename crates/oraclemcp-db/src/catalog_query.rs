@@ -308,6 +308,8 @@ macro_rules! dependents_frontier_sql {
     ($visibility:expr, $sources:ident) => {
         // Keep ID and name lookup branches disjoint. Explicit null guards let
         // Oracle prune the unused dictionary scan for each requested object.
+        // Push the bounded name predicates into ALL_OBJECTS rather than
+        // materializing the dictionary before joining the requested names.
         concat!(
             r#"SELECT * FROM (WITH requested AS (
   SELECT j.object_id, j.owner, j.name, j.object_type
@@ -320,20 +322,28 @@ macro_rules! dependents_frontier_sql {
   FROM requested r JOIN SYS.all_objects o ON r.object_id = o.object_id
   WHERE r.object_id IS NOT NULL AND o.subobject_name IS NULL
   UNION
-  SELECT o.owner, o.object_name, o.object_type, o.object_id, o.status, o.last_ddl_time
+  SELECT /*+ PUSH_PRED(o) */ o.owner, o.object_name, o.object_type, o.object_id, o.status, o.last_ddl_time
   FROM requested r JOIN SYS.all_objects o
     ON r.owner = o.owner AND r.name = o.object_name AND r.object_type = o.object_type
   WHERE r.object_id IS NULL AND o.subobject_name IS NULL
+), dependency_links AS (
+  SELECT d.owner, d.name, d.type, d.referenced_owner, d.referenced_name,
+         d.referenced_type, d.referenced_link_name, d.dependency_type
+  FROM SYS.all_dependencies d JOIN frontier f
+    ON d.owner = f.owner AND d.name = f.object_name AND d.type = f.object_type
+  UNION ALL
+  SELECT d.owner, d.name, d.type, d.referenced_owner, d.referenced_name,
+         d.referenced_type, d.referenced_link_name, d.dependency_type
+  FROM SYS.all_dependencies d JOIN frontier f
+    ON (d.referenced_owner = f.owner OR d.referenced_owner IS NULL)
+      AND d.referenced_name = f.object_name
+      AND (d.referenced_type = f.object_type OR d.referenced_type IS NULL
+        OR d.referenced_type = 'NON-EXISTENT')
 ), dependencies AS (
   SELECT DISTINCT d.owner, d.name, d.type, d.referenced_owner, d.referenced_name,
          d.referenced_type, d.referenced_link_name, d.dependency_type,
          t.object_id AS referenced_object_id
-  FROM SYS.all_dependencies d JOIN frontier f
-    ON (d.owner = f.owner AND d.name = f.object_name AND d.type = f.object_type)
-    OR ((d.referenced_owner = f.owner OR d.referenced_owner IS NULL)
-      AND d.referenced_name = f.object_name
-      AND (d.referenced_type = f.object_type OR d.referenced_type IS NULL
-        OR d.referenced_type = 'NON-EXISTENT'))
+  FROM dependency_links d
   LEFT JOIN SYS.all_objects t ON d.referenced_link_name IS NULL
     AND t.owner = d.referenced_owner AND t.object_name = d.referenced_name
     AND t.object_type = d.referenced_type AND t.subobject_name IS NULL
@@ -3462,6 +3472,44 @@ mod dictionary_shadow_live_tests {
         live_shadow_contract(false);
     }
 
+    fn canonical(rows: &[OracleRow]) -> Vec<String> {
+        let mut rows: Vec<_> = rows
+            .iter()
+            .map(|row| serde_json::to_string(row).unwrap())
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    // Frozen pre-optimization join. The native comparison must retain an
+    // independent reference when either lookup direction changes.
+    fn legacy_dependency_lookup(sql: &str) -> String {
+        let sql = sql.replace("SELECT /*+ PUSH_PRED(o) */", "SELECT");
+        let Some(start) = sql.find("), dependency_links AS (") else {
+            return sql;
+        };
+        let end = sql.find("), bounded_dependencies AS (").unwrap();
+        format!(
+            "{}{}{}",
+            &sql[..start],
+            r#"), dependencies AS (
+  SELECT DISTINCT d.owner, d.name, d.type, d.referenced_owner, d.referenced_name,
+         d.referenced_type, d.referenced_link_name, d.dependency_type,
+         t.object_id AS referenced_object_id
+  FROM SYS.all_dependencies d JOIN frontier f
+    ON (d.owner = f.owner AND d.name = f.object_name AND d.type = f.object_type)
+    OR ((d.referenced_owner = f.owner OR d.referenced_owner IS NULL)
+      AND d.referenced_name = f.object_name
+      AND (d.referenced_type = f.object_type OR d.referenced_type IS NULL
+        OR d.referenced_type = 'NON-EXISTENT'))
+  LEFT JOIN SYS.all_objects t ON d.referenced_link_name IS NULL
+    AND t.owner = d.referenced_owner AND t.object_name = d.referenced_name
+    AND t.object_type = d.referenced_type AND t.subobject_name IS NULL
+"#,
+            &sql[end..]
+        )
+    }
+
     async fn source_projection_rows(
         cx: &Cx,
         conn: &dyn OracleConnection,
@@ -3497,17 +3545,17 @@ mod dictionary_shadow_live_tests {
             let expected = run_catalog_query(cx, conn, original, &binds)
                 .await
                 .map_err(|error| error.to_string())?;
-            let canonical = |rows: &[OracleRow]| {
-                let mut rows: Vec<_> = rows
-                    .iter()
-                    .map(|row| serde_json::to_string(row).unwrap())
-                    .collect();
-                rows.sort();
-                rows
-            };
             check(
                 canonical(&rows) == canonical(&expected),
                 &format!("{kind} {name}: optimized source projection differs from ALL_*"),
+            )?;
+            let legacy = conn
+                .query_rows(cx, &legacy_dependency_lookup(optimized.spec().sql), &binds)
+                .await
+                .map_err(|error| error.to_string())?;
+            check(
+                canonical(&rows) == canonical(&legacy),
+                &format!("{kind} {name}: directional lookups changed dependency facts"),
             )?;
             check(
                 rows.iter().any(|row| {
@@ -3522,11 +3570,107 @@ mod dictionary_shadow_live_tests {
         Ok(last)
     }
 
-    #[test]
-    #[ignore = "requires a local Oracle lab admin; creates and drops one isolated source schema"]
-    fn owning_source_projection_matches_all_sources_across_schema_and_caps() {
+    async fn logical_reads(cx: &Cx, admin: &dyn OracleConnection, sid: i64) -> Result<i64, String> {
+        let rows = admin
+            .query_rows(
+                cx,
+                "SELECT s.value FROM SYS.v_$sesstat s JOIN SYS.v_$statname n \
+             ON s.statistic#=n.statistic# WHERE s.sid=:1 AND n.name='session logical reads'",
+                &[OracleBind::I64(sid)],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        rows.first()
+            .and_then(|row| row.parse_i64("VALUE"))
+            .ok_or_else(|| "native logical-read counter unavailable".into())
+    }
+
+    async fn dependency_lookup_work(
+        cx: &Cx,
+        admin: &dyn OracleConnection,
+        conn: &dyn OracleConnection,
+        owner: &str,
+    ) -> Result<(), String> {
+        let sid = conn
+            .query_rows(
+                cx,
+                "SELECT SYS_CONTEXT('USERENV','SID') AS sid FROM SYS.dual",
+                &[],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let sid = sid
+            .first()
+            .and_then(|row| row.parse_i64("SID"))
+            .ok_or("native session identity unavailable")?;
+        let mixed = serde_json::json!([
+            {"owner": owner, "name": "BASE_DATA", "type": "TABLE"},
+            {"owner": owner, "name": "PKG_SOURCE", "type": "PACKAGE"},
+            {"owner": owner, "name": "PKG_SOURCE", "type": "PACKAGE BODY"},
+            {"owner": owner, "name": "P_CALLER", "type": "PROCEDURE"}
+        ]);
+        let mut maximum = Vec::new();
+        for index in 0..32 {
+            let name = format!("LOOKUP_ROOT_{index:02}");
+            conn.execute(cx, &format!("CREATE TABLE {name} (id NUMBER)"), &[])
+                .await
+                .map_err(|error| error.to_string())?;
+            maximum.push(serde_json::json!({"owner": owner, "name": name, "type": "TABLE"}));
+        }
+        // Cover the maximum named-root frontier as well as overlapping and
+        // one-direction-only edges. A faster single-root plan must also scale.
+        for roots in [mixed, serde_json::Value::Array(maximum)] {
+            let binds = [
+                OracleBind::String(roots.to_string()),
+                OracleBind::I64(8001),
+                OracleBind::I64(4097),
+            ];
+            let sql = CatalogQueryId::DependentsTransitiveVisible.spec().sql;
+            let legacy = legacy_dependency_lookup(sql);
+            let mut expected = None;
+            let mut reads = [Vec::new(), Vec::new()];
+            // Warm both cursors, then compare session-local work rather than a
+            // wall-clock threshold affected by the shared host's other lanes.
+            for pass in 0..4 {
+                for (index, statement) in [legacy.as_str(), sql].into_iter().enumerate() {
+                    let before = logical_reads(cx, admin, sid).await?;
+                    let rows = conn
+                        .query_rows(cx, statement, &binds)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let used = logical_reads(cx, admin, sid).await? - before;
+                    let rows = canonical(&rows);
+                    if let Some(expected) = &expected {
+                        check(&rows == expected, "work comparison changed dependency rows")?;
+                    } else {
+                        expected = Some(rows);
+                    }
+                    if pass > 0 {
+                        reads[index].push(used);
+                    }
+                }
+            }
+            reads.iter_mut().for_each(|values| values.sort_unstable());
+            let (legacy, optimized) = (reads[0][1], reads[1][1]);
+            eprintln!(
+                "FREE23 dependency reads: roots={}, legacy={legacy}, optimized={optimized}",
+                roots.as_array().unwrap().len()
+            );
+            check(
+                legacy > 0 && optimized * 2 <= legacy,
+                "directional lookup must reduce native session logical reads by at least50%",
+            )?;
+        }
+        Ok(())
+    }
+
+    fn live_source_projection_contract(check_work: bool) {
         let dsn = std::env::var("ORACLEMCP_TEST_DSN").expect("local lab DSN required");
         assert!(dsn.starts_with("localhost:") || dsn.starts_with("127.0.0.1:"));
+        assert!(
+            !check_work || dsn.to_ascii_uppercase().contains("FREEPDB1"),
+            "the work regression uses the FREE23 fixture"
+        );
         let options = crate::OracleConnectOptions {
             connect_string: dsn,
             username: Some(std::env::var("ORACLEMCP_TEST_USER").expect("lab admin user")),
@@ -3561,6 +3705,7 @@ mod dictionary_shadow_live_tests {
                 for sql in [
                     "CREATE TABLE BASE_DATA (id NUMBER)",
                     "CREATE PROCEDURE P_SOURCE AS\nBEGIN\n NULL; -- SOURCE_PROOF_CANARY č\nEND;",
+                    "CREATE PROCEDURE P_CALLER AS BEGIN P_SOURCE; END;",
                     "CREATE FUNCTION F_SOURCE RETURN NUMBER AS BEGIN RETURN 3; END;",
                     "CREATE PACKAGE PKG_SOURCE AS FUNCTION f RETURN NUMBER; END;",
                     "CREATE PACKAGE BODY PKG_SOURCE AS FUNCTION f RETURN NUMBER AS BEGIN RETURN 3; END; END;",
@@ -3574,6 +3719,15 @@ mod dictionary_shadow_live_tests {
                     .collect::<Vec<_>>().join(", ");
                 conn.execute(&cx, &format!("CREATE VIEW WIDE_SOURCE AS SELECT {columns} FROM BASE_DATA"), &[])
                     .await.map_err(|error| error.to_string())?;
+                if check_work {
+                    // Reproduce the FREE23 CI app's effective role. The source
+                    // projection checks below retain their catalog-reader role.
+                    admin.execute(&cx, &format!("GRANT DB_DEVELOPER_ROLE TO {owner}"), &[])
+                        .await.map_err(|error| error.to_string())?;
+                    conn.execute(&cx, "SET ROLE DB_DEVELOPER_ROLE", &[])
+                        .await.map_err(|error| error.to_string())?;
+                    return dependency_lookup_work(&cx, admin.as_ref(), conn.as_ref(), &owner).await;
+                }
                 for (name, kind, canary) in [
                     ("P_SOURCE", "PROCEDURE", "SOURCE_PROOF_CANARY č"),
                     ("F_SOURCE", "FUNCTION", "RETURN 3"),
@@ -3603,6 +3757,17 @@ mod dictionary_shadow_live_tests {
                     && row.parse_i64("SOURCE_LENGTH").is_some_and(|length|
                         length > row.text("TEXT").unwrap_or_default().len() as i64)),
                     "a truncated view must retain its original byte-length evidence")?;
+                conn.execute(&cx, "CREATE PROCEDURE \"p_source\" AS BEGIN NULL; END;", &[])
+                    .await.map_err(|error| error.to_string())?;
+                conn.execute(&cx, "ALTER SESSION SET NLS_COMP=LINGUISTIC", &[])
+                    .await.map_err(|error| error.to_string())?;
+                conn.execute(&cx, "ALTER SESSION SET NLS_SORT=BINARY_CI", &[])
+                    .await.map_err(|error| error.to_string())?;
+                source_projection_rows(&cx, conn.as_ref(), &owner, "P_SOURCE", "PROCEDURE", 4097).await?;
+                conn.execute(&cx, "ALTER SESSION SET NLS_COMP=BINARY", &[])
+                    .await.map_err(|error| error.to_string())?;
+                conn.execute(&cx, "ALTER SESSION SET NLS_SORT=BINARY", &[])
+                    .await.map_err(|error| error.to_string())?;
                 conn.execute(&cx, "ALTER SESSION SET CURRENT_SCHEMA=SYS", &[]).await
                     .map_err(|error| error.to_string())?;
                 for (name, kind) in [("P_SOURCE", "PROCEDURE"), ("V_SOURCE", "VIEW")] {
@@ -3620,6 +3785,18 @@ mod dictionary_shadow_live_tests {
             assert!(admin_close.is_ok(), "admin connection cleanup failed");
             result.expect("native source projection equivalence");
         });
+    }
+
+    #[test]
+    #[ignore = "requires a local Oracle lab admin; creates and drops one isolated source schema"]
+    fn owning_source_projection_matches_all_sources_across_schema_and_caps() {
+        live_source_projection_contract(false);
+    }
+
+    #[test]
+    #[ignore = "requires local FREE23 admin; compares real session work in one disposable schema"]
+    fn dependency_direction_lookups_preserve_rows_and_reduce_reads() {
+        live_source_projection_contract(true);
     }
 }
 
