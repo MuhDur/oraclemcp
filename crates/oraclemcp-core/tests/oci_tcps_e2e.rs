@@ -248,6 +248,10 @@ fn spawn_optional_tcps_terminator(
                 let finished = !matches!(client_done.try_recv(), Err(mpsc::TryRecvError::Empty));
                 match listener.accept() {
                     Ok((sock, peer)) => {
+                        // BSD/macOS accepted sockets inherit the listener's
+                        // O_NONBLOCK; the TLS handshake needs blocking reads.
+                        sock.set_nonblocking(false)
+                            .map_err(|err| format!("set accepted socket blocking: {err}"))?;
                         return observe_tcps_connection(sock, peer, config).map(Some);
                     }
                     Err(err) if err.kind() == ErrorKind::WouldBlock => {
