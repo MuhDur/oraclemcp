@@ -766,6 +766,42 @@ pub struct ImpactDecisiveDetail {
     pub reason: String,
 }
 
+/// The specific output budget that stopped materialization or serialization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OutputLimitKind {
+    /// The cursor has more rows than the admitted page.
+    RowLimit,
+    /// The compact serialized row payload exhausted its byte budget.
+    ByteLimit,
+    /// The cursor's rows would exceed the admitted cell count.
+    CellLimit,
+    /// Another nested cursor would exceed the admitted depth.
+    DepthLimit,
+    /// One scalar value exceeded its signed byte budget.
+    ScalarByteLimit,
+    /// More DBMS_OUTPUT lines exist than the admitted capture.
+    LineLimit,
+    /// Oracle exhausted its bounded session output buffer.
+    ServerBufferLimit,
+    /// One DBMS_OUTPUT line exceeded Oracle's 32767-byte maximum.
+    ServerLineLimit,
+    /// The wire supplied a prefix: bytes for binary, characters for text.
+    WireValueLimit,
+}
+
+/// Typed evidence of a cap; omitted values are never presented as complete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputTruncation {
+    /// Budget which stopped the channel.
+    pub kind: OutputLimitKind,
+    /// Admitted budget in the units named by `kind`.
+    pub limit: usize,
+    /// Observed size when known; `None` preserves uncertainty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed: Option<usize>,
+}
+
 /// The actionable, agent-facing error payload (plan §8.2).
 ///
 /// `is_error` is serialized as `isError` to match the MCP tool-result shape.
@@ -813,6 +849,9 @@ pub struct ErrorEnvelope {
     /// Proven state of an MCP cancellation request.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cancel_outcome: Option<CancelOutcome>,
+    /// The output channel cap hit by a database-side failure.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub output_truncation: Option<OutputTruncation>,
 }
 
 impl ErrorEnvelope {
@@ -834,6 +873,7 @@ impl ErrorEnvelope {
             impact_decisive: None,
             statement_outcome: None,
             cancel_outcome: None,
+            output_truncation: None,
         }
     }
 
@@ -1198,6 +1238,48 @@ pub type Result<T> = std::result::Result<T, OracleMcpError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_caps_roundtrip_without_inventing_an_observed_size() {
+        let mut error = ErrorEnvelope::new(
+            ErrorClass::RuntimeStateRequired,
+            "bounded output unavailable",
+        );
+        assert!(
+            serde_json::to_value(&error)
+                .unwrap()
+                .get("output_truncation")
+                .is_none()
+        );
+        for (kind, wire, limit) in [
+            (
+                OutputLimitKind::ServerBufferLimit,
+                "SERVER_BUFFER_LIMIT",
+                2_000,
+            ),
+            (
+                OutputLimitKind::ServerLineLimit,
+                "SERVER_LINE_LIMIT",
+                32_767,
+            ),
+            (OutputLimitKind::WireValueLimit, "WIRE_VALUE_LIMIT", 32_767),
+        ] {
+            error.output_truncation = Some(OutputTruncation {
+                kind,
+                limit,
+                observed: None,
+            });
+            let value = serde_json::to_value(&error).unwrap();
+            assert_eq!(
+                value["output_truncation"],
+                serde_json::json!({"kind":wire,"limit":limit})
+            );
+            assert_eq!(
+                serde_json::from_value::<ErrorEnvelope>(value).unwrap(),
+                error
+            );
+        }
+    }
 
     #[test]
     fn operator_only_statement_reason_has_stable_wire_name() {

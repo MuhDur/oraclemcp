@@ -220,6 +220,59 @@ impl<T> core::clone::CloneToUninit for oraclemcp_error::OracleRetryAction where 
 pub unsafe fn oraclemcp_error::OracleRetryAction::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for oraclemcp_error::OracleRetryAction
 pub fn oraclemcp_error::OracleRetryAction::from(T) -> T
+pub enum oraclemcp_error::OutputLimitKind
+pub oraclemcp_error::OutputLimitKind::ByteLimit
+pub oraclemcp_error::OutputLimitKind::CellLimit
+pub oraclemcp_error::OutputLimitKind::DepthLimit
+pub oraclemcp_error::OutputLimitKind::LineLimit
+pub oraclemcp_error::OutputLimitKind::RowLimit
+pub oraclemcp_error::OutputLimitKind::ScalarByteLimit
+pub oraclemcp_error::OutputLimitKind::ServerBufferLimit
+pub oraclemcp_error::OutputLimitKind::ServerLineLimit
+pub oraclemcp_error::OutputLimitKind::WireValueLimit
+impl core::clone::Clone for oraclemcp_error::OutputLimitKind
+pub fn oraclemcp_error::OutputLimitKind::clone(&self) -> oraclemcp_error::OutputLimitKind
+impl core::cmp::Eq for oraclemcp_error::OutputLimitKind
+impl core::cmp::PartialEq for oraclemcp_error::OutputLimitKind
+pub fn oraclemcp_error::OutputLimitKind::eq(&self, &oraclemcp_error::OutputLimitKind) -> bool
+impl core::fmt::Debug for oraclemcp_error::OutputLimitKind
+pub fn oraclemcp_error::OutputLimitKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_error::OutputLimitKind
+impl core::marker::StructuralPartialEq for oraclemcp_error::OutputLimitKind
+impl serde_core::ser::Serialize for oraclemcp_error::OutputLimitKind
+pub fn oraclemcp_error::OutputLimitKind::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_error::OutputLimitKind
+pub fn oraclemcp_error::OutputLimitKind::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_error::OutputLimitKind
+impl core::marker::Send for oraclemcp_error::OutputLimitKind
+impl core::marker::Sync for oraclemcp_error::OutputLimitKind
+impl core::marker::Unpin for oraclemcp_error::OutputLimitKind
+impl core::marker::UnsafeUnpin for oraclemcp_error::OutputLimitKind
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_error::OutputLimitKind
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_error::OutputLimitKind
+impl<T, U> core::convert::Into<U> for oraclemcp_error::OutputLimitKind where U: core::convert::From<T>
+pub fn oraclemcp_error::OutputLimitKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_error::OutputLimitKind where U: core::convert::Into<T>
+pub type oraclemcp_error::OutputLimitKind::Error = core::convert::Infallible
+pub fn oraclemcp_error::OutputLimitKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_error::OutputLimitKind where U: core::convert::TryFrom<T>
+pub type oraclemcp_error::OutputLimitKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_error::OutputLimitKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_error::OutputLimitKind where T: core::clone::Clone
+pub type oraclemcp_error::OutputLimitKind::Owned = T
+pub fn oraclemcp_error::OutputLimitKind::clone_into(&self, &mut T)
+pub fn oraclemcp_error::OutputLimitKind::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_error::OutputLimitKind where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_error::OutputLimitKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_error::OutputLimitKind where T: ?core::marker::Sized
+pub fn oraclemcp_error::OutputLimitKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_error::OutputLimitKind where T: ?core::marker::Sized
+pub fn oraclemcp_error::OutputLimitKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_error::OutputLimitKind where T: core::clone::Clone
+pub unsafe fn oraclemcp_error::OutputLimitKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_error::OutputLimitKind
+pub fn oraclemcp_error::OutputLimitKind::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_error::OutputLimitKind where T: for<'de> serde_core::de::Deserialize<'de>
 #[non_exhaustive] pub enum oraclemcp_error::ReasonCategory
 pub oraclemcp_error::ReasonCategory::BlockListed
 pub oraclemcp_error::ReasonCategory::CostBudgetExceeded
@@ -357,6 +410,7 @@ pub oraclemcp_error::ErrorEnvelope::is_error: bool
 pub oraclemcp_error::ErrorEnvelope::message: alloc::string::String
 pub oraclemcp_error::ErrorEnvelope::next_steps: alloc::vec::Vec<alloc::string::String>
 pub oraclemcp_error::ErrorEnvelope::ora_code: core::option::Option<i32>
+pub oraclemcp_error::ErrorEnvelope::output_truncation: core::option::Option<oraclemcp_error::OutputTruncation>
 pub oraclemcp_error::ErrorEnvelope::queued_ms: core::option::Option<u64>
 pub oraclemcp_error::ErrorEnvelope::retry_after_ms: core::option::Option<u64>
 pub oraclemcp_error::ErrorEnvelope::statement_outcome: core::option::Option<oraclemcp_error::StatementOutcome>
@@ -515,6 +569,53 @@ pub unsafe fn oraclemcp_error::OptimizerPlanRow::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for oraclemcp_error::OptimizerPlanRow
 pub fn oraclemcp_error::OptimizerPlanRow::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_error::OptimizerPlanRow where T: for<'de> serde_core::de::Deserialize<'de>
+pub struct oraclemcp_error::OutputTruncation
+pub oraclemcp_error::OutputTruncation::kind: oraclemcp_error::OutputLimitKind
+pub oraclemcp_error::OutputTruncation::limit: usize
+pub oraclemcp_error::OutputTruncation::observed: core::option::Option<usize>
+impl core::clone::Clone for oraclemcp_error::OutputTruncation
+pub fn oraclemcp_error::OutputTruncation::clone(&self) -> oraclemcp_error::OutputTruncation
+impl core::cmp::Eq for oraclemcp_error::OutputTruncation
+impl core::cmp::PartialEq for oraclemcp_error::OutputTruncation
+pub fn oraclemcp_error::OutputTruncation::eq(&self, &oraclemcp_error::OutputTruncation) -> bool
+impl core::fmt::Debug for oraclemcp_error::OutputTruncation
+pub fn oraclemcp_error::OutputTruncation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_error::OutputTruncation
+impl core::marker::StructuralPartialEq for oraclemcp_error::OutputTruncation
+impl serde_core::ser::Serialize for oraclemcp_error::OutputTruncation
+pub fn oraclemcp_error::OutputTruncation::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_error::OutputTruncation
+pub fn oraclemcp_error::OutputTruncation::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_error::OutputTruncation
+impl core::marker::Send for oraclemcp_error::OutputTruncation
+impl core::marker::Sync for oraclemcp_error::OutputTruncation
+impl core::marker::Unpin for oraclemcp_error::OutputTruncation
+impl core::marker::UnsafeUnpin for oraclemcp_error::OutputTruncation
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_error::OutputTruncation
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_error::OutputTruncation
+impl<T, U> core::convert::Into<U> for oraclemcp_error::OutputTruncation where U: core::convert::From<T>
+pub fn oraclemcp_error::OutputTruncation::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_error::OutputTruncation where U: core::convert::Into<T>
+pub type oraclemcp_error::OutputTruncation::Error = core::convert::Infallible
+pub fn oraclemcp_error::OutputTruncation::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_error::OutputTruncation where U: core::convert::TryFrom<T>
+pub type oraclemcp_error::OutputTruncation::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_error::OutputTruncation::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_error::OutputTruncation where T: core::clone::Clone
+pub type oraclemcp_error::OutputTruncation::Owned = T
+pub fn oraclemcp_error::OutputTruncation::clone_into(&self, &mut T)
+pub fn oraclemcp_error::OutputTruncation::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_error::OutputTruncation where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_error::OutputTruncation::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_error::OutputTruncation where T: ?core::marker::Sized
+pub fn oraclemcp_error::OutputTruncation::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_error::OutputTruncation where T: ?core::marker::Sized
+pub fn oraclemcp_error::OutputTruncation::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_error::OutputTruncation where T: core::clone::Clone
+pub unsafe fn oraclemcp_error::OutputTruncation::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_error::OutputTruncation
+pub fn oraclemcp_error::OutputTruncation::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_error::OutputTruncation where T: for<'de> serde_core::de::Deserialize<'de>
 pub struct oraclemcp_error::QueryCostRefusal
 pub oraclemcp_error::QueryCostRefusal::estimated_cost: u64
 pub oraclemcp_error::QueryCostRefusal::max_query_cost: u64

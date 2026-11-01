@@ -261,3 +261,5 @@ pub use pool::{
 
 /// Re-export the shared agent-facing error envelope.
 pub use oraclemcp_error as error_envelope;
+/// Shared typed output-cap evidence, also carried by error envelopes.
+pub use oraclemcp_error::{OutputLimitKind, OutputTruncation};

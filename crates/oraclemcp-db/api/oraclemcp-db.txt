@@ -1,4 +1,6 @@
 pub mod oraclemcp_db
+pub use oraclemcp_db::OutputLimitKind
+pub use oraclemcp_db::OutputTruncation
 pub use oraclemcp_db::StatementOutcome
 pub use oraclemcp_db::error_envelope
 pub mod oraclemcp_db::catalog_facts
