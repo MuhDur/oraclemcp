@@ -37,10 +37,10 @@ jobs:
           if ($actual -ne $env:EXPECTED_SHA) {
             throw "Windows proof checked out $actual, expected $env:EXPECTED_SHA"
           }
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: nightly-2026-05-11
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           cache-on-failure: true
       - name: Test Windows workspace libraries and binaries
